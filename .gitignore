@@ -1,0 +1,9 @@
+# 构建产物
+*.exe
+build-core/
+
+# 第三方源码包
+curl-*.tar.gz
+
+# 本地工具状态
+.mimosa/

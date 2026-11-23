@@ -1,0 +1,156 @@
+# ESurfingClient-CVersion > [最新版本](https://github.com/BadGhost520/ESurfingClient-CVersion/releases/latest/)
+
+实验中的临时内存认证模式见 [说明](docs/EphemeralExperimental.md)；尚未完成真实认证和安全验证。
+
+**根据 [Rsplwe](https://github.com/Rsplwe) 佬的 Kotlin 源码编写的纯 C 版本的 `广东` 天翼校园认证客户端** 👍
+
+**使用了 [cJSON](https://github.com/DaveGamble/cJSON), [mongoose](https://github.com/cesanta/mongoose), [curl](https://github.com/curl/curl) 开源库**
+
+**优点是主程序文件超级小 (所有版本均是仅占用 200-300kB 左右的储存空间😋), 并且跨平台跨架构能力超强**
+
+**目前有支持 Windows, Linux, MacOS, OpenWRT, Android(仅二进制文件) 平台**
+
+**安卓安装包和安卓面具模块版可前往 [Ironjhin](https://github.com/Ironjhin) 制作的 [EsurfingClient_Android](https://github.com/Ironjhin/EsurfingClient_Android)**
+
+> [!WARNING]
+> 程序只负责在不同平台登录校园网
+> 
+> 不负责包括但不限于无视用户数限制登录等不合规操作
+>
+> 仅供学习参考
+>
+> 不要让我发现有人拿去做路由器贩卖喔
+
+> [!NOTE]
+> `非广东` 省的地区因为认证流程不同所以不一定可行
+>
+> 正在努力添加功能并修复 bug
+
+> [!TIP]
+> 要是有人能一起维护这个项目, 那将是极好的😋
+
+## 附上作者自用 K2P 路由器安装本包之后的资源占用情况⬇ (图中还安装了 MWAN3 插件)
+
+![Please refresh](docs/assets/1.png) ![Please refresh](docs/assets/2.png) ![Please refresh](docs/assets/3.png)
+
+> [!TIP]
+> 经实测, 运行十天后运行内存占用仅增加 28 kB 左右
+>
+> 初运行 (单账号)
+>
+> VmPeak: 912 kB, VmSize: 800 kB, VmHWM: 536 kB, VmRSS: 536 kB
+>
+> 十天后 (单账号)
+>
+> VmPeak: 1088 kB, VmSize: 884 kB, VmHWM: 668 kB, VmRSS: 564 kB
+> 
+> 4 级信息级日志文件轮换后占用 1 mB 左右
+
+# [更新日志](CHANGELOG.md)
+
+# 目前支持的系统和架构
+
+### 主程序 (插件包)
+
+|  系统   |               架构               | 包管理器 |     理论最低支持版本      |        推荐版本         |
+|:-------:|:--------------------------------:|:--------:|:-------------------------:|:-----------------------:|
+| Windows |        x86_64/x86/aarch64        | portable |     Windows Vista x64     |     Windows 10 x64	      |
+|  Linux  | x86_64/aarch64/armv7/loongarch64 | portable |        glibc 2.36         |       glibc 2.39        |
+| Android |   x86_64/arm64-v8a/armeabi-v7a   | portable |         Android 7         |       Android 10        |
+|  macOS  |              x86_64              | portable |         macOS 12          |        macOS 13         |
+|  macOS  |             aarch64              | portable |         macOS 13          |        macOS 14         |
+| OpenWRT |  [All](docs/OpenWRT_targets.md)  | opkg/apk | OpenWRT 15.05/25.12.0-rc1 | OpenWRT 19.07.0/25.12.0 |
+
+### OpenWRT LuCI 插件包
+
+|  系统   |              架构              | 包管理器 |     理论最低支持版本      |        推荐版本         |
+|:-------:|:------------------------------:|:--------:|:-------------------------:|:-----------------------:|
+| OpenWRT | [All](docs/OpenWRT_targets.md) | opkg/apk | OpenWRT 15.05/25.12.0-rc1 | OpenWRT 19.07.0/25.12.0 |
+
+### OpenWRT 快速架构自查指令
+
+#### opkg 包管理器
+
+```shell
+# 指令
+opkg print-architecture
+# 示例输出
+arch all 1
+arch noarch 1
+arch mipsel_24kc 10 # mipsel_24kc 即为要下载的架构
+```
+
+#### apk 包管理器
+
+```shell
+# 指令
+cat /etc/apk/arch
+# 示例输出
+mipsel_24kc # mipsel_24kc 即为要下载的架构
+```
+
+> [!NOTE]
+> 实在找不到可以在这查 ☞ [吃什么](docs/OpenWRT_targets.md)
+
+> [!TIP]
+> 如果有其它兼容需求, 可以提交一个 issue, 会尝试进行兼容
+> 
+> 务必要在 issue 中提供系统和 cpu 型号, 架构等信息
+>
+> OpenWRT 系统只会有 OpenWRT 官方所支持的架构
+
+# 文档
+
+[**Windows, Linux, MacOS 环境使用教程**](docs/Desktop.md)
+
+[**OpenWRT 环境使用教程**](docs/OpenWRT.md)
+
+[**OpenWRT 进阶 - 多拨教程**](docs/OpenWRT_mwan3.md)
+
+[**程序自行编译教程**](docs/Compile.md)
+
+[**OpenWRT 系统目标平台自查教程**](docs/OpenWRT_targets.md)
+
+[**Q&A**](docs/Q&A.md)
+
+# 其他
+
+## 关于日志系统
+
+- 可控制日志存放路径, OpenWRT 系统默认在 /var/log/esurfing 新建 logs 目录, 非 OpenWRT 系统默认在程序目录新建 logs 目录
+- 程序运行时, logs 目录下会生成实时更新的 run.log 日志文件
+- 程序退出时, run.log 日志文件会被重命名为 <时间>.log (比如 19700101-114514.log)
+- 日志行数超过 10000 行会进行轮转操作
+
+## 广东天翼校园网 QQ 交流群 (转自 [ESurfingPy-CLI](https://github.com/Pandaft/ESurfingPy-CLI))
+
+### 群号: 791455104 [[点此加入]](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=yTA84KiemCppMD5Y2CDepUsnVRo59dOS&authKey=CH%2Bb2yFiTVPqLOjdwrEGXGVvmhWTURTFX8yM5eRA7ipWh5fOKAIpJRqCKDIWZT7V&noverify=0&group_code=791455104)
+
+## 赞助 👍
+
+觉得好的话可以点击这个[神秘小链接](https://ifdian.net/a/badghost)或者下边的微信赞赏码给偶打点钱喵, 谢谢泥喵~
+
+<img alt="Please refresh" height="256" src="docs/assets/4.png" width="256"/>
+
+### 赞助者 ❤
+
+**感谢下面的赞助者支持👍**
+
+#### 爱发电
+
+<img alt="Please refresh" src="docs/assets/fund/aifadian/1.png"/>
+<img alt="Please refresh" src="docs/assets/fund/aifadian/2.png"/>
+<img alt="Please refresh" src="docs/assets/fund/aifadian/3.png"/>
+
+#### 微信
+
+<img alt="Please refresh" height="256" src="docs/assets/fund/wechat/1.jpg" width="256"/>
+<img alt="Please refresh" height="256" src="docs/assets/fund/wechat/2.jpg" width="256"/>
+<img alt="Please refresh" height="256" src="docs/assets/fund/wechat/3.jpg" width="256"/>
+<img alt="Please refresh" height="256" src="docs/assets/fund/wechat/4.png" width="256"/>
+<img alt="Please refresh" height="256" src="docs/assets/fund/wechat/5.png" width="256"/>
+<img alt="Please refresh" height="256" src="docs/assets/fund/wechat/6.png" width="256"/>
+<img alt="Please refresh" height="256" src="docs/assets/fund/wechat/7.jpg" width="256"/>
+<img alt="Please refresh" height="256" src="docs/assets/fund/wechat/8.jpg" width="256"/>
+<img alt="Please refresh" height="256" src="docs/assets/fund/wechat/9.png" width="256"/>
+<img alt="Please refresh" height="256" src="docs/assets/fund/wechat/10.png" width="256"/>
