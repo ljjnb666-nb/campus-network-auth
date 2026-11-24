@@ -15,13 +15,11 @@ extern bool get_service_mode(void);
 
 #ifndef __OPENWRT__
 extern void restart_process(void);
-extern void stop_web_server(void);
 #include "control/Control.h"
 
 #ifndef __OPENWRT__
 #include "net/NetClient.h"
 #include "net/NetTraffic.h"
-#include "webserver/HotspotControl.h"
 #endif
 #endif
 
@@ -58,9 +56,7 @@ void shut(const int8_t exit_code)
 
 #ifndef __OPENWRT__
     /**
-     * 先停 Web 服务器与网速采样/探测线程: 它们会写日志, 必须赶在日志收尾之前停干净。
-     * 热点状态线程放最后停 —— 它的 join 可能要等一次最长 10~30 秒的 PowerShell,
-     * 放前面会把整个关闭预算耗光, 让系统强杀跳过后续清理 (它是独立进程, 自己会结束)
+     * 先停网速采样/探测线程: 它们会写日志, 必须赶在日志收尾之前停干净。
      */
 #ifndef __OPENWRT__
     net_traffic_stop();
@@ -68,15 +64,6 @@ void shut(const int8_t exit_code)
 #endif
 
     control_server_stop(); // 先停止接受控制请求
-
-    if (g_is_webserver_running)
-    {
-        LOG_DEBUG("关闭 Web 服务器");
-        stop_web_server();
-    }
-#ifndef __OPENWRT__
-    hotspot_control_stop();
-#endif
 #endif
 
     if (g_thread_keep_alive)

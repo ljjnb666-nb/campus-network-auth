@@ -33,10 +33,6 @@ extern bool get_service_mode(void);
 #include "net/NetTraffic.h"
 
 #include "supervisor/Supervisor.h"
-
-#include "webserver/HotspotControl.h"
-
-extern bool start_web_server_remote(void);
 #endif
 
 typedef enum
@@ -92,9 +88,9 @@ bool app_bootstrap(void)
      * - 手动不带参数运行 (standalone) 也是入口, 照打
      */
 #ifdef __OPENWRT__
-    const bool need_banner = (g_prog_role != ROLE_WEB) && (g_prog_account <= 1);
+    const bool need_banner = (g_prog_account <= 1);
 #else
-    const bool need_banner = (g_prog_role != ROLE_AUTH && g_prog_role != ROLE_WEB);
+    const bool need_banner = (g_prog_role != ROLE_AUTH);
 #endif
 
     if (need_banner)
@@ -492,8 +488,11 @@ static bool wait_for_cfg(void)
 /**
  * @brief 配置不可用时停住等用户改 (桌面端) 或者退出交给外部监管者 (OpenWrt)
  *
+ * 仅 OpenWrt 构建会调用 (桌面端的调用方在已删除的 Web 进程流程里)
+ *
  * @return true 表示配置已经可用了, false 表示已经/正在退出, 调用方不必再往下走
  */
+#ifdef __OPENWRT__
 static bool hold_for_cfg(void)
 {
 #ifdef __OPENWRT__
@@ -508,69 +507,7 @@ static bool hold_for_cfg(void)
 
 #endif
 }
-
-#ifndef __OPENWRT__
-
-/**
- * @brief Web 进程主流程 (只提供网页服务, 不参与认证)
- *
- * 认证状态与"重新认证 / 应用新配置"都通过控制通道交给认证进程
- * @return 进程退出码
- */
-static int work_web(void)
-{
-    if (app_bootstrap() == false) return 1;
-
-    /**
-     * 顺序与认证进程一致: 先加载配置 (即使不可用, Web 服务的端口也已经就位),
-     * 再把网页起起来, 配置不可用时就停在这里等用户改。
-     *
-     * 不能一见配置不可用就退出: 监管者只会按退避策略反复拉起, 而用户需要的
-     * 恰恰是这个网页 —— 它是把配置改回来的入口
-     */
-    const bool cfg_ok = load_cfg();
-
-    if (start_web_server_remote() == false) shut(1);
-
-    // 网页上的卡片: 实时网速与联网状态由本进程的采样/探测线程提供, 热点开关按需调用
-    net_traffic_start();
-    net_probe_start();
-    hotspot_control_start();
-
-    if (cfg_ok == false)
-    {
-        if (hold_for_cfg() == false) shut(0);
-    }
-
-    LOG_DEBUG("以 Web 进程运行, 展示配置 %" PRIu8, g_prog_status[0].cfg.idx);
-
-    // Web 服务在独立线程里跑, 主线程只等退出
-    while (g_need_exit == false && !stop_requested())
-    {
-        if (supervisor_gone())
-        {
-            LOG_WARN("守护进程已退出, 本进程一并退出");
-            break;
-        }
-
-        /**
-         * 跟着配置文件走: 用户在网页上保存过配置之后, 本进程展示的值也要跟上
-         * (认证与"应用配置"是认证进程那边的事, 这里只是把配置重新读一遍);
-         * 配置变得不可用时回到"等配置"状态 —— 这样网页上的"保存并应用"就能像
-         * 启动时那样直接把配置重新读起来, 而不是回一句"认证进程不可达"
-         */
-        if (wait_cfg_usable() == false && g_cfg_loaded == false)
-        {
-            if (hold_for_cfg() == false) shut(0);
-        }
-    }
-
-    LOG_DEBUG("Web 进程退出");
-    shut(0); // 停 Web 服务线程、收尾日志, 不会返回
-    return 0;
-}
-
-#endif
+#endif /* __OPENWRT__ */
 
 /**
  * @brief 抢"单实例锁"
@@ -578,7 +515,6 @@ static int work_web(void)
  * 同类型实例只能有一个:
  * - 认证进程按账号 (auth-N) —— 两个同账号进程同时认证会互相把对方踢下线, 只能手动杀进程
  * - supervisor / standalone 用 main
- * - Web 子进程用 web
  *
  * POSIX 用 /tmp 下的锁文件 + flock, Windows 用命名互斥; fd / 句柄都故意不关,
  * 交给进程退出时释放。Windows 重启时旧进程还没退干净, 所以重试等最多 3 秒。
@@ -632,10 +568,6 @@ void work(void)
     {
         snprintf(lock_key, sizeof(lock_key), "auth-%" PRIu8, g_prog_account);
     }
-    else if (g_prog_role == ROLE_WEB)
-    {
-        snprintf(lock_key, sizeof(lock_key), "web");
-    }
     else
     {
         snprintf(lock_key, sizeof(lock_key), "main");
@@ -674,11 +606,6 @@ void work(void)
     if (g_prog_role == ROLE_SUPERVISOR)
     {
         exit(work_supervisor());
-    }
-
-    if (g_prog_role == ROLE_WEB)
-    {
-        exit(work_web());
     }
 
 #else

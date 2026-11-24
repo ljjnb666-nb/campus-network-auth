@@ -29,7 +29,7 @@ internal static class Program
     private const string OfficialExe = @"C:\Program Files (x86)\Chinatelecom_GDPortal\ESurfingClient.exe";
     private const string CoreResource = "Chezhi.AuthCore";
     private const string LicenseResource = "Chezhi.Licenses";
-    private const string CoreHash = "5C241141A7AD5D2829D3F4ED0C65512C6383A0F608A30B1D113781A85C65A77C";
+    private const string CoreHash = "A691A52D6536E4CE190279D1A676F9C128E453B30D1286BAB63F59B99A77DDB3";
     private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
     private const string CredentialFileName = "credentials.v1.dat";
     private static string tempDir;
@@ -1348,18 +1348,6 @@ internal static class Program
                 if (modern != null) modern.Kind = (ButtonKind)button.Tag;
                 else ApplyButtonLook(button, (ButtonKind)button.Tag);
             };
-        }
-
-        private static void StyleSmallButton(Button button)
-        {
-            var modern = button as ModernButton;
-            if (modern != null) { modern.Kind = ButtonKind.Normal; modern.CornerRadius = 4; return; }
-            button.FlatStyle = FlatStyle.Flat; button.Cursor = Cursors.Hand;
-            button.FlatAppearance.BorderSize = 1;
-            button.FlatAppearance.BorderColor = Color.FromArgb(209, 213, 219);
-            button.BackColor = Color.White; button.ForeColor = Color.FromArgb(51, 65, 85);
-            button.FlatAppearance.MouseOverBackColor = Color.FromArgb(243, 244, 246);
-            button.FlatAppearance.MouseDownBackColor = Color.FromArgb(229, 231, 235);
         }
 
         // 状态指示点: 底色圆点 + 进行中的呼吸脉冲外环

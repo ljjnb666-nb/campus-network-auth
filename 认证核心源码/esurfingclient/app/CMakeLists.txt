@@ -127,7 +127,6 @@ add_executable(ESurfingClient
 
 if (NOT __OPENWRT__)
     target_sources(ESurfingClient PRIVATE
-            third_party/mongoose/mongoose.c
             src/control/ControlClient.c
             src/control/ControlServer.c
             src/supervisor/SupervisorSignal.c
@@ -137,24 +136,6 @@ if (NOT __OPENWRT__)
             src/utils/sim/SimProcess.c
             src/net/NetTraffic.c
             src/utils/runtime/ChildRun.c
-            src/webserver/HotspotControl.c
-            src/webserver/WebLogFiles.c
-            src/webserver/WebApiPost.c
-            src/webserver/WebApiGet.c
-            src/webserver/WebServer.c
-            src/webserver/WebServe.c
-    )
-
-    add_custom_target(CopyPortal ALL
-            COMMAND ${CMAKE_COMMAND} -E remove_directory "${CMAKE_CURRENT_BINARY_DIR}/portal"
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
-                "${CMAKE_CURRENT_SOURCE_DIR}/portal"
-                "${CMAKE_CURRENT_BINARY_DIR}/portal"
-            COMMENT "Copy 'portal' to build dir"
-    )
-
-    add_dependencies(ESurfingClient
-            CopyPortal
     )
 endif ()
 
@@ -195,9 +176,6 @@ else ()
 endif ()
 
 target_compile_options(ESurfingClient PRIVATE -Os)
-
-# 静态目录不需要目录列表: 关掉 mongoose 的 dirlist, 少一个信息泄露面
-target_compile_definitions(ESurfingClient PRIVATE MG_ENABLE_DIRLIST=0)
 
 target_compile_options(ESurfingClient PRIVATE -Wall -Wextra -Wno-unused-parameter)
 

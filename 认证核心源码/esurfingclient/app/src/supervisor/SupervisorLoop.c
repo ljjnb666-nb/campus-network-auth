@@ -280,13 +280,6 @@ static bool supervisor_build_children(void)
         return g_child_count > 0;
     }
 
-    child_t* web_child = &g_children[g_child_count];
-    memset(web_child, 0, sizeof(*web_child));
-    web_child->handle = CHILD_HANDLE_INVALID;
-    web_child->kind = CHILD_WEB;
-    web_child->control_port = child_control_port(CHILD_WEB, g_child_count);
-    g_child_count++;
-
     return true;
 }
 
@@ -294,11 +287,10 @@ int work_supervisor(void)
 {
     if (app_bootstrap() == false) return 1;
 
-    LOG_DEBUG(" - 以守护进程运行: 认证与 Web 各起独立进程");
+    LOG_DEBUG(" - 以守护进程运行: 各账号认证起独立进程");
 
     /**
-     * 配置不可用时仍然要起来 (启动 Web 子进程), 所以这里不返回失败:
-     * 网页正是用户把配置改回来的入口, 而服务模式下没有网页就等于没有出路。
+     * 配置不可用时仍然要起来, 所以这里不返回失败。
      *
      * 配置有问题时监管者会被反复重启 (systemd/procd/SCM 的重启策略),
      * 失败路径刻意【不】调 clean_logger(): 它会做两件事 —— 关句柄 (exit() 本来也会关)
@@ -308,7 +300,7 @@ int work_supervisor(void)
 
     if (s_cfg_usable == false)
     {
-        LOG_WARN("配置暂不可用, 先只启动 Web 进程, 请在网页界面上改好配置");
+        LOG_WARN("配置暂不可用, 请直接修改配置文件");
         LOG_INFO("配置文件路径: %s", get_config_path());
     }
 
@@ -333,11 +325,9 @@ int work_supervisor(void)
     /**
      * 控制通道端口: 默认端口被别的程序占着时自动往后顺延
      *
-     * 每个认证子进程占一个端口 (base + 下标), Web 子进程连 base。默认的 8890
+     * 每个认证子进程占一个端口 (base + 下标)。默认的 8890
      * 在本机就遇到过被系统进程 (dllhost) 监听, 结果认证进程绑不上、远程控制整体
-     * 降级 —— 网页显示"认证进程不可达", 重启只能强杀。所以这里先探一遍再下发。
-     *
-     * Web 服务端口 (配置里的 web_port) 不在此列: 那是用户明确指定的, 冲突就报错。
+     * 降级, 重启只能强杀。所以这里先探一遍再下发。
      */
     const uint16_t picked_port = supervisor_pick_control_port(g_control_port, g_prog_cnt);
     if (picked_port != g_control_port)

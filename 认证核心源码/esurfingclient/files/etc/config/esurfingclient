@@ -1,2 +1,0 @@
-config global 'config'
-	option dir '/etc/esurfingclient'

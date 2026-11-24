@@ -64,10 +64,6 @@ uint8_t g_prog_account = 0;
 
 uint16_t g_control_port = CONTROL_DEFAULT_PORT;
 
-uint16_t g_web_port = DEFAULT_WEB_PORT;
-
-bool g_web_external_acc = DEFAULT_WEB_EXTERNAL_ACC;
-
 char g_control_token[CONTROL_TOKEN_LEN] = {0};
 
 int g_main_argc = 0;
@@ -147,8 +143,6 @@ child_t g_children[SUPERVISOR_MAX_CHILDREN];
 stop_flag_t g_supervisor_stop = 0;
 
 bool g_thread_keep_alive = false;
-
-bool g_is_webserver_running = false;
 
 bool g_need_exit = false;
 

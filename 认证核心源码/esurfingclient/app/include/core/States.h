@@ -103,10 +103,6 @@ typedef struct
 
 #define DEFAULT_CHANNEL 1
 
-#define DEFAULT_WEB_PORT 8888
-
-#define DEFAULT_WEB_EXTERNAL_ACC false
-
 typedef enum
 {
     GET_TICKET = 1,
@@ -178,10 +174,8 @@ typedef struct
 
     /* ---- 全局配置 (每个账号一份, 值相同; 保存时用第一份) ---- */
     bool enabled;
-    bool web_external_acc;
     long log_lv;
     char log_dir[CFG_LOG_DIR_LEN];
-    uint16_t web_port;
     long conn_timeout;
     long op_timeout;
     probe_host_t probe_hosts[PROBE_HOST_MAX];
@@ -236,10 +230,6 @@ bool stop_requested(void);
 extern uint8_t g_prog_account;
 
 extern uint16_t g_control_port;
-
-extern uint16_t g_web_port;
-
-extern bool g_web_external_acc;
 
 extern char g_control_token[CONTROL_TOKEN_LEN];
 
@@ -313,8 +303,6 @@ extern bool g_list_only;
 extern int g_child_count;
 
 extern bool g_thread_keep_alive;
-
-extern bool g_is_webserver_running;
 
 extern bool g_need_exit;
 

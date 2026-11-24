@@ -1,6 +1,6 @@
 ﻿$ErrorActionPreference = 'Stop'
 $core = Join-Path $PSScriptRoot '认证核心.exe'
-$expected = '5C241141A7AD5D2829D3F4ED0C65512C6383A0F608A30B1D113781A85C65A77C'
+$expected = 'A691A52D6536E4CE190279D1A676F9C128E453B30D1286BAB63F59B99A77DDB3'
 if ((Get-FileHash -LiteralPath $core -Algorithm SHA256).Hash -ne $expected) { throw '认证核心哈希不符，未构建。' }
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $refs = @('/r:System.dll','/r:System.Core.dll','/r:System.Drawing.dll','/r:System.Windows.Forms.dll','/r:System.Web.Extensions.dll','/r:System.ServiceProcess.dll','/r:System.Management.dll','/r:System.Security.dll')

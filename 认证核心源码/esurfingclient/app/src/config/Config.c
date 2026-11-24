@@ -109,12 +109,10 @@ static void clear_ephemeral_input(void)
 
 static const char s_default_cfg[] = "{\n"
                                     "   \"enabled\": false,\n"
-                                    "   \"web_external_acc\": false,\n"
                                     "   \"log_lv\": 4,\n"
                                     "   \"log_dir\": \"./\",\n"
                                     "   \"conn_timeout\": 10,\n"
                                     "   \"op_timeout\": 15,\n"
-                                    "   \"web_port\": 8888,\n"
                                     "   \"probe_hosts\": [\n"
                                     "       {\n"
                                     "           \"host\": \"connectivitycheck.platform.hicloud.com\",\n"
@@ -153,25 +151,6 @@ static long cfg_read_num(const cJSON* obj, const char* name, const long def)
         return def;
     }
     return item->valueint;
-}
-
-/**
- * @brief 读一个布尔字段, 缺失/类型不对就用默认值 (并打一行日志)
- */
-static bool cfg_read_bool(const cJSON* obj, const char* name, const bool def)
-{
-    const cJSON* item = cJSON_GetObjectItem(obj, name);
-    if (item == NULL)
-    {
-        LOG_DEBUG("%s 参数不存在, 使用默认值 %s", name, def ? "true" : "false");
-        return def;
-    }
-    if (cJSON_IsBool(item) == false)
-    {
-        LOG_WARN("%s 参数不正确 (应为 true / false), 使用默认值 %s", name, def ? "true" : "false");
-        return def;
-    }
-    return cJSON_IsTrue(item);
 }
 
 /**
@@ -268,12 +247,10 @@ static bool save_cfg_from_cfg(const cJSON* cfg_json)
     if (root == NULL) return false;
 
     cJSON_AddBoolToObject(root, "enabled", global->enabled);
-    cJSON_AddBoolToObject(root, "web_external_acc", global->web_external_acc);
     cJSON_AddNumberToObject(root, "log_lv", global->log_lv);
     cJSON_AddStringToObject(root, "log_dir", global->log_dir);
     cJSON_AddNumberToObject(root, "conn_timeout", global->conn_timeout);
     cJSON_AddNumberToObject(root, "op_timeout", global->op_timeout);
-    cJSON_AddNumberToObject(root, "web_port", global->web_port);
 
     cJSON* probes = cJSON_AddArrayToObject(root, "probe_hosts");
     for (uint8_t i = 0; probes != NULL && i < global->probe_host_count; i++)
@@ -710,20 +687,6 @@ bool load_cfg(void)
     }
 
     /**
-     * Web 服务端口与是否允许外部访问
-     *
-     * 只有桌面端有 Web 服务 (OpenWrt 版不带 Web 服务), 那边这两个参数
-     * 解析出来也没人用, 但配置文件的格式是同一套, 这里就一起读掉。
-     *
-     * 必须排在下面所有"配置不可用"的判断之前: 配置被禁用 / 账号没填好时,
-     * 程序会带着网页停在"等配置"的状态, 网页要按配置里的端口监听 ——
-     * 排在后面的话就只能按默认端口开出去了
-     */
-    const long web_port = cfg_read_num(cfg_json, "web_port", DEFAULT_WEB_PORT);
-    g_web_port = (web_port >= 1 && web_port <= 65535) ? (uint16_t)web_port : DEFAULT_WEB_PORT;
-    g_web_external_acc = cfg_read_bool(cfg_json, "web_external_acc", DEFAULT_WEB_EXTERNAL_ACC);
-
-    /**
      * 从这里开始"尽力解析": 配置不可用 (被禁用 / 账号没填全) 时不再半路返回,
      * 而是把能读出来的值照样填进内存, 只用 usable 记下它不可用。
      *
@@ -1017,11 +980,9 @@ bool load_cfg(void)
         cfg_t* global_cfg = &g_prog_status[0].cfg;
 
         global_cfg->enabled = g_prog_enabled;
-        global_cfg->web_external_acc = g_web_external_acc;
         global_cfg->log_lv = log_lv;
         snprintf(global_cfg->log_dir, sizeof(global_cfg->log_dir), "%s",
             log_dir != NULL ? log_dir : get_logger_dir_cfg());
-        global_cfg->web_port = g_web_port;
         global_cfg->conn_timeout = g_conn_timeout;
         global_cfg->op_timeout = g_op_timeout;
 

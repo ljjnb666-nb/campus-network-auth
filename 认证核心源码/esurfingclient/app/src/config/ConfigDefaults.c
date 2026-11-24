@@ -31,13 +31,11 @@ typedef struct
 } cfg_def_t;
 
 static const cfg_def_t s_cfg_defaults[] = {
-    {"enabled",          CFG_DEF_BOOL, false, 0, NULL, NULL},
-    {"web_external_acc", CFG_DEF_BOOL, DEFAULT_WEB_EXTERNAL_ACC, 0, NULL, NULL},
-    {"log_lv",           CFG_DEF_NUM, false, LOG_LEVEL_INFO, NULL, NULL},
-    {"log_dir",          CFG_DEF_STR, false, 0, DEFAULT_LOG_DIR, NULL},
-    {"conn_timeout",     CFG_DEF_NUM, false, DEFAULT_CONN_TIMEOUT, NULL, "秒"},
-    {"op_timeout",       CFG_DEF_NUM, false, DEFAULT_OP_TIMEOUT, NULL, "秒"},
-    {"web_port",         CFG_DEF_NUM, false, DEFAULT_WEB_PORT, NULL, NULL},
+    {"enabled",      CFG_DEF_BOOL, false, 0, NULL, NULL},
+    {"log_lv",       CFG_DEF_NUM, false, LOG_LEVEL_INFO, NULL, NULL},
+    {"log_dir",      CFG_DEF_STR, false, 0, DEFAULT_LOG_DIR, NULL},
+    {"conn_timeout", CFG_DEF_NUM, false, DEFAULT_CONN_TIMEOUT, NULL, "秒"},
+    {"op_timeout",   CFG_DEF_NUM, false, DEFAULT_OP_TIMEOUT, NULL, "秒"},
 };
 
 static const cfg_def_t s_account_defaults[] = {
