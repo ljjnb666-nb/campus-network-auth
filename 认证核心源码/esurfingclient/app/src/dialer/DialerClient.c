@@ -39,7 +39,8 @@ typedef enum
 {
     RUN_SUCCESS = 0,
     RUN_FAILED = 1,
-    TIMEOUT_RETRY = 2
+    TIMEOUT_RETRY = 2,
+    RUN_NETWORK_EXHAUSTED = 3
 } RunStatus;
 
 /**
@@ -362,7 +363,7 @@ static RunStatus run(void)
         if (retry_timeout > 5)
         {
             LOG_ERROR("超过最多重试次数");
-            return RUN_FAILED;
+            return RUN_NETWORK_EXHAUSTED;
         }
         LOG_WARN("网络错误, 等待 10 秒后重试, 重试: 第 %" PRIu8 " 次, 最多 5 次",
             retry_timeout);
@@ -427,11 +428,11 @@ int dialer_app(void* arg)
 
         const RunStatus run_status = run();
         // 如果 run 函数返回 RUN_FAILED 或需要重置, 则退出循环
-        if (run_status == RUN_FAILED)
+        if (run_status == RUN_FAILED || run_status == RUN_NETWORK_EXHAUSTED)
         {
             LOG_ERROR("线程出现错误, 正在退出");
             g_prog_status[tl_thread_idx].runtime_status.is_running = false;
-            exit_code = 1; // 认证进程据此退出, 交给外部监管者重新拉起
+            exit_code = run_status == RUN_NETWORK_EXHAUSTED ? DIALER_EXIT_NETWORK_EXHAUSTED : 1;
             break;
         }
         if (g_prog_status[tl_thread_idx].runtime_status.is_need_reauth)

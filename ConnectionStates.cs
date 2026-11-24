@@ -14,6 +14,7 @@ internal static class ConnectionStates
 
     // 认证核心子进程状态
     internal enum CoreState { NotStarted, Starting, Running, Stopping, Exited, Crashed }
+    internal enum FailureKind { Authentication, Network, Runtime }
 
     // 天翼官方后台服务状态
     internal enum ServiceState { Unknown, NotInstalled, Running, Stopped, Transitioning, Failed }
@@ -44,6 +45,7 @@ internal sealed class ConnectionState
     private ConnectionStates.CoreState core = ConnectionStates.CoreState.NotStarted;
     private ConnectionStates.NetworkState network = ConnectionStates.NetworkState.Unknown;
     private ConnectionStates.ServiceState service = ConnectionStates.ServiceState.Unknown;
+    internal ConnectionStates.FailureKind Failure { get; set; }
     internal ConnectionStates.HandoffState Handoff { get; private set; }
     internal void SetHandoff(ConnectionStates.HandoffState next) { Handoff = next; }
 
@@ -126,7 +128,8 @@ internal sealed class ConnectionState
                 case ConnectionStates.AuthState.AuthenticatedBySession: return network == ConnectionStates.NetworkState.InternetAvailable ? "已联网·会话" : "网络待确认";
                 case ConnectionStates.AuthState.LoggingOut: return "登出中";
                 case ConnectionStates.AuthState.RetryScheduled: return "等待重试";
-                case ConnectionStates.AuthState.Failed: return "认证失败";
+                case ConnectionStates.AuthState.Failed: return Failure == ConnectionStates.FailureKind.Network ? "网络异常" :
+                    Failure == ConnectionStates.FailureKind.Runtime ? "运行中断" : "认证失败";
                 default: return "未连接";
             }
         }

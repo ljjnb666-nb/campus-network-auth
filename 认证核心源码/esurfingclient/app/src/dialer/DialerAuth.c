@@ -438,9 +438,15 @@ int work_auth(void)
          */
         if (g_need_exit || stop_requested()) break;
 
+        if (auth_code == DIALER_EXIT_NETWORK_EXHAUSTED && g_ephemeral_auth)
+        {
+            ephemeral_emit_event("network_retry_exhausted", DIALER_EXIT_NETWORK_EXHAUSTED);
+            return auth_code;
+        }
         if (auth_code != 0)
         {
-            if (g_ephemeral_auth) { fputs("EPHEMERAL_AUTH_FAILED\n", stderr); fflush(stderr); ephemeral_emit_event("auth_failed", auth_code); }
+            // A generic runtime failure does not prove credential rejection.
+            if (g_ephemeral_auth) ephemeral_emit_event("core_failed", auth_code);
             LOG_ERROR("配置 %" PRIu8 " 认证失败, 进程退出, 由外部监管者重新拉起", g_prog_status[0].cfg.idx);
             return auth_code;
         }
