@@ -35,7 +35,7 @@ internal sealed class ConnectionState
     {
         // 静止态可进入任意活动态；活动态之间允许核心驱动的正常流转；
         // 关键不变量：用户停止/退出后不允许"自动回到已认证"（只能经 Authenticating 重新获得）。
-        { ConnectionStates.AuthState.Idle, new[] { ConnectionStates.AuthState.WaitingForNetwork, ConnectionStates.AuthState.Authenticating } },
+        { ConnectionStates.AuthState.Idle, new[] { ConnectionStates.AuthState.WaitingForNetwork, ConnectionStates.AuthState.Authenticating, ConnectionStates.AuthState.Failed } },
         { ConnectionStates.AuthState.WaitingForNetwork, new[] { ConnectionStates.AuthState.Authenticating, ConnectionStates.AuthState.Authenticated, ConnectionStates.AuthState.AuthenticatedBySession, ConnectionStates.AuthState.Idle, ConnectionStates.AuthState.Failed, ConnectionStates.AuthState.LoggingOut } },
         { ConnectionStates.AuthState.Authenticating, new[] { ConnectionStates.AuthState.Authenticated, ConnectionStates.AuthState.AuthenticatedBySession, ConnectionStates.AuthState.Failed, ConnectionStates.AuthState.WaitingForNetwork, ConnectionStates.AuthState.LoggingOut, ConnectionStates.AuthState.Idle } },
         { ConnectionStates.AuthState.Authenticated, new[] { ConnectionStates.AuthState.Reauthenticating, ConnectionStates.AuthState.WaitingForNetwork, ConnectionStates.AuthState.LoggingOut, ConnectionStates.AuthState.Failed, ConnectionStates.AuthState.Idle } },

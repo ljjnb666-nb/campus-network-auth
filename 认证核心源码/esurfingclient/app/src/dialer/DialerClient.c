@@ -297,6 +297,7 @@ static RunStatus run(void)
             reset();
             g_prog_status[tl_thread_idx].runtime_status.is_running = true;
         }
+        ephemeral_emit_event("auth_start", 0);
         if (auth() != AUTH_SUCCESS)
         {
             if (g_prog_status[tl_thread_idx].runtime_status.is_running == false)
@@ -324,6 +325,7 @@ static RunStatus run(void)
             uint64_t wait_minutes = 0;
             if (kind == AUTH_ERROR_FATAL)
             {
+                ephemeral_emit_event("auth_failed", 1);
                 /**
                  * 密码错 / 账号不存在 / 版本被停用 / 被限制共享 这类错误, 重试多少次都是同一个结果,
                  * 反而会因为反复失败触发服务端的登录频率限制, 所以停下来等用户处理:

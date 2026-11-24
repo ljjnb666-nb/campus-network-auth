@@ -1,83 +1,186 @@
 using System;
 using System.IO;
 using System.Text;
+using System.Web.Script.Serialization;
+using System.Collections.Generic;
 
-// 服务操作事务记录（A09）：每次服务切换（准备连接=停用天翼服务 / 恢复天翼）由
-// GUI 在提权子进程启动前写入 pending 记录，子进程退出后回写结果。若程序中途
-// 异常退出，记录保持 pending——下次启动 GUI 识别并提示用户"经授权的恢复选项"。
-// 记录仅含服务状态与结果码，不含任何凭据。
+// Persist recovery responsibility separately from the outcome of the last action.
+// A pending operation is uncertain, never proof that a service was changed.
 internal sealed class ServiceJournal
 {
     private readonly string filePath;
-
     private ServiceJournal(string path) { filePath = path; }
 
-    internal string Action { get; private set; }        // "prepare" / "restore"
-    internal string StateBefore { get; private set; }   // 操作前服务状态
-    internal string Result { get; private set; }        // "pending" / "ok" / "failed:<code>"
+    internal string Action { get; private set; }
+    internal string StateBefore { get; private set; }
+    internal string Result { get; private set; }
     internal string TimeUtc { get; private set; }
+    internal string OperationId { get; private set; }
+    internal bool NeedsRecovery { get; private set; }
+    internal bool Uncertain { get; private set; }
+    internal bool Invalid { get; private set; }
+    internal bool HasPending { get { return Result == "pending"; } }
 
     internal static string DefaultPath()
     {
         return Path.Combine(CredentialStore.DefaultDirectory(), "service-journal.v1.json");
     }
 
+    private static bool ValidState(string value)
+    {
+        return value == "Running" || value == "Stopped" || value == "NotInstalled" ||
+            value == "StartPending" || value == "StopPending" || value == "ContinuePending" ||
+            value == "PausePending" || value == "Paused" || value == "unknown";
+    }
+    private static string StringField(Dictionary<string, object> obj, string key)
+    {
+        object value;
+        return obj.TryGetValue(key, out value) ? value as string : null;
+    }
+    private static bool BoolField(Dictionary<string, object> obj, string key)
+    {
+        object value;
+        if (!obj.TryGetValue(key, out value) || !(value is bool)) throw new InvalidDataException();
+        return (bool)value;
+    }
+    private static void RejectReparsePoint(string path)
+    {
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new IOException("Unexpected reparse point.");
+    }
     internal static ServiceJournal Load(string path)
     {
         var j = new ServiceJournal(path);
         try
         {
-            if (File.Exists(path))
+            if (!File.Exists(path)) return j;
+            RejectReparsePoint(path);
+            if (new FileInfo(path).Length > 4096) throw new InvalidDataException();
+            var obj = new JavaScriptSerializer { MaxJsonLength = 4096, RecursionLimit = 4 }
+                .DeserializeObject(File.ReadAllText(path, Encoding.UTF8)) as Dictionary<string, object>;
+            if (obj == null) throw new InvalidDataException();
+            j.Action = StringField(obj, "action");
+            j.StateBefore = StringField(obj, "state");
+            j.Result = StringField(obj, "result");
+            j.TimeUtc = StringField(obj, "time");
+            if ((j.Action != "prepare" && j.Action != "restore") || !ValidState(j.StateBefore) ||
+                String.IsNullOrEmpty(j.Result) || !(j.Result == "pending" || j.Result == "ok" ||
+                j.Result == "cancelled" || j.Result.StartsWith("failed:", StringComparison.Ordinal))) throw new InvalidDataException();
+            if (obj.ContainsKey("v"))
             {
-                string raw = File.ReadAllText(path, Encoding.UTF8);
-                j.Action = Field(raw, "action");
-                j.StateBefore = Field(raw, "state");
-                j.Result = Field(raw, "result");
-                j.TimeUtc = Field(raw, "time");
+                if (!(obj["v"] is int) || (int)obj["v"] != 2) throw new InvalidDataException();
+                j.OperationId = StringField(obj, "operationId");
+                Guid id;
+                if (!Guid.TryParse(j.OperationId, out id)) throw new InvalidDataException();
+                j.NeedsRecovery = BoolField(obj, "needsRecovery");
+                j.Uncertain = BoolField(obj, "uncertain");
+            }
+            else
+            {
+                // Migrate legacy journals conservatively: successful prepare with a
+                // previously running service is a possible outstanding restoration.
+                j.OperationId = Guid.NewGuid().ToString("N");
+                j.NeedsRecovery = j.Action == "prepare" && j.StateBefore == "Running" && j.Result == "ok";
+                j.Uncertain = j.Result == "pending" || (j.Action == "prepare" && j.Result.StartsWith("failed:", StringComparison.Ordinal));
             }
         }
-        catch { j.Result = null; } // 读取失败按"无记录"处理（fail-open 提示层面，操作层面仍 fail-closed）
+        catch
+        {
+            j.Invalid = true; j.Uncertain = true;
+            j.Action = null; j.StateBefore = null; j.Result = null; j.TimeUtc = null;
+        }
         return j;
     }
 
-    // 字段值提取：格式固定为 {"action":"prepare",...}，值不含引号与转义（枚举/时间戳）
-    private static string Field(string json, string name)
+    private void Write()
     {
-        string marker = "\"" + name + "\":\"";
-        int start = json.IndexOf(marker, StringComparison.Ordinal);
-        if (start < 0) return null;
-        start += marker.Length;
-        int end = json.IndexOf('"', start);
-        if (end < 0) return null;
-        return json.Substring(start, end - start);
-    }
-
-    private void Write(string action, string state, string result)
-    {
-        Action = action; StateBefore = state; Result = result;
-        TimeUtc = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
+        if (Invalid) throw new InvalidDataException("Existing journal requires review.");
         string dir = Path.GetDirectoryName(filePath);
-        if (!String.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-        string json = "{\"action\":\"" + action + "\",\"state\":\"" + state +
-            "\",\"result\":\"" + result + "\",\"time\":\"" + TimeUtc + "\"}";
-        string temp = filePath + ".tmp";
-        File.WriteAllText(temp, json, Encoding.UTF8);
-        if (File.Exists(filePath)) File.Replace(temp, filePath, null);
-        else File.Move(temp, filePath);
+        Directory.CreateDirectory(dir);
+        RejectReparsePoint(dir);
+        if (File.Exists(filePath)) RejectReparsePoint(filePath);
+        TimeUtc = DateTime.UtcNow.ToString("o");
+        var json = new JavaScriptSerializer().Serialize(new
+        {
+            v = 2, action = Action, state = StateBefore, result = Result, time = TimeUtc,
+            operationId = OperationId, needsRecovery = NeedsRecovery, uncertain = Uncertain
+        });
+        string temp = filePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(json);
+            using (var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+            {
+                output.Write(bytes, 0, bytes.Length); output.Flush(true);
+            }
+            if (File.Exists(filePath)) File.Replace(temp, filePath, null);
+            else File.Move(temp, filePath);
+        }
+        finally { if (File.Exists(temp)) try { File.Delete(temp); } catch { } }
     }
 
-    internal bool HasPending { get { return Result == "pending" && (Action == "prepare" || Action == "restore"); } }
-
-    /// <summary>提权子进程启动前：写入 pending 记录。</summary>
-    internal void Begin(string action, string stateBefore) { Write(action, stateBefore, "pending"); }
-
-    /// <summary>子进程退出后：回写结果。code=0 成功；非 0 为子进程退出码；null=未知。</summary>
-    internal void Complete(int? code) { Write(Action ?? "?", StateBefore ?? "?", code == null ? "failed:unknown" : (code == 0 ? "ok" : "failed:" + code)); }
-
-    /// <summary>清除记录（用户明确放弃恢复，或已恢复完成）。</summary>
-    internal void Clear()
+    // The caller records explicit user consent before invoking this method.
+    internal void Begin(string action, string stateBefore)
     {
-        try { if (File.Exists(filePath)) File.Delete(filePath); } catch (IOException) { } catch (UnauthorizedAccessException) { }
-        Result = null; Action = null;
+        if (Invalid || (action != "prepare" && action != "restore") || !ValidState(stateBefore)) throw new InvalidDataException();
+        Action = action; StateBefore = stateBefore; Result = "pending";
+        OperationId = Guid.NewGuid().ToString("N");
+        // Once written, interruption is an uncertain outcome, not a no-op.
+        Uncertain = true;
+        Write();
+    }
+
+    internal void Complete(int? code, string actualState, bool cancelled)
+    {
+        if (Invalid || !HasPending || !ValidState(actualState)) throw new InvalidDataException();
+        if (cancelled)
+        {
+            Result = "cancelled";
+            // No elevated child was started. Preserve previous confirmed responsibility;
+            // a prior uncertain outcome must not be silently discarded.
+            Uncertain = actualState != "Running" && (NeedsRecovery || StateBefore != "Stopped");
+        }
+        else if (code == 0 || code == 10)
+        {
+            Result = "ok";
+            if (Action == "prepare" && code == 10) NeedsRecovery = true; // elevated child actually stopped a running service
+            if (actualState == "Running") { NeedsRecovery = false; Uncertain = false; }
+            else Uncertain = Action == "restore" || (actualState != "Stopped" && actualState != "NotInstalled");
+        }
+        else
+        {
+            Result = "failed:" + (code.HasValue ? code.Value.ToString() : "unknown");
+            Uncertain = actualState != "Running";
+            if (actualState == "Running") NeedsRecovery = false;
+        }
+        Write();
+    }
+
+    internal void ReconcileRunning()
+    {
+        if (Invalid) return;
+        if (!NeedsRecovery && !Uncertain && !HasPending) return;
+        NeedsRecovery = false; Uncertain = false; Result = "ok"; Write();
+    }
+
+    internal static bool SelfTest()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "ChezhiJournalTest-" + Guid.NewGuid().ToString("N"));
+        string path = Path.Combine(dir, "journal.json");
+        try
+        {
+            var j = Load(path); j.Begin("prepare", "Running");
+            j = Load(path); if (!j.HasPending || !j.Uncertain) return false;
+            j.Complete(10, "Stopped", false);
+            j = Load(path); if (!j.NeedsRecovery || j.HasPending) return false;
+            j.Begin("restore", "Stopped"); j.Complete(null, "Stopped", true);
+            j = Load(path); if (!j.NeedsRecovery) return false;
+            j.Begin("restore", "Stopped"); j.Complete(10, "Running", false);
+            j = Load(path); if (j.NeedsRecovery || j.Uncertain) return false;
+            j.Begin("prepare", "Stopped"); j.Complete(0, "Stopped", false);
+            j = Load(path); if (j.NeedsRecovery || j.Uncertain) return false;
+            File.WriteAllText(path, "{broken");
+            return Load(path).Invalid;
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
     }
 }

@@ -263,7 +263,7 @@ internal static class Program
                 return service.Status.ToString();
             }
         }
-        catch { return "unknown"; }
+        catch { try { if (!ServiceInstalled()) return "NotInstalled"; } catch { } return "unknown"; }
     }
 
     // Any install location is accepted; the service must be unique and its executable
@@ -383,7 +383,7 @@ internal static class Program
                     service.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(20));
                 }
             }
-            return 0;
+            return 10; // confirmed change, distinct from idempotent no-op
         }
         catch { return 25; }
     }
@@ -421,6 +421,7 @@ internal static class Program
             switch (ev)
             {
                 case "auth_ok": case "wait_network": case "online": case "stop_accepted": case "stop_channel_failed":
+                case "network_online": case "network_required": case "network_unknown": case "auth_start":
                     return code == 0 ? ev : null;
                 case "auth_failed": return code != 0 ? ev : null;
                 case "network_retry_exhausted": return code == 1 ? ev : null;
@@ -502,7 +503,7 @@ internal static class Program
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Running, false, true) == 24
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Running, true, true) == 0
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Stopped, false, false) == 0
-            && StateMachineInvariants() && CoreEventInvariants() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
+            && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
             && !ServiceIdentity.IsKnownPublisher("fake telecom", "CN=fake telecom");
         Console.WriteLine(ok ? "LOGIC_PASS" : "LOGIC_FAIL");
         return ok ? 0 : 1;
@@ -1793,7 +1794,7 @@ internal static class Program
             try { BeginInvoke((Action)delegate {
                 // 唤醒后不自动重启：运行中的核心由自身心跳/退避循环重新确认；
                 // 已停止的会话保持停止。仅提示状态待确认。
-                if (running != null && !running.HasExited) { state.SetNetwork(ConnectionStates.NetworkState.Unknown); SetAuthState(ConnectionStates.AuthState.WaitingForNetwork, "系统已唤醒，连接状态待确认……", ToneInfo, true); }
+                if (running != null && !running.HasExited) { state.SetNetwork(ConnectionStates.NetworkState.Unknown); SetStatus("系统已唤醒，连接状态待确认……", ToneInfo, true); }
             }); } catch (InvalidOperationException) { }
         }
 
@@ -1885,6 +1886,29 @@ internal static class Program
                 if (token == "network_retry_exhausted" || (token == "test_crash" && isSelfTest))
                 {
                     retryEligible = true;
+                    return;
+                }
+                if (token == "network_online")
+                {
+                    state.SetNetwork(ConnectionStates.NetworkState.InternetAvailable);
+                    if (state.Auth == ConnectionStates.AuthState.Authenticated)
+                        SetStatus("认证成功，互联网可达。", ToneOk);
+                    else if (state.Auth == ConnectionStates.AuthState.WaitingForNetwork)
+                        SetAuthState(ConnectionStates.AuthState.AuthenticatedBySession, "网络已连通；尚未验证本次输入的凭据。", ToneOk);
+                    return;
+                }
+                if (token == "network_required" || token == "network_unknown")
+                {
+                    state.SetNetwork(token == "network_required" ? ConnectionStates.NetworkState.AuthenticationRequired : ConnectionStates.NetworkState.Unknown);
+                    if (state.Auth == ConnectionStates.AuthState.Authenticated || state.Auth == ConnectionStates.AuthState.AuthenticatedBySession)
+                        SetAuthState(ConnectionStates.AuthState.WaitingForNetwork, "网络状态变化，等待重新确认。", ToneWarn, true);
+                    return;
+                }
+                if (token == "auth_start")
+                {
+                    var next = state.Auth == ConnectionStates.AuthState.Authenticated || state.Auth == ConnectionStates.AuthState.AuthenticatedBySession
+                        ? ConnectionStates.AuthState.Reauthenticating : ConnectionStates.AuthState.Authenticating;
+                    SetAuthState(next, "正在认证……", ToneBusy, true);
                     return;
                 }
                 if (token == "auth_ok")
@@ -2005,68 +2029,109 @@ internal static class Program
         }
 
         // A09：程序重启后识别未完成的服务切换，向用户提供"经授权的恢复选项"（不擅自操作服务）
-        private void PromptPendingServiceRecovery()
+        private async void PromptPendingServiceRecovery()
         {
             try
             {
                 var journal = ServiceJournal.Load(ServiceJournal.DefaultPath());
-                if (!journal.HasPending) return;
-                if (journal.Action == "prepare")
+                if (journal.Invalid)
                 {
-                    SetStatus("检测到上次“准备连接”未完成收尾，天翼后台服务可能仍处于停用状态。", ToneWarn);
-                    if (MessageBox.Show(this, "上次停用天翼后台服务后，程序没有正常完成收尾。\r\n\r\n是否现在恢复天翼后台服务？（会请求管理员确认）", "恢复天翼服务", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
-#pragma warning disable 4014 // 有意 fire-and-forget：方法内部 await 捕获 UI 上下文并自带完整异常处理
-                        RunServiceAction(false);
-#pragma warning restore 4014
+                    SetStatus("服务事务记录损坏，请手动核对天翼服务状态。", ToneWarn);
+                    return;
                 }
-                else
+                if (!journal.HasPending && !journal.NeedsRecovery && !journal.Uncertain) return;
+                string actual = await Task.Run((Func<string>)CurrentServiceState);
+                if (IsDisposed || Disposing || serviceBusy || connectCheckPending || activeTask != null) return;
+                if (actual == "Running") { journal.ReconcileRunning(); return; }
+                if (actual != "Stopped" || (!journal.NeedsRecovery && journal.StateBefore != "Running"))
                 {
-                    SetStatus("检测到上次“恢复天翼”未完成，服务当前状态未知，可用“恢复天翼”重试。", ToneWarn);
-                    journal.Clear(); // restore 未完成无可自动建议的恢复动作，提示后清除
+                    SetStatus("上次服务切换结果不确定，请手动核对当前服务状态。", ToneWarn);
+                    return;
                 }
+                SetStatus("天翼后台服务已停止，存在尚未确认的恢复责任。", ToneWarn);
+                if (MessageBox.Show(this, "检测到上次操作可能停止了原本运行的天翼服务。是否恢复？（需要管理员确认）",
+                    "恢复天翼服务", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                    await RunServiceAction(false);
             }
-            catch { }
+            catch { if (!IsDisposed) SetStatus("无法读取服务恢复记录，请手动核对。", ToneWarn); }
         }
 
         private async Task RunServiceAction(bool forPrepare)
         {
-            if (serviceBusy || connectCheckPending || retryTimer.Enabled) return;
-            if (running != null && !running.HasExited) { MessageBox.Show(this, "请先停止本程序的认证，再执行切换。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
-            string instructions = forPrepare
-                ? "继续前请确认：\r\n\r\n1. 已在天翼客户端中断开并完全退出；\r\n2. 移动热点已关闭。\r\n\r\n接下来将请求管理员权限，仅停用天翼后台服务，不会动其它程序或开机启动项。"
-                : "继续前请确认：\r\n\r\n1. 本程序的认证已停止；\r\n2. 移动热点已关闭。\r\n\r\n接下来将请求管理员权限，重新启用天翼后台服务并打开官方客户端。";
-            if (MessageBox.Show(this, instructions, forPrepare ? "准备连接" : "恢复天翼", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
+            if (serviceBusy || connectCheckPending || retryTimer.Enabled || exitRequested) return;
+            if (running != null && !Object.ReferenceEquals(running, completedProcess))
+            {
+                MessageBox.Show(this, "请先停止本程序的认证，再执行切换。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
             serviceBusy = true; prepare.Enabled = false; restore.Enabled = false; connect.Enabled = false;
-            SetStatus("请在弹出的管理员确认窗口中操作……", ToneBusy, true);
-            // A09 事务记录：提权子进程启动前写入 pending；程序此时异常退出则记录保留，
-            // 下次启动提示恢复。子进程退出后（无论成败）回写结果。
-            var journal = isSelfTest ? null : ServiceJournal.Load(ServiceJournal.DefaultPath());
-            try { if (journal != null) journal.Begin(forPrepare ? "prepare" : "restore", CurrentServiceState()); } catch { journal = null; }
+            ServiceJournal journal = null;
+            bool started = false;
+            int? code = null;
             try
             {
-                var info = new ProcessStartInfo { FileName = Application.ExecutablePath, Arguments = forPrepare ? "--admin-prepare" : "--admin-restore", UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
-                using (Process p = Process.Start(info))
+                string instructions = forPrepare
+                    ? "请确认已断开并退出官方客户端，且已关闭移动热点。继续将请求管理员权限停止天翼后台服务。"
+                    : "请确认已停止本程序认证并关闭移动热点。继续将请求管理员权限启动天翼后台服务。";
+                if (MessageBox.Show(this, instructions, forPrepare ? "准备连接" : "恢复天翼",
+                    MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
+                string before = await Task.Run((Func<string>)CurrentServiceState);
+                if (IsDisposed || Disposing || exitRequested) return;
+                if (before == "unknown" || (before != "Running" && before != "Stopped" && before != "NotInstalled"))
                 {
-                    if (p == null) throw new InvalidOperationException();
-                    await Task.Run(() => p.WaitForExit());
-                    int code = p.ExitCode;
-                    try { if (journal != null) journal.Complete(code); } catch { }
-                    if (code == 0)
-                    {
-                        if (forPrepare) SetStatus("准备完成！输入账号密码即可连接。", ToneOk);
-                        else
-                        {
-                            SetStatus("天翼已恢复，请在官方客户端重新登录。", ToneOk);
-                            string client = FindOfficialClient();
-                            if (client != null) Process.Start(new ProcessStartInfo { FileName = client, WorkingDirectory = Path.GetDirectoryName(client), UseShellExecute = true });
-                        }
-                    }
-                    else { string message = ServiceError(code); SetStatus(message, ToneWarn); MessageBox.Show(this, message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+                    SetStatus("服务状态未知或正在变化，未执行切换。", ToneWarn); return;
                 }
+                journal = ServiceJournal.Load(ServiceJournal.DefaultPath());
+                if (journal.Invalid) { SetStatus("服务事务记录损坏，需先人工核对，未执行切换。", ToneWarn); return; }
+                journal.Begin(forPrepare ? "prepare" : "restore", before);
+                state.SetService(ConnectionStates.ServiceState.Transitioning);
+                SetStatus("请在弹出的管理员确认窗口中操作……", ToneBusy, true);
+                var info = new ProcessStartInfo { FileName = Application.ExecutablePath, Arguments = forPrepare ? "--admin-prepare" : "--admin-restore", UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
+                using (Process child = Process.Start(info))
+                {
+                    if (child == null) throw new InvalidOperationException();
+                    started = true;
+                    // Do not kill an elevated service operation mid-transaction.
+                    bool exited = await Task.Run(() => child.WaitForExit(60000));
+                    if (!exited)
+                    {
+                        if (!IsDisposed) SetStatus("服务操作仍未结束，结果未知；请核对系统状态。", ToneWarn);
+                        await Task.Run(() => child.WaitForExit());
+                    }
+                    code = child.ExitCode;
+                }
+                string actual = await Task.Run((Func<string>)CurrentServiceState);
+                journal.Complete(code, actual, false);
+                if (IsDisposed || Disposing) return;
+                state.SetService(actual == "Running" ? ConnectionStates.ServiceState.Running : actual == "Stopped" ? ConnectionStates.ServiceState.Stopped :
+                    actual == "NotInstalled" ? ConnectionStates.ServiceState.NotInstalled : ConnectionStates.ServiceState.Unknown);
+                bool expected = forPrepare ? actual == "Stopped" || actual == "NotInstalled" : actual == "Running";
+                if ((code == 0 || code == 10) && expected)
+                {
+                    if (forPrepare) SetStatus("准备完成！输入账号密码即可连接。", ToneOk);
+                    else
+                    {
+                        SetStatus("天翼服务已恢复，请在官方客户端重新登录。", ToneOk);
+                        string client = FindOfficialClient();
+                        if (client != null) Process.Start(new ProcessStartInfo { FileName = client, WorkingDirectory = Path.GetDirectoryName(client), UseShellExecute = true });
+                    }
+                }
+                else SetStatus(code == 0 || code == 10 ? "服务结果未得到确认，请核对实际状态。" : ServiceError(code ?? 25), ToneWarn);
             }
-            catch (Win32Exception e) { SetStatus(e.NativeErrorCode == 1223 ? "已取消管理员授权。" : "无法启动管理员操作，请重试。", ToneWarn); }
-            catch { SetStatus("操作未完成，请检查天翼服务状态后重试。", ToneWarn); }
-            finally { serviceBusy = false; prepare.Enabled = true; restore.Enabled = true; connect.Enabled = true; }
+            catch (Win32Exception e)
+            {
+                if (!started && journal != null && journal.HasPending && e.NativeErrorCode == 1223)
+                {
+                    try { journal.Complete(null, await Task.Run((Func<string>)CurrentServiceState), true); } catch { }
+                }
+                if (!IsDisposed) SetStatus(e.NativeErrorCode == 1223 ? "已取消管理员授权。" : "无法启动管理员操作，请重试。", ToneWarn);
+            }
+            catch { if (!IsDisposed) SetStatus("操作结果未知，已保留恢复记录，请检查服务状态。", ToneWarn); }
+            finally
+            {
+                serviceBusy = false;
+                if (!IsDisposed && !Disposing) { prepare.Enabled = true; restore.Enabled = true; connect.Enabled = true; }
+            }
         }
 
         private void ShowAbout()

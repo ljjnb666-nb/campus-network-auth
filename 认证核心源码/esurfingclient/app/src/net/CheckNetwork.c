@@ -1,6 +1,7 @@
 #include "net/NetClient.h"
 
 #include "NetClientInternal.h"
+#include "core/States.h"
 
 #include "utils/log/Logger.h"
 #include "utils/sim/SimThread.h"
@@ -545,6 +546,14 @@ void log_network_state_change(const network_status_t status)
 {
     static _Thread_local network_status_t s_last_state = (network_status_t)-1;
 
+    static _Thread_local uint64_t s_last_event_ms = 0;
+    const uint64_t now = get_steady_tm_ms();
+    if (g_ephemeral_auth && (status != s_last_state || now - s_last_event_ms >= 10000))
+    {
+        ephemeral_emit_event(status == STATUS_OK ? "network_online" :
+            (status == STATUS_NEED_AUTH ? "network_required" : "network_unknown"), 0);
+        s_last_event_ms = now;
+    }
     if (status == s_last_state) return;
 
     s_last_state = status;
