@@ -8,7 +8,7 @@ $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw '找不到 .NET Framework C# 编译器（csc.exe）。' }
 
 $programPath = Join-Path $PSScriptRoot 'Program.cs'
-foreach ($path in @($programPath, (Join-Path $PSScriptRoot 'CredentialStore.cs'), (Join-Path $PSScriptRoot 'ConnectionStates.cs'), (Join-Path $PSScriptRoot 'ServiceIdentity.cs'), (Join-Path $PSScriptRoot 'ServiceJournal.cs'), (Join-Path $PSScriptRoot 'chezhi.ico'), (Join-Path $PSScriptRoot 'Licenses.txt'))) {
+foreach ($path in @($programPath, (Join-Path $PSScriptRoot 'CredentialStore.cs'), (Join-Path $PSScriptRoot 'ConnectionStates.cs'), (Join-Path $PSScriptRoot 'ServiceIdentity.cs'), (Join-Path $PSScriptRoot 'ServiceJournal.cs'), (Join-Path $PSScriptRoot 'chezhi.ico'), (Join-Path $PSScriptRoot 'Licenses.txt'), (Join-Path $PSScriptRoot 'app.manifest'), (Join-Path $PSScriptRoot 'app.config'))) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "缺少构建文件：$path" }
 }
 
@@ -35,12 +35,14 @@ $tmpOut = Join-Path $PSScriptRoot 'build-core\澈知科技-new.exe'
 if (Test-Path -LiteralPath $tmpOut) { Remove-Item -LiteralPath $tmpOut -Force }
 
 $refs = @('/r:System.dll','/r:System.Core.dll','/r:System.Drawing.dll','/r:System.Windows.Forms.dll','/r:System.Web.Extensions.dll','/r:System.ServiceProcess.dll','/r:System.Management.dll','/r:System.Security.dll')
-$arguments = @('/nologo','/target:winexe','/optimize+','/platform:anycpu',('/win32icon:' + (Join-Path $PSScriptRoot 'chezhi.ico')),('/out:' + $tmpOut),('/resource:' + $CorePath + ',Chezhi.AuthCore'),('/resource:' + (Join-Path $PSScriptRoot 'Licenses.txt') + ',Chezhi.Licenses'))
+$arguments = @('/nologo','/target:winexe','/optimize+','/platform:anycpu',('/win32icon:' + (Join-Path $PSScriptRoot 'chezhi.ico')),('/win32manifest:' + (Join-Path $PSScriptRoot 'app.manifest')),('/out:' + $tmpOut),('/resource:' + $CorePath + ',Chezhi.AuthCore'),('/resource:' + (Join-Path $PSScriptRoot 'Licenses.txt') + ',Chezhi.Licenses'))
 & $compiler $arguments $refs $programPath (Join-Path $PSScriptRoot 'CredentialStore.cs') (Join-Path $PSScriptRoot 'ConnectionStates.cs') (Join-Path $PSScriptRoot 'ServiceIdentity.cs') (Join-Path $PSScriptRoot 'ServiceJournal.cs')
 if ($LASTEXITCODE -ne 0) { throw '编译失败。' }
 
 # 编译成功才替换正式产物；失败时旧 exe 原样保留
 Move-Item -LiteralPath $tmpOut -Destination $out -Force
+# 高 DPI 配置随产物分发（.NET Framework 4.7+ 读取；缺失时回退系统级缩放）
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'app.config') -Destination (Join-Path $PSScriptRoot '澈知科技.exe.config') -Force
 
 # 构建清单
 $gitSha = 'unknown'

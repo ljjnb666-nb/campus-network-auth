@@ -108,7 +108,15 @@
 
 **CI 设计修正**：CI 只运行 Build-Core.ps1（同批产出核心+GUI，哈希自洽）；不运行 Build.ps1——提交的 CoreHash 与 CI 现编核心哈希逐字节一致在本工具链下不可保证（见证据 3）。
 
-### P6 Windows 服务管理整改（本阶段）
+### P7 UI 与交互优化（本阶段）
+**A17 高 DPI**：新增 `app.manifest`（PerMonitorV2 声明 + Win10/11 supportedOS）与 `app.config`（System.Windows.Forms.ApplicationConfigurationSection DpiAwareness=PerMonitorV2）；两构建脚本接线（`/win32manifest:` 嵌入 + `app.config` 随产物复制为 `澈知科技.exe.config`）。.NET FX 4.7+ 生效，旧运行时自动回退系统级缩放；分发形态从单 exe 变为 exe+config 两个文件（已写入文档）。注：多档 DPI 实机渲染验证（100%–200%）待用户环境执行（P11 清单），当前以框架机制落地为准。
+**A11 UI 线程阻塞**：`CheckBeforeConnect`（WMI 冷启动可达数秒）全面异步化——启动检查 `RunPreConnectCheckAsync`（先显示"正在检查"，完成后回填结论）、`ConnectClicked` 改 async（检查期间禁用连接按钮防重复点击）；检查期间窗口不再冻结。
+**A19 诊断入口**：托盘菜单"导出诊断信息"→ 写出脱敏文本（程序版本/四类领域状态快照/自动恢复计数/非法状态迁移记录/核心事件归档 200 条/服务事务记录/OS 与 DPI），不含任何账号、密码、票据；导出到 %TEMP%\CheZhiDiag。
+**其它**：锁屏（SessionSwitch SessionLock）即自动遮罩密码；`AcceptButton=connect`（回车连接，检查/连接中按钮禁用防误触）；AssemblyDescription 由"热点管理"修正为"认证客户端（含移动热点设置入口）"（如实描述能力）。
+**验证**：logic/credentials/core/ui 全 PASS；编译零警告。
+**状态更新**：A17 → FIXED_PENDING_VERIFICATION（机制落地，多档 DPI 实机验证待用户执行）；A11 → FIXED_VERIFIED（启动/连接路径均异步）；A19 → FIXED_VERIFIED（导出入口落地，脱敏内容明确）。
+
+### P6 Windows 服务管理整改
 **A14 身份校验强化**：新增 `ServiceIdentity.cs`——WinVerifyTrust（WINTRUST_ACTION_GENERIC_VERIFY_V2，免吊销检查以适配离线/内网）验证 Authenticode 签名链 + 签名者证书主题包含"电信/telecom"（实测本机官方 ESurfingSvr.exe 由"中数通信息有限公司·电信信息化部"签名、且**不带版本资源**——元数据不可用作身份依据，故以证书主题为准）。`IsExpectedService` 升级为文件名+签名+厂商三重校验，任一不符提权子进程 fail-closed（guard 21）。
 **A09 事务记录**：新增 `ServiceJournal.cs`（%LOCALAPPDATA%\CheZhiTech\CampusNetwork\service-journal.v1.json，原子写入，无凭据）。GUI 在提权子进程启动前写 pending（含操作前服务状态快照 CurrentServiceState()），退出后回写 ok/failed:code；程序异常退出则 pending 留存——下次启动 `PromptPendingServiceRecovery()` 识别：prepare 未完成→提示+经授权的恢复选项（用户确认才触发，仍走完整 UAC+防护链）；restore 未完成→提示后清除。
 **热点状态保守处理**：`DirectAdaptersIdle` 从"仅 status==2 视为忙"改为白名单放行（0 断开/7 媒体断开/4/5/6 硬件态才空闲，**null=未知一律视为忙**）——状态未知时禁止服务切换（保守方向）。

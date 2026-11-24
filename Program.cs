@@ -20,7 +20,7 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("澈知科技")]
 [assembly: AssemblyProduct("澈知科技校园网连接")]
-[assembly: AssemblyDescription("校园网连接与热点管理")]
+[assembly: AssemblyDescription("校园网认证客户端（含 Windows 移动热点设置入口）")]
 [assembly: AssemblyCompany("澈知科技")]
 [assembly: AssemblyVersion("1.1.0.0")]
 [assembly: AssemblyFileVersion("1.1.0.0")]
@@ -896,6 +896,7 @@ internal static class Program
             trayMenu.Items.Add("打开主窗口", null, delegate { ShowFromTray(); });
             trayMenu.Items.Add("停止认证", null, delegate { ShowFromTray(); StopClicked(stop, EventArgs.Empty); });
             trayMenu.Items.Add("清除已保存账号", null, delegate { ShowFromTray(); ForgetCredentials(); });
+            trayMenu.Items.Add("导出诊断信息", null, delegate { ShowFromTray(); ExportDiagnostics(); });
             trayMenu.Items.Add(new ToolStripSeparator());
             trayMenu.Items.Add("退出程序", null, delegate { ShowFromTray(); exitRequested = true; Close(); });
             tray.ContextMenuStrip = trayMenu;
@@ -928,6 +929,9 @@ internal static class Program
             // 系统睡眠/休眠唤醒：不自动重启认证（核心自身的心跳/退避循环会重新确认），
             // 仅提示状态待确认；用户停止过的会话保持停止
             SystemEvents.PowerModeChanged += OnPowerModeChanged;
+            // 锁屏即自动遮罩密码（A19/6.2：失焦/锁屏后的密码暴露面收敛）
+            SystemEvents.SessionSwitch += OnSessionSwitch;
+            AcceptButton = connect; // 回车=立即连接（连接中自动失效，因按钮禁用）
             save.Click += delegate { SaveCredentials(true); };
             reveal.Click += delegate {
                 password.UseSystemPasswordChar = !password.UseSystemPasswordChar;
@@ -942,11 +946,11 @@ internal static class Program
             about.LinkClicked += delegate { ShowAbout(); };
             exit.LinkClicked += delegate { exitRequested = true; Close(); };
             Shown += delegate {
-                string blocked = CheckBeforeConnect();
+                // A11：WMI 检查（冷启动可达数秒）移出 UI 线程，先给即时提示
                 if (credentialLoadError != null) SetStatus(credentialLoadError, ToneWarn);
-                else if (blocked != null) SetStatus(blocked, ToneWarn);
-                else if (loadedCredential) SetStatus("已载入保存的账号，点击“立即连接”即可。", ToneOk);
-                else SetStatus("输入校园网账号和密码，点击“立即连接”即可。", ToneInfo);
+                else if (loadedCredential) SetStatus("已载入保存的账号，正在检查天翼服务状态……", ToneOk);
+                else SetStatus("正在检查天翼服务状态……", ToneInfo);
+                RunPreConnectCheckAsync(false);
                 if (!isSelfTest) PromptPendingServiceRecovery(); // A09：识别未完成的服务切换
             };
             timer.Interval = 1000;
@@ -963,6 +967,7 @@ internal static class Program
                 password.Clear(); tray.Visible = false; tray.Dispose(); trayMenu.Dispose(); tips.Dispose();
                 timer.Dispose(); animTimer.Dispose(); retryTimer.Dispose(); if (running != null) running.Dispose();
                 SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+                SystemEvents.SessionSwitch -= OnSessionSwitch;
                 if (appIcon != null) appIcon.Dispose(); // ExtractAssociatedIcon 的实例由本窗口统一释放
             };
         }
@@ -1555,9 +1560,34 @@ internal static class Program
             else ApplyButtonLook(stop, (ButtonKind)stop.Tag);
         }
 
-        private void ConnectClicked(object sender, EventArgs e)
+        // A11：环境检查（WMI，冷启动可达数秒）异步化——事件处理与启动检查共用
+        private bool checkingBlocked;
+        private async void RunPreConnectCheckAsync(bool showMessage)
         {
-            if (serviceBusy || (running != null && !running.HasExited)) return;
+            if (checkingBlocked) return;
+            checkingBlocked = true;
+            try
+            {
+                string blocked = await Task.Run((Func<string>)CheckBeforeConnect);
+                if (IsDisposed) return;
+                if (running != null && !running.HasExited) return; // 检查期间用户已连接
+                if (blocked != null)
+                {
+                    SetStatus(blocked, ToneWarn);
+                    if (showMessage) MessageBox.Show(this, blocked, "暂不能连接", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                else if (!showMessage)
+                {
+                    if (loadedCredential) SetStatus("已载入保存的账号，点击“立即连接”即可。", ToneOk);
+                    else SetStatus("输入校园网账号和密码，点击“立即连接”即可。", ToneInfo);
+                }
+            }
+            finally { checkingBlocked = false; }
+        }
+
+        private async void ConnectClicked(object sender, EventArgs e)
+        {
+            if (serviceBusy || checkingBlocked || (running != null && !running.HasExited)) return;
             // 输入校验、认证启动、凭据保存三者分离：连接前不再强制写盘（A04/A05）。
             // 仅当用户勾选"记住账号密码"且认证成功后，才在 SaveAfterAuth() 中持久化。
             if (account.Text.Length == 0 || password.Text.Length == 0)
@@ -1565,8 +1595,17 @@ internal static class Program
                 SetStatus("请输入校园网账号和密码。", ToneWarn);
                 return;
             }
-            string blocked = CheckBeforeConnect();
-            if (blocked != null) { SetStatus(blocked, ToneWarn); MessageBox.Show(this, blocked, "暂不能连接", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+            // A11：阻塞式 WMI 检查移出 UI 线程；检查期间按钮禁用防重复点击
+            connect.Enabled = false;
+            SetStatus("正在检查天翼服务状态……", ToneInfo, true);
+            string blocked = await Task.Run((Func<string>)CheckBeforeConnect);
+            if (IsDisposed) return;
+            if (blocked != null)
+            {
+                SetStatus(blocked, ToneWarn); MessageBox.Show(this, blocked, "暂不能连接", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                connect.Enabled = true;
+                return;
+            }
             // 用户手动发起新一轮连接：重置自动恢复预算与停止标志
             userStopped = false; runSawProgress = false; authFailureSeen = false; autoRetryCount = 0; retryTimer.Stop();
             StartAuthProcess();
@@ -1629,6 +1668,54 @@ internal static class Program
                 // 已停止的会话保持停止。仅提示状态待确认。
                 if (running != null && !running.HasExited) SetStatus("系统已唤醒，正在确认连接状态……", ToneInfo, true);
             }); } catch (InvalidOperationException) { }
+        }
+
+        private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
+        {
+            if (e.Reason != SessionSwitchReason.SessionLock || IsDisposed) return;
+            try { BeginInvoke((Action)delegate {
+                password.UseSystemPasswordChar = true; reveal.Text = "显示";
+            }); } catch (InvalidOperationException) { }
+        }
+
+        // A19：脱敏诊断导出（不含账号/密码/票据；仅状态快照、事件归档与环境摘要）
+        private void ExportDiagnostics()
+        {
+            try
+            {
+                string dir = Path.Combine(Path.GetTempPath(), "CheZhiDiag");
+                Directory.CreateDirectory(dir);
+                string file = Path.Combine(dir, "chezhi-diagnostics-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".txt");
+                var sb = new StringBuilder();
+                sb.AppendLine("澈知科技诊断信息（脱敏，不含凭据）");
+                sb.AppendLine("生成时间(UTC): " + DateTime.UtcNow.ToString("o"));
+                Version v = Assembly.GetExecutingAssembly().GetName().Version;
+                sb.AppendLine("程序版本: " + (v == null ? "?" : v.ToString()));
+                sb.AppendLine("认证状态: " + state.Auth + "  核心进程: " + state.Core + "  网络: " + state.Network + "  服务: " + state.Service);
+                sb.AppendLine("自动恢复: 重试 " + autoRetryCount + "/2, 用户已停止=" + userStopped + ", 本轮曾见网络=" + runSawProgress);
+                sb.AppendLine();
+                sb.AppendLine("== 非法状态迁移记录（应恒为空） ==");
+                foreach (string r in state.RejectedTransitions) sb.AppendLine(r);
+                sb.AppendLine();
+                sb.AppendLine("== 核心事件归档（最近 " + coreEvents.Count + " 条） ==");
+                foreach (string ev in coreEvents) sb.AppendLine(ev);
+                sb.AppendLine();
+                try
+                {
+                    var j = ServiceJournal.Load(ServiceJournal.DefaultPath());
+                    sb.AppendLine("== 服务事务记录 ==");
+                    sb.AppendLine("action=" + (j.Action ?? "无") + " state=" + (j.StateBefore ?? "?") + " result=" + (j.Result ?? "无"));
+                }
+                catch { sb.AppendLine("== 服务事务记录：读取失败 =="); }
+                sb.AppendLine();
+                sb.AppendLine("== 环境 ==");
+                sb.AppendLine("OS: " + Environment.OSVersion.VersionString);
+                using (var g = CreateGraphics()) { sb.AppendLine("DPI: " + g.DpiX); }
+                File.WriteAllText(file, sb.ToString(), Encoding.UTF8);
+                SetStatus("诊断信息已导出：" + file, ToneOk);
+                MessageBox.Show(this, "诊断信息已导出（不含账号密码）：\r\n" + file, "导出诊断", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex) { SetStatus("诊断导出失败：" + ex.GetType().Name, ToneFail); }
         }
 
         // 连接成功后的按需保存：未勾选"记住账号密码"时不写任何持久化凭据；
