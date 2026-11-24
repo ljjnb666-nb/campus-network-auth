@@ -49,12 +49,12 @@
 | 编号 | 问题 | 是否属实 | 等级 | 根因/位置 | 修复方案 | 状态 |
 |---|---|---|---|---|---|---|
 | A01 | HTTP 认证协议固有风险 | 是 | 高 | 上游协议明文+密钥内嵌 | 保持兼容实现，文档记录残余风险 | UPSTREAM_LIMITATION |
-| A02 | 仓库缺构建依赖（认证核心.exe、curl 包） | 是 | 高 | .gitignore 排除但脚本依赖 | P2：依赖自动获取+固定哈希+CI 从源码构建 | FIXED_PENDING_VERIFICATION |
+| A02 | 仓库缺构建依赖（认证核心.exe、curl 包） | 是 | 高 | .gitignore 排除但脚本依赖 | 依赖自动获取+固定哈希+CI 从源码构建；全新克隆实测通过 | FIXED_VERIFIED |
 | A03 | 操作成功误显示"已连接" | 是 | 高 | SetStatus 以颜色映射状态（1386-1406）；SaveCredentials/ForgetCredentials/RunServiceAction 成功也用 ToneOk | P4：领域状态枚举与展示解耦 | FIXED_PENDING_VERIFICATION |
 | A04 | 连接前强制保存密码 | 是 | 高 | ConnectClicked:1419 无条件 SaveCredentials(false) | P3：增加"记住密码"选项，认证与保存解耦 | FIXED_PENDING_VERIFICATION |
 | A05 | 凭据保存失败阻断认证 | 是 | 高 | 同上耦合；CredentialStore.Save 对损坏旧记录抛异常（Save→Load 校验） | P3：保存失败不阻断临时认证 | FIXED_PENDING_VERIFICATION |
 | A06 | 核心异常退出缺恢复策略 | 是 | 中 | OnCoreExit 不区分退出码，无重试边界 | P5：退出码分类+有界自动恢复 | FIXED_PENDING_VERIFICATION |
-| A07 | 无根目录 CI | 是 | 中 | 仓库无 .github/workflows | P2：GitHub Actions | FIXED_PENDING_VERIFICATION |
+| A07 | 无根目录 CI | 是 | 中 | 仓库无 .github/workflows | GitHub Actions 全绿（run 45413577809，五项自测全 PASS） | FIXED_VERIFIED |
 | A08 | 未做真实认证验收 | 是 | 中 | 需用户授权+真实环境 | 提供验证步骤；REAL_NETWORK_VERIFICATION=BLOCKED | BLOCKED |
 | A09 | 服务恢复机制不足 | 是 | 中 | ChangeService 无事务记录，重启后不知道未完成操作 | P6：服务操作事务记录+恢复提示 | FIXED_PENDING_VERIFICATION |
 | A10 | 认证失败原因分类不足 | 是 | 中 | 仅 6 个 EPHEMERAL 令牌 | P4：结构化事件协议（版本化），无法区分处标 Unknown | FIXED_PENDING_VERIFICATION |
@@ -108,6 +108,8 @@
 
 **CI 设计修正**：CI 只运行 Build-Core.ps1（同批产出核心+GUI，哈希自洽）；不运行 Build.ps1——提交的 CoreHash 与 CI 现编核心哈希逐字节一致在本工具链下不可保证（见证据 3）。
 
+**状态更新（终验后更新）**：A02 → FIXED_VERIFIED（全新克隆实测 + CI 全绿）；A07 → FIXED_VERIFIED（run 45413577809：五项自测全 PASS，含本机受阻的 STOP_PASS 与结构化事件端到端断言）；A10 → FIXED_VERIFIED（CI 实证）；N02 → FIXED_VERIFIED。
+
 ### P12 文档、三轮最终审计与验收（本阶段）
 
 **文档**：README.md（项目/构建/使用/卸载/隐私）、CHANGELOG.md（V1.2.0 全量条目）、ARCHITECTURE.md（结构图/设计决策/A16 拆分路线/A25 接口预留——不引入监听服务）、TESTING.md（自测矩阵/CI/真实环境 10 步清单）、RELEASE_CHECKLIST.md（发布门禁/签名 BLOCKED/发布限制）、SECURITY.md、THIRD_PARTY_NOTICES.md（P3）。程序集版本 1.1.0.0 → **1.2.0.0**。
@@ -159,7 +161,7 @@ FIXED_VERIFIED：A03 A04 A05 A06 A09 A11 A13 A14 A15 A18 A19 A20；FIXED_PENDING
 - **CODE_IMPLEMENTED** ✅ 全部整改代码落地并编译零警告。
 - **BUILD_VERIFIED** ✅ 本机 + **全新克隆**两环境全量构建成功（含依赖自动获取与哈希校验）。
 - **OFFLINE_TESTS_VERIFIED** ✅ 四项自测双环境全 PASS（含状态机不变量/崩溃注入/凭据安全/核心集成）；--self-test-stop 本机因用户活动会话持锁受限（环境性，非缺陷），CI 覆盖。
-- **CI_VERIFIED** ✅（f24b708 起）：CI 触发、依赖获取、构建、离线自检、敏感扫描、产物上传全绿；此前 5 次失败根因（工具链路径硬编码）已修复并复验。
+- **CI_VERIFIED** ✅（76ea70e 起）：CI 全绿。历经两次真实根因修复——① setup-msys2 安装位置随 runner 变化（硬编码 C:\msys64 失效）→ 动态解析（f24b708，该次运行已证明依赖获取+工具链+全量构建成功，仅自测步骤失败）；② pwsh 的 `&` 不等待 GUI 子系统进程（$LASTEXITCODE 未设置误判失败；应用本身 PASS 后正常退出，时间线已核实）→ Start-Process -Wait 显式等待（76ea70e，全绿）。
 - **REAL_NETWORK_VERIFIED** ❌ BLOCKED——需用户授权与真实校园网（步骤清单见 TESTING.md）。
 - **LONG_RUNNING_VERIFIED** ❌ 未执行（24/72h）；已观测 15.2h 用户会话稳定（8.7MB/0.2% CPU）。
 - **RELEASE_READY** ❌ 否——真实环境验证、长跑、DPI 多档实机、签名、桌面源码许可补齐之前不满足发布条件（门禁清单见 RELEASE_CHECKLIST.md）。
