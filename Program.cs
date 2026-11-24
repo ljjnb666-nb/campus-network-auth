@@ -732,6 +732,7 @@ internal static class Program
             using (var first = new MainWindow(dir, true))
             {
                 first.Show(); Application.DoEvents();
+                if (!first.CheckAdaptiveLayoutForTest()) return 1;
                 if (!first.CheckTrayAndSaveForTest()) return 1;
             }
             using (var second = new MainWindow(dir, true))
@@ -851,6 +852,10 @@ internal static class Program
         private readonly StatusPill statusPill = new StatusPill();
         private readonly StatusCard statusCard = new StatusCard();
         private readonly TableLayoutPanel statusRow = new TableLayoutPanel();
+        private Action reflowLayout;
+        private bool layoutBusy;
+        private Panel scrollRoot;
+        private TableLayoutPanel mainLayout;
 
         // 状态指示配色: 灰=空闲/提示, 蓝=进行中, 绿=成功, 橙=需注意, 红=失败
         private static readonly Color ToneInfo = Color.FromArgb(100, 116, 139);
@@ -867,15 +872,20 @@ internal static class Program
             try { appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
             if (appIcon != null) Icon = appIcon;
             StartPosition = FormStartPosition.CenterScreen;
+            // All initial dimensions are authored at 96 DPI. Reflow also measures
+            // actual font/control metrics, including Windows accessibility text scaling.
+            AutoScaleDimensions = new SizeF(96F, 96F);
             AutoScaleMode = AutoScaleMode.Dpi;
-            ClientSize = new Size(540, 532);
-            MinimumSize = new Size(520, 532);
+            ClientSize = new Size(600, 626);
+            MinimumSize = new Size(500, 430);
             BackColor = FormBgColor;
             Font = new Font("Microsoft YaHei UI", 9F);
             DoubleBuffered = true;
 
-            var root = new Panel { Dock = DockStyle.Fill, Padding = new Padding(20, 16, 20, 14), BackColor = FormBgColor };
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 9, Margin = Padding.Empty, Padding = Padding.Empty, BackColor = FormBgColor };
+            var root = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(20, 16, 20, 14), BackColor = FormBgColor };
+            scrollRoot = root;
+            var layout = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 1, RowCount = 9, Margin = Padding.Empty, Padding = Padding.Empty, BackColor = FormBgColor, Height = 580 };
+            mainLayout = layout;
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52)); // Header
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 10)); // Spacer
@@ -887,12 +897,24 @@ internal static class Program
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 10)); // Spacer
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 24)); // Footer
 
-            // Header
-            var header = new HeaderPanel { Dock = DockStyle.Fill, BackColor = FormBgColor };
-            statusPill.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            statusPill.Location = new Point(540 - 20 * 2 - statusPill.Width - 2, (52 - statusPill.Height) / 2);
-            header.Controls.Add(statusPill);
-            header.Resize += delegate { statusPill.Location = new Point(header.Width - statusPill.Width - 2, (header.Height - statusPill.Height) / 2); };
+            // Header: three independent columns. Real labels replace fixed-pixel
+            // text drawing, so the title and subtitle cannot overlap.
+            var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = Padding.Empty, BackColor = FormBgColor };
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 54));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 126));
+            var badge = new HeaderPanel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+            var heading = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty, BackColor = FormBgColor };
+            heading.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            heading.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            heading.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+            var headingTitle = new Label { Text = "澈知科技", Font = new Font("Microsoft YaHei UI", 14.5F, FontStyle.Bold), ForeColor = Color.FromArgb(17, 24, 39), Dock = DockStyle.Fill, Margin = Padding.Empty, TextAlign = ContentAlignment.BottomLeft };
+            var headingSub = new Label { Text = "校园网认证 · 移动热点共享", Font = new Font("Microsoft YaHei UI", 8.5F), ForeColor = Color.FromArgb(100, 116, 139), Dock = DockStyle.Fill, Margin = Padding.Empty, TextAlign = ContentAlignment.MiddleLeft };
+            heading.Controls.Add(headingTitle, 0, 0); heading.Controls.Add(headingSub, 0, 1);
+            statusPill.Anchor = AnchorStyles.None;
+            statusPill.Margin = Padding.Empty;
+            statusPill.Font = new Font("Microsoft YaHei UI", 8.5F, FontStyle.Bold);
+            header.Controls.Add(badge, 0, 0); header.Controls.Add(heading, 1, 0); header.Controls.Add(statusPill, 2, 0);
             layout.Controls.Add(header, 0, 0);
 
             // Auth Card
@@ -908,21 +930,23 @@ internal static class Program
 
             var authHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty, BackColor = CardBgColor };
             authHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            authHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 180));
+            authHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             var authTitle = new Label { Text = "账号与网络认证", Dock = DockStyle.Fill, Font = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold), ForeColor = Color.FromArgb(30, 41, 59), TextAlign = ContentAlignment.MiddleLeft, BackColor = CardBgColor };
             var authSubtitle = new Label { Text = "DPAPI 加密保护", Dock = DockStyle.Fill, Font = new Font("Microsoft YaHei UI", 8F), ForeColor = Color.FromArgb(148, 163, 184), TextAlign = ContentAlignment.MiddleRight, BackColor = CardBgColor };
+            authTitle.Margin = Padding.Empty; authSubtitle.Margin = new Padding(8, 0, 0, 0); authSubtitle.AutoSize = true;
             authHeader.Controls.Add(authTitle, 0, 0); authHeader.Controls.Add(authSubtitle, 1, 0);
             authLayout.Controls.Add(authHeader, 0, 0);
 
             // Account field
             account.BorderStyle = BorderStyle.None; account.Font = new Font("Microsoft YaHei UI", 10F); account.Dock = DockStyle.Fill; account.BackColor = CardBgColor;
-            var accountBox = new InputContainer(account) { Dock = DockStyle.Fill, Height = 32, Margin = new Padding(0, 2, 0, 2), Padding = new Padding(10, 7, 10, 4), BackColor = CardBgColor };
+            var accountBox = new InputContainer(account) { Dock = DockStyle.Fill, Height = 32, Margin = new Padding(0, 2, 0, 2), Padding = new Padding(10, 3, 10, 3), BackColor = CardBgColor };
             AddField(authLayout, "账号", accountBox, 1);
 
             // Password field
-            password.UseSystemPasswordChar = true; password.BorderStyle = BorderStyle.None; password.Font = new Font("Microsoft YaHei UI", 10F); password.Dock = DockStyle.Fill; password.Margin = new Padding(0, 5, 4, 0); password.BackColor = CardBgColor;
+            password.UseSystemPasswordChar = true; password.BorderStyle = BorderStyle.None; password.Font = new Font("Microsoft YaHei UI", 10F); password.Anchor = AnchorStyles.Left | AnchorStyles.Right; password.Margin = new Padding(0, 0, 4, 0); password.BackColor = CardBgColor;
             reveal.Text = "显示"; reveal.Kind = ButtonKind.Normal; reveal.CornerRadius = 4; reveal.Font = new Font("Microsoft YaHei UI", 8.5F); reveal.Dock = DockStyle.Fill; reveal.Margin = new Padding(2, 2, 4, 2);
-            var passInner = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty, BackColor = CardBgColor };
+            var passInner = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty, BackColor = CardBgColor };
+            passInner.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             passInner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             passInner.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 56));
             passInner.Controls.Add(password, 0, 0); passInner.Controls.Add(reveal, 1, 0);
@@ -937,11 +961,11 @@ internal static class Program
 
             // 记住账号密码：仅用户明确勾选后才持久化（连接成功后写入）；默认不勾选。
             // 勾选状态与本地已有记录保持一致；取消勾选不会删除已有记录（用托盘菜单清除）。
-            remember.Text = "记住账号密码（DPAPI 加密，仅当前 Windows 用户可读）";
-            remember.AutoSize = false; remember.Size = new Size(480, 20); remember.Dock = DockStyle.Fill;
+            remember.Text = "记住账号密码（仅当前 Windows 用户可读）";
+            remember.AutoSize = false; remember.Dock = DockStyle.Fill; remember.Margin = Padding.Empty;
             remember.ForeColor = Color.FromArgb(71, 85, 105); remember.BackColor = CardBgColor;
             remember.TextAlign = ContentAlignment.MiddleLeft; remember.Cursor = Cursors.Hand;
-            tips.SetToolTip(remember, "不勾选时凭据只在内存中使用，连接成功也不会写入磁盘");
+            tips.SetToolTip(remember, "使用 DPAPI 加密。不勾选时凭据只在内存中使用，连接成功也不会写入磁盘。");
             authLayout.Controls.Add(remember, 0, 4);
 
             // Connection action buttons row
@@ -969,9 +993,10 @@ internal static class Program
 
             var toolHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty, BackColor = CardBgColor };
             toolHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            toolHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 200));
+            toolHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             var toolTitle = new Label { Text = "系统服务与移动热点", Dock = DockStyle.Fill, Font = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold), ForeColor = Color.FromArgb(30, 41, 59), TextAlign = ContentAlignment.MiddleLeft, BackColor = CardBgColor };
-            var toolSubtitle = new Label { Text = "切换天翼后台或设置网络共享", Dock = DockStyle.Fill, Font = new Font("Microsoft YaHei UI", 8F), ForeColor = Color.FromArgb(148, 163, 184), TextAlign = ContentAlignment.MiddleRight, BackColor = CardBgColor };
+            var toolSubtitle = new Label { Text = "服务切换 · 网络共享", Dock = DockStyle.Fill, Font = new Font("Microsoft YaHei UI", 8F), ForeColor = Color.FromArgb(148, 163, 184), TextAlign = ContentAlignment.MiddleRight, BackColor = CardBgColor };
+            toolTitle.Margin = Padding.Empty; toolSubtitle.Margin = new Padding(8, 0, 0, 0); toolSubtitle.AutoSize = true;
             toolHeader.Controls.Add(toolTitle, 0, 0); toolHeader.Controls.Add(toolSubtitle, 1, 0);
             toolLayout.Controls.Add(toolHeader, 0, 0);
 
@@ -990,11 +1015,11 @@ internal static class Program
             // Status Card
             statusCard.Dock = DockStyle.Fill;
             status.Text = "输入校园网账号和密码，点击“立即连接”即可。";
-            status.Dock = DockStyle.Fill; status.ForeColor = Color.FromArgb(51, 65, 85); status.AutoEllipsis = true; status.TextAlign = ContentAlignment.MiddleLeft; status.Font = new Font("Microsoft YaHei UI", 9F);
+            status.Dock = DockStyle.Fill; status.ForeColor = Color.FromArgb(51, 65, 85); status.AutoEllipsis = false; status.Margin = Padding.Empty; status.TextAlign = ContentAlignment.MiddleLeft; status.Font = new Font("Microsoft YaHei UI", 9F);
             statusRow.Dock = DockStyle.Fill; statusRow.ColumnCount = 2; statusRow.RowCount = 1; statusRow.Margin = Padding.Empty; statusRow.Padding = new Padding(10, 0, 10, 0);
             statusRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 28));
             statusRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            dot.Size = new Size(18, 18); dot.Margin = new Padding(2, 13, 0, 0);
+            dot.Size = new Size(18, 18); dot.Margin = Padding.Empty; dot.Anchor = AnchorStyles.None;
             statusRow.Controls.Add(dot, 0, 0); statusRow.Controls.Add(status, 1, 0);
             statusCard.Controls.Add(statusRow);
             statusCard.SetTone(ToneInfo);
@@ -1011,6 +1036,86 @@ internal static class Program
 
             root.Controls.Add(layout);
             Controls.Add(root);
+            // Measure the real text and native inputs after the handle exists. Row
+            // heights include margins/padding, instead of assuming a fixed font.
+            reflowLayout = delegate {
+                if (layoutBusy || IsDisposed || !IsHandleCreated) return;
+                layoutBusy = true;
+                root.SuspendLayout(); layout.SuspendLayout(); authLayout.SuspendLayout(); toolLayout.SuspendLayout();
+                try
+                {
+                    using (Graphics g = CreateGraphics())
+                    {
+                        Func<int, int> px = value => Math.Max(1, (int)Math.Ceiling(value * g.DpiY / 96F));
+                        int available = Math.Max(1, root.ClientSize.Width - root.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth);
+                        int innerWidth = Math.Max(px(120), available - authLayout.Padding.Horizontal - px(6));
+                        int labelWidth = px(88);
+                        foreach (Control row in authLayout.Controls)
+                        {
+                            var rowTable = row as TableLayoutPanel;
+                            if (rowTable == null || !(rowTable.GetControlFromPosition(0, 0) is Label) ||
+                                !(rowTable.GetControlFromPosition(1, 0) is InputContainer)) continue;
+                            Label fieldLabel = (Label)rowTable.GetControlFromPosition(0, 0);
+                            labelWidth = Math.Max(labelWidth, MeasureLine(g, fieldLabel.Text, fieldLabel.Font).Width + px(12));
+                        }
+                        foreach (Control row in authLayout.Controls)
+                        {
+                            var rowTable = row as TableLayoutPanel;
+                            if (rowTable != null && rowTable.GetControlFromPosition(1, 0) is InputContainer)
+                                rowTable.ColumnStyles[0].Width = labelWidth;
+                        }
+
+                        int pillWidth = Math.Max(px(116), MeasureLine(g, "已联网·会话", statusPill.Font).Width + px(36));
+                        header.ColumnStyles[0].Width = px(56);
+                        header.ColumnStyles[2].Width = pillWidth + px(8);
+                        statusPill.Size = new Size(pillWidth, Math.Max(px(30), MeasureLine(g, "已联网·会话", statusPill.Font).Height + px(8)));
+                        int headingWidth = Math.Max(px(80), available - px(56) - pillWidth - px(8));
+                        int titleHeight = MeasureWrapped(g, headingTitle.Text, headingTitle.Font, headingWidth) + px(5);
+                        int subHeight = MeasureWrapped(g, headingSub.Text, headingSub.Font, headingWidth) + px(5);
+                        heading.RowStyles[0].Height = titleHeight; heading.RowStyles[1].Height = subHeight;
+                        layout.RowStyles[0].Height = Math.Max(px(62), Math.Max(titleHeight + subHeight + px(4), statusPill.Height + px(8)));
+
+                        int authTitleHeight = Math.Max(MeasureLine(g, authTitle.Text, authTitle.Font).Height, MeasureLine(g, authSubtitle.Text, authSubtitle.Font).Height) + px(10);
+                        int fieldHeight = Math.Max(px(44), Math.Max(account.PreferredHeight + accountBox.Padding.Vertical,
+                            Math.Max(password.PreferredHeight + passwordBox.Padding.Vertical + px(8),
+                            channel.PreferredHeight + channelBox.Padding.Vertical)) + px(10));
+                        passInner.ColumnStyles[1].Width = Math.Max(px(62), MeasureLine(g, "隐藏", reveal.Font).Width + px(20));
+                        int rememberHeight = Math.Max(px(32), MeasureWrapped(g, remember.Text, remember.Font, Math.Max(px(60), innerWidth - px(28))) + px(12));
+                        int actionHeight = Math.Max(px(54), Math.Max(MeasureLine(g, "立即连接", connect.Font).Height,
+                            MeasureLine(g, "强制结束", stop.Font).Height) + px(24));
+                        authLayout.RowStyles[0].Height = authTitleHeight;
+                        for (int i = 1; i <= 3; i++) authLayout.RowStyles[i].Height = fieldHeight;
+                        authLayout.RowStyles[4].Height = rememberHeight;
+                        authLayout.RowStyles[5].Height = actionHeight;
+                        layout.RowStyles[2].Height = authTitleHeight + fieldHeight * 3 + rememberHeight + actionHeight + authLayout.Padding.Vertical + authCard.Margin.Vertical + px(4);
+
+                        int toolTitleHeight = Math.Max(MeasureLine(g, toolTitle.Text, toolTitle.Font).Height,
+                            MeasureLine(g, toolSubtitle.Text, toolSubtitle.Font).Height) + px(10);
+                        int toolButtonHeight = Math.Max(px(46), MeasureLine(g, "准备连接", prepare.Font).Height + px(20));
+                        toolLayout.RowStyles[0].Height = toolTitleHeight;
+                        toolLayout.RowStyles[1].Height = toolButtonHeight;
+                        layout.RowStyles[4].Height = toolTitleHeight + toolButtonHeight + toolLayout.Padding.Vertical + toolCard.Margin.Vertical + px(4);
+                        statusRow.ColumnStyles[0].Width = px(28);
+                        dot.Size = new Size(px(18), px(18));
+                        layout.RowStyles[6].Height = Math.Max(px(52), MeasureWrapped(g, status.Text, status.Font,
+                            Math.Max(px(80), available - statusRow.Padding.Horizontal - px(36))) + px(18) + statusCard.Margin.Vertical);
+                        footer.ColumnStyles[1].Width = MeasureLine(g, exit.Text, exit.Font).Width + px(16);
+                        layout.RowStyles[8].Height = Math.Max(px(30), Math.Max(MeasureLine(g, about.Text, about.Font).Height,
+                            MeasureLine(g, exit.Text, exit.Font).Height) + px(12));
+                        for (int i = 1; i < 8; i += 2) layout.RowStyles[i].Height = px(12);
+                        int total = 0;
+                        foreach (RowStyle style in layout.RowStyles) total += (int)Math.Ceiling(style.Height);
+                        layout.Height = total;
+                        root.AutoScrollMinSize = new Size(0, total + root.Padding.Vertical);
+                    }
+                }
+                finally
+                {
+                    toolLayout.ResumeLayout(true); authLayout.ResumeLayout(true); layout.ResumeLayout(true); root.ResumeLayout(true); layoutBusy = false;
+                }
+            };
+            root.SizeChanged += delegate { RefreshAdaptiveLayout(); };
+            status.TextChanged += delegate { RefreshAdaptiveLayout(); };
             AcceptButton = connect;
 
             try
@@ -1082,6 +1187,8 @@ internal static class Program
             about.LinkClicked += delegate { ShowAbout(); };
             exit.LinkClicked += delegate { exitRequested = true; Close(); };
             Shown += delegate {
+                FitInitialWindow();
+                RefreshAdaptiveLayout();
                 // A11：WMI 检查（冷启动可达数秒）移出 UI 线程，先给即时提示
                 if (credentialLoadError != null) SetStatus(credentialLoadError, ToneWarn);
                 else if (loadedCredential) SetStatus("已载入保存的账号，正在检查天翼服务状态……", ToneOk);
@@ -1109,11 +1216,49 @@ internal static class Program
             };
         }
 
+        private static Size MeasureLine(Graphics graphics, string value, Font font)
+        {
+            return TextRenderer.MeasureText(graphics, value ?? "", font, new Size(32767, 32767),
+                TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+        }
+
+        private static int MeasureWrapped(Graphics graphics, string value, Font font, int width)
+        {
+            return TextRenderer.MeasureText(graphics, value ?? "", font, new Size(Math.Max(1, width), 32767),
+                TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height;
+        }
+
+        private void RefreshAdaptiveLayout()
+        {
+            if (reflowLayout != null) reflowLayout();
+        }
+
+        private void FitInitialWindow()
+        {
+            RefreshAdaptiveLayout();
+            Rectangle work = Screen.FromControl(this).WorkingArea;
+            int wanted = mainLayout.Height + scrollRoot.Padding.Vertical + (Height - ClientSize.Height);
+            int height = Math.Min(work.Height, Math.Max(Height, wanted + 4));
+            int width = Math.Min(work.Width, Width);
+            Size = new Size(width, height);
+            Location = new Point(work.Left + Math.Max(0, (work.Width - Width) / 2),
+                work.Top + Math.Max(0, (work.Height - Height) / 2));
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            const int WM_DPICHANGED = 0x02E0;
+            base.WndProc(ref m);
+            if (m.Msg == WM_DPICHANGED && IsHandleCreated && !IsDisposed)
+                try { BeginInvoke((Action)RefreshAdaptiveLayout); } catch (InvalidOperationException) { }
+        }
+
         internal void ShowFromTray()
         {
             if (IsDisposed) return;
             Show();
             if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+            RefreshAdaptiveLayout();
             BringToFront(); Activate();
         }
 
@@ -1122,6 +1267,81 @@ internal static class Program
             password.UseSystemPasswordChar = true; reveal.Text = "显示";
             Hide();
             if (!isSelfTest) try { tray.ShowBalloonTip(1500, "澈知科技", "已最小化到托盘，程序仍在运行；双击图标可重新打开。", ToolTipIcon.Info); } catch { }
+        }
+
+        internal bool CheckAdaptiveLayoutForTest()
+        {
+            Size original = Size;
+            var fonts = new Dictionary<Control, Font>();
+            var enlarged = new List<Font>();
+            string oldStatus = status.Text;
+            try
+            {
+                if (!CheckLayoutBounds(mainLayout)) return false;
+                // Exercise increased font metrics, not a claim of real monitor DPI.
+                foreach (Control c in Descendants(mainLayout))
+                {
+                    if (!(c is Label || c is Button || c is CheckBox || c is TextBox || c is ComboBox || c is StatusPill)) continue;
+                    fonts[c] = c.Font;
+                    var f = new Font(c.Font.FontFamily, c.Font.Size * 1.25F, c.Font.Style);
+                    enlarged.Add(f); c.Font = f;
+                }
+                Width = Math.Max(MinimumSize.Width, original.Width);
+                Height = Math.Max(MinimumSize.Height, Math.Min(original.Height, 500));
+                status.Text = "正在等待接入校园网，请检查电脑的 Wi-Fi 或网线连接；如遇网络异常，可停止并重新连接。";
+                RefreshAdaptiveLayout(); Application.DoEvents();
+                if (!CheckLayoutBounds(mainLayout)) return false;
+                Console.WriteLine("UI_LAYOUT_PASS");
+                return true;
+            }
+            finally
+            {
+                foreach (var item in fonts) item.Key.Font = item.Value;
+                foreach (Font font in enlarged) font.Dispose();
+                status.Text = oldStatus; Size = original;
+                RefreshAdaptiveLayout(); Application.DoEvents();
+            }
+        }
+
+        private static IEnumerable<Control> Descendants(Control parent)
+        {
+            foreach (Control child in parent.Controls)
+            {
+                yield return child;
+                foreach (Control descendant in Descendants(child)) yield return descendant;
+            }
+        }
+
+        private bool CheckLayoutBounds(Control parent)
+        {
+            using (Graphics g = CreateGraphics())
+            {
+                foreach (Control c in Descendants(parent))
+                {
+                    if (c.Width <= 0 || c.Height <= 0) { Console.WriteLine("UI_LAYOUT_EMPTY " + c.GetType().Name); return false; }
+                    var label = c as Label;
+                    if (label != null && label.Text.Length > 0)
+                    {
+                        int h = MeasureWrapped(g, label.Text, label.Font, Math.Max(1, label.ClientSize.Width - label.Padding.Horizontal));
+                        if (h > label.ClientSize.Height + 2)
+                        { Console.WriteLine("UI_LAYOUT_LABEL_CLIPPED " + label.Text + " " + h + "/" + label.Height); return false; }
+                    }
+                    var check = c as CheckBox;
+                    if (check != null && check.Height < MeasureWrapped(g, check.Text, check.Font,
+                        Math.Max(1, check.ClientSize.Width - (int)(28 * g.DpiX / 96F))))
+                    { Console.WriteLine("UI_LAYOUT_CHECKBOX_CLIPPED"); return false; }
+                    var input = c as TextBox;
+                    if (input != null && input.Height < input.PreferredHeight)
+                    { Console.WriteLine("UI_LAYOUT_INPUT_CLIPPED"); return false; }
+                    var combo = c as ComboBox;
+                    if (combo != null && combo.Height < combo.PreferredHeight)
+                    { Console.WriteLine("UI_LAYOUT_COMBO_CLIPPED"); return false; }
+                    if (c.Parent != null && c.Parent != scrollRoot &&
+                        (c.Left < -2 || c.Top < -2 || c.Right > c.Parent.ClientSize.Width + 2 || c.Bottom > c.Parent.ClientSize.Height + 2))
+                    { Console.WriteLine("UI_LAYOUT_OUTSIDE " + c.GetType().Name); return false; }
+                }
+            }
+            return true;
         }
 
         internal bool CheckTrayAndSaveForTest()
@@ -1243,9 +1463,9 @@ internal static class Program
         private static void AddField(TableLayoutPanel layout, string text, Control field, int row)
         {
             var rowTable = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty, BackColor = CardBgColor };
-            rowTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
+            rowTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88));
             rowTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            var label = new Label { Text = text, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.FromArgb(71, 85, 105), Font = new Font("Microsoft YaHei UI", 9.5F), BackColor = CardBgColor };
+            var label = new Label { Text = text, Dock = DockStyle.Fill, Margin = Padding.Empty, TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.FromArgb(71, 85, 105), Font = new Font("Microsoft YaHei UI", 9.5F), BackColor = CardBgColor };
             field.Dock = DockStyle.Fill;
             rowTable.Controls.Add(label, 0, 0);
             rowTable.Controls.Add(field, 1, 0);
@@ -1257,6 +1477,7 @@ internal static class Program
         private static GraphicsPath CreateRoundedPath(Rectangle rect, int radius)
         {
             var path = new GraphicsPath();
+            if (rect.Width <= 0 || rect.Height <= 0) return path;
             if (radius <= 0)
             {
                 path.AddRectangle(rect);
@@ -1402,7 +1623,22 @@ internal static class Program
                 SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
                 BackColor = CardBgColor;
                 Controls.Add(child);
+                if (child is TextBox || child is ComboBox) { child.Dock = DockStyle.None; child.Anchor = AnchorStyles.Left | AnchorStyles.Right; }
                 AttachEvents(child);
+            }
+
+            protected override void OnLayout(LayoutEventArgs e)
+            {
+                base.OnLayout(e);
+                if (Controls.Count != 1) return;
+                Control child = Controls[0];
+                int height = child is TextBox ? ((TextBox)child).PreferredHeight :
+                    child is ComboBox ? ((ComboBox)child).PreferredHeight : 0;
+                if (height <= 0) return;
+                Rectangle area = DisplayRectangle;
+                Rectangle bounds = new Rectangle(area.X, area.Y + Math.Max(0, (area.Height - height) / 2),
+                    Math.Max(1, area.Width), height);
+                if (child.Bounds != bounds) child.Bounds = bounds;
             }
 
             private void AttachEvents(Control c)
@@ -1526,19 +1762,17 @@ internal static class Program
                     using (var pen = new Pen(Color.FromArgb(90, color.R, color.G, color.B), 1.2f)) e.Graphics.DrawPath(pen, path);
                 }
 
-                int dotSize = 6;
-                int dotX = 12;
+                int dotSize = Math.Max(4, (int)Math.Round(6 * e.Graphics.DpiY / 96F));
+                int dotX = Math.Max(8, (int)Math.Round(12 * e.Graphics.DpiX / 96F));
                 int dotY = (Height - dotSize) / 2;
                 using (var dotBrush = new SolidBrush(color))
                 {
                     e.Graphics.FillEllipse(dotBrush, dotX, dotY, dotSize, dotSize);
                 }
 
-                var textRect = new Rectangle(dotX + dotSize + 6, 0, Width - (dotX + dotSize + 10), Height);
-                using (var font = new Font("Microsoft YaHei UI", 8.5F, FontStyle.Bold))
-                {
-                    TextRenderer.DrawText(e.Graphics, text, font, textRect, color, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
-                }
+                int gap = Math.Max(4, (int)Math.Round(6 * e.Graphics.DpiX / 96F));
+                var textRect = new Rectangle(dotX + dotSize + gap, 0, Math.Max(1, Width - dotX - dotSize - gap * 2), Height);
+                TextRenderer.DrawText(e.Graphics, text, Font, textRect, color, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
             }
         }
 
@@ -1558,35 +1792,24 @@ internal static class Program
                 Color parentColor = Parent != null && Parent.BackColor != Color.Transparent ? Parent.BackColor : FormBgColor;
                 e.Graphics.Clear(parentColor);
 
-                int badgeSize = 42;
+                int badgeSize = Math.Min(Math.Min(Width, Height) - 2, (int)Math.Round(42 * e.Graphics.DpiY / 96F));
+                if (badgeSize < 12) return;
+                float scale = badgeSize / 42F;
                 int badgeY = (Height - badgeSize) / 2;
                 var badgeRect = new Rectangle(0, badgeY, badgeSize, badgeSize);
-                using (var path = CreateRoundedPath(badgeRect, 10))
+                using (var path = CreateRoundedPath(badgeRect, Math.Max(1, (int)(10 * scale))))
                 using (var brush = new LinearGradientBrush(badgeRect, Color.FromArgb(30, 96, 213), Color.FromArgb(20, 70, 180), 45f))
-                {
                     e.Graphics.FillPath(brush, path);
+                using (var pen = new Pen(Color.White, 2.2f * scale))
+                {
+                    pen.StartCap = LineCap.Round; pen.EndCap = LineCap.Round;
+                    float cx = badgeRect.X + badgeSize / 2F;
+                    float cy = badgeRect.Y + badgeSize / 2F + 7 * scale;
+                    using (var dotBrush = new SolidBrush(Color.White)) e.Graphics.FillEllipse(dotBrush, cx - 2 * scale, cy - 2 * scale, 4 * scale, 4 * scale);
+                    e.Graphics.DrawArc(pen, cx - 7 * scale, cy - 7 * scale, 14 * scale, 14 * scale, 215, 110);
+                    e.Graphics.DrawArc(pen, cx - 13 * scale, cy - 13 * scale, 26 * scale, 26 * scale, 215, 110);
                 }
 
-                using (var pen = new Pen(Color.White, 2.2f))
-                {
-                    pen.StartCap = LineCap.Round;
-                    pen.EndCap = LineCap.Round;
-                    int cx = badgeRect.X + badgeSize / 2;
-                    int cy = badgeRect.Y + badgeSize / 2 + 7;
-                    using (var dotBrush = new SolidBrush(Color.White)) e.Graphics.FillEllipse(dotBrush, cx - 2, cy - 2, 4, 4);
-                    e.Graphics.DrawArc(pen, cx - 7, cy - 7, 14, 14, 215, 110);
-                    e.Graphics.DrawArc(pen, cx - 13, cy - 13, 26, 26, 215, 110);
-                }
-
-                using (var titleFont = new Font("Microsoft YaHei UI", 14.5F, FontStyle.Bold))
-                {
-                    TextRenderer.DrawText(e.Graphics, "澈知科技", titleFont, new Point(52, badgeY - 1), Color.FromArgb(17, 24, 39));
-                }
-
-                using (var subFont = new Font("Microsoft YaHei UI", 8.5F, FontStyle.Regular))
-                {
-                    TextRenderer.DrawText(e.Graphics, "校园网便捷认证 · 共享移动热点", subFont, new Point(53, badgeY + 22), Color.FromArgb(100, 116, 139));
-                }
             }
         }
 

@@ -260,3 +260,8 @@ CODE_IMPLEMENTED：上述机制已提交，尚不能认定全部 B 项 FIXED_VER
 - Run 45422759183（4ce8ba3）：全量构建通过；logic/credentials/core/stop 均 PASS，强制 UI 自测退出码 0；新增 Authenticode 自测真实失败，WinVerifyTrust 抛 AccessViolationException（-1073741819）。后续扫描与上传未执行。
 - 对照 Windows SDK WINTRUST_DATA 定义（https://learn.microsoft.com/windows/win32/api/wintrust/ns-wintrust-wintrust_data），修正两个 LPVOID 字段由 uint 为 IntPtr。增加 x86/x64 所有字段偏移和结构体大小校验，调用前 fail-closed；logic 自测覆盖布局，签名自测分阶段输出并重复验证可信文件。
 - 保留签名强制门禁，不捕获或忽略原生内存访问异常；新提交 CI 待验证。真实官方天翼文件仍需只读实机核验。
+
+
+### 用户实机 UI 回归修复
+
+用户在 f906561 候选版反馈标题/副标题重叠、设备类型和记住密码文字裁切；前次 UI_TRAY_PASS 仅覆盖功能，不是视觉布局通过。保留既有界面风格与认证逻辑，改用实际文字度量/独立标签/自适应行高及垂直滚动；新增 UI_LAYOUT_PASS 门禁。真实多 DPI 待验证。未签名提示是既知 A23 发布限制，不能通过伪造签名或禁用安全设置解决。
