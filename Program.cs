@@ -22,8 +22,8 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("澈知科技校园网连接")]
 [assembly: AssemblyDescription("校园网认证客户端（含 Windows 移动热点设置入口）")]
 [assembly: AssemblyCompany("澈知科技")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 
 internal static class Program
 {

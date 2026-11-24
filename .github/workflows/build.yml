@@ -28,6 +28,7 @@ jobs:
         run: ./scripts/Fetch-Curl.ps1
 
       - name: Set up MinGW-w64 (UCRT64)
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -36,12 +37,31 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-ninja
 
+      - name: Resolve MSYS2 toolchain root
+        # setup-msys2 的安装位置随 runner 环境变化（实测 hostedtoolcache 提取后不在
+        # C:\msys64）：优先 action 输出，其次探测常见候选，找不到即失败。
+        shell: pwsh
+        run: |
+          $candidates = @(
+            '${{ steps.msys2.outputs.msys2-location }}',
+            'C:\msys64',
+            "$env:RUNNER_TEMP\msys64",
+            'D:\a\_msys64'
+          ) | Where-Object { $_ -and (Test-Path (Join-Path $_ 'ucrt64\bin\gcc.exe')) }
+          if (-not $candidates) {
+            $found = Get-ChildItem -Path C:\,D:\ -Filter gcc.exe -Recurse -Depth 5 -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match 'ucrt64\\bin\\gcc\.exe$' } | Select-Object -First 1
+            if ($found) { $candidates = @((Split-Path (Split-Path (Split-Path $found.FullName)))) }
+          }
+          if (-not $candidates) { throw '未找到 ucrt64 GCC（MSYS2 安装位置解析失败）' }
+          Write-Host "MSYS2 root: $($candidates[0])"
+          "MSYS2_ROOT=$($candidates[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Toolchain versions
         shell: pwsh
         run: |
           cmake --version | Select-Object -First 1
-          ninja --version
-          & 'C:\msys64\ucrt64\bin\gcc.exe' --version | Select-Object -First 1
+          & "$env:MSYS2_ROOT\ucrt64\bin\gcc.exe" --version | Select-Object -First 1
           Test-Path "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 
       - name: Build core and GUI from source
@@ -49,9 +69,9 @@ jobs:
         run: |
           ./Build-Core.ps1 `
             -CMake (Get-Command cmake.exe).Source `
-            -Ninja 'C:\msys64\ucrt64\bin\ninja.exe' `
-            -Gcc 'C:\msys64\ucrt64\bin\gcc.exe' `
-            -Gxx 'C:\msys64\ucrt64\bin\g++.exe'
+            -Ninja (Join-Path $env:MSYS2_ROOT 'ucrt64\bin\ninja.exe') `
+            -Gcc (Join-Path $env:MSYS2_ROOT 'ucrt64\bin\gcc.exe') `
+            -Gxx (Join-Path $env:MSYS2_ROOT 'ucrt64\bin\g++.exe')
       # 说明：Build-Core.ps1 同时产出认证核心与桌面 EXE（核心哈希已写入其生成源码），
       # 二者自洽。不再在 CI 上运行 Build.ps1 —— 仓库提交的 CoreHash 与 CI 现编核心
       # 的哈希逐字节一致在本工具链下不可保证（实测同机重编哈希即变）。
@@ -89,5 +109,5 @@ jobs:
             build-core/澈知科技-源码重建.exe
             build-core/认证核心-源码重建.exe
             build-core/build-manifest.json
-            build-core/gui-build-manifest.json
+            build-core/澈知科技-源码重建.exe.config
           if-no-files-found: error
