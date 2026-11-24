@@ -137,6 +137,24 @@ internal static class ServiceIdentity
             String.Equals(name, "中数通信息有限公司·电信信息化部", StringComparison.Ordinal);
     }
 
+    // Read-only diagnostics. Never accept a file because the diagnostic is informative.
+    internal static string VerificationReason(string exePath)
+    {
+        if (String.IsNullOrEmpty(exePath)) return "path_unresolved";
+        if (!File.Exists(exePath)) return "file_missing";
+        try
+        {
+            using (var raw = System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(exePath))
+            using (var cert = new System.Security.Cryptography.X509Certificates.X509Certificate2(raw))
+            {
+                string name = cert.GetNameInfo(System.Security.Cryptography.X509Certificates.X509NameType.SimpleName, false);
+                if (!HasValidSignature(exePath)) return "signature_untrusted";
+                return IsKnownPublisher(name, cert.Subject) ? "verified" : "publisher_not_allowlisted";
+            }
+        }
+        catch { return "signature_unavailable"; }
+    }
+
     internal static string Describe(string exePath)
     {
         try

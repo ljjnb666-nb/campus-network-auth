@@ -171,8 +171,11 @@ internal static class Program
         catch { }
     }
 
-    private static int ClientCount()
+    private static int ClientCount() { bool visible; return ReadClients(out visible); }
+
+    private static int ReadClients(out bool visible)
     {
+        visible = false;
         // At handoff no live owned core is permitted; count even stale extracted cores.
         Process[] matches = Process.GetProcessesByName("ESurfingClient");
         try
@@ -180,7 +183,9 @@ internal static class Program
             int count = 0;
             foreach (Process process in matches)
             {
-                try { if (!process.HasExited) count++; } catch { count++; }
+                try { if (process.HasExited) continue; } catch { count++; continue; }
+                count++;
+                try { if (process.MainWindowHandle != IntPtr.Zero) visible = true; } catch { }
             }
             return count;
         }
@@ -194,9 +199,10 @@ internal static class Program
     {
         internal readonly ConnectionStates.ServiceState Service;
         internal readonly int Clients;
-        internal HandoffObservation(ConnectionStates.ServiceState service, int clients) { Service = service; Clients = clients; }
+        internal readonly bool VisibleClient;
+        internal HandoffObservation(ConnectionStates.ServiceState service, int clients, bool visible = false) { Service = service; Clients = clients; VisibleClient = visible; }
         internal ConnectionStates.HandoffDecision Decide(ConnectionStates.HandoffIntent intent)
-        { return ConnectionStates.DecideHandoff(intent, Service, Clients); }
+        { return ConnectionStates.DecideHandoff(intent, Service, Clients, VisibleClient); }
     }
     private static ConnectionStates.ServiceState MapServiceState(string value)
     {
@@ -212,7 +218,7 @@ internal static class Program
     }
     private static HandoffObservation ObserveHandoff()
     {
-        try { return new HandoffObservation(MapServiceState(CurrentServiceState()), ClientCount()); }
+        try { bool visible; int count = ReadClients(out visible); return new HandoffObservation(MapServiceState(CurrentServiceState()), count, visible); }
         catch { return new HandoffObservation(ConnectionStates.ServiceState.Unknown, -1); }
     }
     private static string HandoffMessage(ConnectionStates.HandoffDecision decision)
@@ -572,7 +578,8 @@ internal static class Program
         ok &= ConnectionStates.DecideHandoff(p, stopped, 0) == ConnectionStates.HandoffDecision.Ready;
         ok &= ConnectionStates.DecideHandoff(p, absent, 0) == ConnectionStates.HandoffDecision.Ready;
         ok &= ConnectionStates.DecideHandoff(r, running, 0) == ConnectionStates.HandoffDecision.LaunchClient;
-        ok &= ConnectionStates.DecideHandoff(r, running, 1) == ConnectionStates.HandoffDecision.ExistingClient;
+        ok &= ConnectionStates.DecideHandoff(r, running, 1, true) == ConnectionStates.HandoffDecision.ExistingClient;
+        ok &= ConnectionStates.DecideHandoff(r, running, 1, false) == ConnectionStates.HandoffDecision.WaitForClient;
         ok &= ConnectionStates.DecideHandoff(r, stopped, 0) == ConnectionStates.HandoffDecision.NeedStartService;
         var model = new ConnectionState();
         foreach (ConnectionStates.HandoffState phase in Enum.GetValues(typeof(ConnectionStates.HandoffState)))
@@ -2382,6 +2389,7 @@ internal static class Program
 
         private void BeginStop()
         {
+            if (serviceBusy) { SetStatus("正在进行系统服务切换，完成后才能停止或退出。", ToneWarn); return; }
             // Cancellation intent is independent of process existence and invalidates outstanding checks.
             userStopped = true; taskGeneration++; retryTimer.Stop(); activeTask = null;
             if (running == null || running.HasExited)
@@ -2462,17 +2470,29 @@ internal static class Program
             catch { if (!IsDisposed) SetStatus("无法读取服务恢复记录，请手动核对。", ToneWarn); }
         }
 
+        private static string IdentityReasonText(string reason)
+        {
+            switch (reason)
+            {
+                case "path_unresolved": return "未找到程序路径";
+                case "file_missing": return "文件不存在";
+                case "signature_untrusted": return "签名信任验证失败";
+                case "publisher_not_allowlisted": return "发布者尚未确认";
+                case "signature_unavailable": return "无法读取数字签名";
+                default: return "身份检查异常";
+            }
+        }
+
         private async Task<bool> LaunchOfficialAsync(int generation)
         {
-            SetHandoff(ConnectionStates.HandoffState.Launching, "正在定位并验证官方天翼客户端……", ToneBusy, true);
-            string client = await Task.Run(delegate {
-                string path = FindOfficialClient();
-                return path != null && ServiceIdentity.VerifyExpectedService(path) ? path : null;
-            });
             if (HandoffCancelled(generation, false)) return false;
-            if (client == null)
+            SetHandoff(ConnectionStates.HandoffState.Launching, "正在定位并验证官方天翼客户端……", ToneBusy, true);
+            string client = await Task.Run((Func<string>)FindOfficialClient);
+            string reason = await Task.Run(() => ServiceIdentity.VerificationReason(client));
+            if (HandoffCancelled(generation, false)) return false;
+            if (reason != "verified")
             {
-                SetHandoff(ConnectionStates.HandoffState.Blocked, "服务状态已处理，但未找到可验证身份的天翼客户端。请从开始菜单手动启动。", ToneWarn);
+                SetHandoff(ConnectionStates.HandoffState.Blocked, "后台服务已检查，但无法自动启动天翼客户端（" + IdentityReasonText(reason) + "）。请从开始菜单手动启动。", ToneWarn);
                 return false;
             }
             var observation = await Task.Run((Func<HandoffObservation>)ObserveHandoff);
@@ -2567,7 +2587,16 @@ internal static class Program
                     { SetHandoff(ConnectionStates.HandoffState.Ready, "准备完成，可以连接校园网。", ToneOk); return true; }
                     return await LaunchOfficialAsync(generation);
                 }
-                SetHandoff(ConnectionStates.HandoffState.Blocked, code == 0 || code == 10 ? "服务结果未得到确认，请核对实际状态。" : ServiceError(code ?? 25), ToneWarn);
+                string failure = code == 0 || code == 10 ? "服务结果未得到确认，请核对实际状态。" : ServiceError(code ?? 25);
+                if (code == 21)
+                {
+                    string reason = await Task.Run(delegate {
+                        try { return ServiceIdentity.VerificationReason(ServiceExePath()); } catch { return "path_unresolved"; }
+                    });
+                    if (HandoffCancelled(generation, fromConnect)) return false;
+                    failure += " 当前只读检查：" + IdentityReasonText(reason) + "。";
+                }
+                SetHandoff(ConnectionStates.HandoffState.Blocked, failure, ToneWarn);
                 return false;
             }
             catch (Win32Exception e)

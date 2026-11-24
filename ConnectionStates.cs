@@ -21,12 +21,12 @@ internal static class ConnectionStates
     internal enum HandoffIntent { Connect, Prepare, Restore }
     internal enum HandoffDecision { Ready, WaitForClient, WaitForService, NeedStopService, NeedStartService, LaunchClient, ExistingClient, BlockUnknown }
 
-    internal static HandoffDecision DecideHandoff(HandoffIntent intent, ServiceState service, int clients)
+    internal static HandoffDecision DecideHandoff(HandoffIntent intent, ServiceState service, int clients, bool visibleClient = false)
     {
         if (clients < 0 || service == ServiceState.Unknown || service == ServiceState.Failed) return HandoffDecision.BlockUnknown;
         if (service == ServiceState.Transitioning) return HandoffDecision.WaitForService;
         if (clients > 0)
-            return intent == HandoffIntent.Restore && service == ServiceState.Running ? HandoffDecision.ExistingClient : HandoffDecision.WaitForClient;
+            return intent == HandoffIntent.Restore && service == ServiceState.Running && visibleClient ? HandoffDecision.ExistingClient : HandoffDecision.WaitForClient;
         if (intent == HandoffIntent.Restore)
             return service == ServiceState.Stopped ? HandoffDecision.NeedStartService : HandoffDecision.LaunchClient;
         return service == ServiceState.Running ? HandoffDecision.NeedStopService : HandoffDecision.Ready;
