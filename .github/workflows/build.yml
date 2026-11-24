@@ -80,17 +80,23 @@ jobs:
         shell: pwsh
         run: |
           $exe = 'build-core\澈知科技-源码重建.exe'
-          & $exe --self-test-logic;      if ($LASTEXITCODE -ne 0) { exit 1 }
-          & $exe --self-test-credentials; if ($LASTEXITCODE -ne 0) { exit 1 }
-          & $exe --self-test-core;       if ($LASTEXITCODE -ne 0) { exit 1 }
-          & $exe --self-test-stop        # 离线 probe 钩子：仅验证 STOP 通道，不触碰真实认证
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          # 注意：pwsh 的 & 不等待 GUI 子系统进程（$LASTEXITCODE 不设置），
+          # 必须用 Start-Process -Wait 显式等待并取真实退出码
+          function Invoke-SelfTest([string]$testArgs) {
+            $p = Start-Process -FilePath $exe -ArgumentList $testArgs -Wait -PassThru -NoNewWindow
+            if ($p.ExitCode -ne 0) { Write-Host "##[error]自测失败: $testArgs (exit $($p.ExitCode))"; exit 1 }
+          }
+          Invoke-SelfTest '--self-test-logic'
+          Invoke-SelfTest '--self-test-credentials'
+          Invoke-SelfTest '--self-test-core'
+          Invoke-SelfTest '--self-test-stop'   # 离线 probe 钩子：仅验证 STOP 通道与结构化事件，不触碰真实认证
 
       - name: Offline UI self-test (best effort)
         shell: pwsh
         continue-on-error: true
         run: |
-          & 'build-core\澈知科技-源码重建.exe' --self-test-ui
+          $p = Start-Process -FilePath 'build-core\澈知科技-源码重建.exe' -ArgumentList '--self-test-ui' -Wait -PassThru -NoNewWindow
+          Write-Host "UI test exit: $($p.ExitCode)"
 
       - name: Secret scan
         shell: pwsh

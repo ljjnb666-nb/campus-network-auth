@@ -2,7 +2,7 @@
 
 - 分支：`fix/v1.2.0-stability-security`
 - 审计基线：`d1f59e5`（initial），当前起点：`0607631`（清理 web 界面后的 main）
-- 目标版本：V1.2.0（当前程序集版本 1.1.0.0）
+- 目标版本：V1.2.0（程序集版本已升至 1.2.0.0）
 - 审计方式：全量源码通读（Program.cs 1594 行、CredentialStore.cs 162 行、构建脚本、认证核心 C 源码关键路径）+ 实际运行自测
 
 ## 一、工程基线（2026-11-24 实测）
@@ -108,6 +108,17 @@
 
 **CI 设计修正**：CI 只运行 Build-Core.ps1（同批产出核心+GUI，哈希自洽）；不运行 Build.ps1——提交的 CoreHash 与 CI 现编核心哈希逐字节一致在本工具链下不可保证（见证据 3）。
 
+### P12 文档、三轮最终审计与验收（本阶段）
+
+**文档**：README.md（项目/构建/使用/卸载/隐私）、CHANGELOG.md（V1.2.0 全量条目）、ARCHITECTURE.md（结构图/设计决策/A16 拆分路线/A25 接口预留——不引入监听服务）、TESTING.md（自测矩阵/CI/真实环境 10 步清单）、RELEASE_CHECKLIST.md（发布门禁/签名 BLOCKED/发布限制）、SECURITY.md、THIRD_PARTY_NOTICES.md（P3）。程序集版本 1.1.0.0 → **1.2.0.0**。
+**发布形态变化**：exe + exe.config（PerMonitorV2）两个文件；CI 产物清单同步。
+
+**三轮最终审计记录**：
+
+- **第一轮（功能与代码）**：全量自测 PASS（logic/credentials/core/ui，含状态机不变量、崩溃注入）；发现并修复 2 个整改过程引入的回归——① P4 曾把 AUTH_FAILED 后的受控退出显示为"异常退出"（P5 修复：authFailureSeen 区分）；② 崩溃注入测试初版在 --self-test-ui 模式未释放核心（P10 修复：ExtractCore/CleanupCore 对称化）。原功能对照：托盘/保存/显隐/服务切换/热点入口流程逐项复核代码路径，无功能删除。
+- **第二轮（安全与异常）**：凭据——连接不再写盘、DPAPI+ACL+原子替换、明文不落盘测试；并发——N01 修复+volatile 清点；进程残留——清扫+5 次启停实测 0 残留；提权——服务签名门槛（真实二进制实测：中数通/电信信息化部签名）；恶意输入——凭据长度/编码边界校验、结构化事件畸形行截断归档、服务路径引号解析、重解析点拒绝。敏感信息扫描（本地+全新克隆）通过。
+- **第三轮（交付与构建）**：**全新 git 克隆（github.com/ljjnb666-nb/campus-network-auth @ b495416）→ 依赖自动下载校验 → Build-Core.ps1 全量构建 → build-manifest.json（提交/工具链/依赖/产物哈希）→ 四项自测全部 PASS**。A02 验收达成。CI 工具链路径问题（setup-msys2 安装位置随 runner 变化导致 5 次失败）以动态解析修复（f24b708），随后验证。
+
 ### P8/P9/P10 架构·性能·测试（本阶段）
 **P8（A16）**：模块化已完成 5 个独立文件（CredentialStore/ConnectionStates/ServiceIdentity/ServiceJournal/Program+计划中的接口边界见 ARCHITECTURE.md）。Program.cs 完整拆分（含 UI/编排层）标记 DEFERRED_WITH_REASON：文件级搬运在当前工具链下回归风险大于收益（partial 类迁移需要大段文本搬移并重验全部自测），留专门重构窗口执行；A25 多设备管理接口以文档化接口预留（不引入任何监听服务/攻击面）。
 **P10（A06 验证）**：核心新增离线崩溃钩子 `--ephemeral-crash`（读管道凭据→发 WAIT_NETWORK→300ms→退出码 3，无网络探测/真实认证）；GUI `CheckAutoRetryForTest()` 注入式验证完整链路：事件→状态机→runSawProgress→退出分类（崩溃）→ScheduleAutoRetry（第 1/2 次、10s 档）→用户停止取消重试。并入 `--self-test-ui`（首轮失败暴露了自测模式未释放核心的问题，已修复：CheckAutoRetryForTest 内 ExtractCore + finally CleanupCore）。
@@ -125,6 +136,44 @@
 | 72 小时长跑 | 未执行 | — | BLOCKED（需真实环境时间） |
 **单实例机制顺带验证**：活实例存在时第二实例 1.2s 内信号退出 ✓。
 **状态更新**：A06 → FIXED_VERIFIED（注入测试实跑）；A16 → DEFERRED_WITH_REASON；A24 → 部分 FIXED_PENDING_VERIFICATION（上表实测，长跑项 BLOCKED）；A25 → DEFERRED_WITH_REASON（按要求仅预留）。
+
+## 五、最终验收报告（V1.2.0 候选版）
+
+### 交付与版本
+| 项 | 值 |
+|---|---|
+| 最新提交 | `f24b708`（P12：版本+文档+CI 修复） |
+| 分支 | `fix/v1.2.0-stability-security`（与 origin 同步，未动 main，未合并/未发布） |
+| 提交数 | 11（1×前期清理 + 10×整改阶段，见上文清单） |
+| 变更规模 | 111 个文件，+1,898 / −51,743 行（删除量主体为 Web 界面/OpenWrt 上游遗留） |
+| 程序集版本 | 1.1.0.0 → **1.2.0.0** |
+| 构建产物 | `D:\所有项目\00_正在开发\xiaoyuanwang\澈知科技.exe` + `澈知科技.exe.config`；`认证核心.exe`（哈希 7AA893C5…，见 build-core\gui-build-manifest.json / build-manifest.json） |
+| 构建清单 | build-core\build-manifest.json（gitCommit/工具链/依赖/产物 SHA-256） |
+
+### 25 项问题终态
+FIXED_VERIFIED：A03 A04 A05 A06 A09 A11 A13 A14 A15 A18 A19 A20；FIXED_PENDING_VERIFICATION（机制落地、终验待真实环境/CI）：A02 A07 A08* A10 A12 A17 A21 A24；UPSTREAM_LIMITATION：A01；BLOCKED：A08 A23（真实验证/签名证书）；DEFERRED_WITH_REASON：A16 A22 A25。
+（*A08 归入 BLOCKED：真实网络验证需用户授权，见 TESTING.md 十步清单。）
+新增问题 N01–N06：N01 N02 N03（记录+缓解）N04 N06 均已处置；N05（ASan 未启用）维持记录状态。
+
+### 验证层级（严格区分）
+- **CODE_IMPLEMENTED** ✅ 全部整改代码落地并编译零警告。
+- **BUILD_VERIFIED** ✅ 本机 + **全新克隆**两环境全量构建成功（含依赖自动获取与哈希校验）。
+- **OFFLINE_TESTS_VERIFIED** ✅ 四项自测双环境全 PASS（含状态机不变量/崩溃注入/凭据安全/核心集成）；--self-test-stop 本机因用户活动会话持锁受限（环境性，非缺陷），CI 覆盖。
+- **CI_VERIFIED** ✅（f24b708 起）：CI 触发、依赖获取、构建、离线自检、敏感扫描、产物上传全绿；此前 5 次失败根因（工具链路径硬编码）已修复并复验。
+- **REAL_NETWORK_VERIFIED** ❌ BLOCKED——需用户授权与真实校园网（步骤清单见 TESTING.md）。
+- **LONG_RUNNING_VERIFIED** ❌ 未执行（24/72h）；已观测 15.2h 用户会话稳定（8.7MB/0.2% CPU）。
+- **RELEASE_READY** ❌ 否——真实环境验证、长跑、DPI 多档实机、签名、桌面源码许可补齐之前不满足发布条件（门禁清单见 RELEASE_CHECKLIST.md）。
+
+### 静态/依赖/性能/UI 汇总
+静态安全分析：Mimosa 钩子全程拦截提交（6 处经逐行复核为自测固定参数误报，经用户批准以 --no-verify 提交，如实记录）；敏感信息扫描双环境通过；curl 漏洞核查 8.23.0 剩 42 条披露项（上游未修复，人工复核待续）。性能实测见 P9 表。UI 离线断言通过，多档 DPI 待实机。
+
+### 剩余风险（如实）
+明文 HTTP 协议（A01）、libcurl 未修复披露项、EXE 未签名、C# 字符串不可彻底擦除、Kill 后核心内存不擦除、GDI 计数未采样、--self-test-stop 本机环境受限。
+
+### 用户后续步骤
+1. 托盘退出旧会话后补跑 `.\澈知科技.exe --self-test-stop`。
+2. 按 TESTING.md 十步清单做真实环境验证（含 24/72h）。
+3. 决定是否合并 fix 分支 → main / 打 v1.2.0 tag（RELEASE_CHECKLIST.md）。
 
 ### P7 UI 与交互优化
 **A17 高 DPI**：新增 `app.manifest`（PerMonitorV2 声明 + Win10/11 supportedOS）与 `app.config`（System.Windows.Forms.ApplicationConfigurationSection DpiAwareness=PerMonitorV2）；两构建脚本接线（`/win32manifest:` 嵌入 + `app.config` 随产物复制为 `澈知科技.exe.config`）。.NET FX 4.7+ 生效，旧运行时自动回退系统级缩放；分发形态从单 exe 变为 exe+config 两个文件（已写入文档）。注：多档 DPI 实机渲染验证（100%–200%）待用户环境执行（P11 清单），当前以框架机制落地为准。

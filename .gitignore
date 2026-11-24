@@ -1,5 +1,6 @@
 # 构建产物
 *.exe
+*.exe.config
 build-core/
 
 # 第三方源码包与依赖缓存
