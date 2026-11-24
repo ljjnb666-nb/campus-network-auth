@@ -65,6 +65,7 @@ try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $raw = (Invoke-WebRequest -Uri $VulnUrl -UseBasicParsing).Content
     $vulns = ConvertFrom-Json $raw
+    if (-not $vulns -or @($vulns).Count -eq 0) { throw '漏洞库为空，不能作为扫描通过证据' }
     $affected = @()
     $mentioned = 0
     foreach ($v in $vulns) {
@@ -81,6 +82,6 @@ try {
     if ($affected.Count -gt 0) { Write-Host '请人工核对上述条目是否影响本项目的使用面（纯 HTTP、Schannel、静态链接、无代理/SSH/多协议）。' }
     else { Write-Host '官方漏洞库中未发现影响该版本的记录。' }
 } catch {
-    Write-Host "漏洞库获取失败（不阻断构建）：$($_.Exception.Message)"
+    throw "漏洞库获取或解析失败：$($_.Exception.Message)"
 }
 exit 0

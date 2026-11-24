@@ -31,19 +31,19 @@ internal static class ServiceIdentity
         public IntPtr pwszURLReference;
         public uint dwProvFlags;
         public uint dwUIContext;
+        public IntPtr pSignatureSettings;
     }
 
     [DllImport("wintrust.dll", ExactSpelling = true, SetLastError = false)]
-    private static extern int WinVerifyTrust(IntPtr hwnd, [MarshalAs(UnmanagedType.LPWStr)] string pgActionID, ref WINTRUST_DATA pWVTData);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    private static extern bool LookupPrivilegeValue(string lpSystemName, string lpName, out long lpLuid);
+    private static extern int WinVerifyTrust(IntPtr hwnd, ref Guid pgActionID, ref WINTRUST_DATA pWVTData);
 
     private const uint WTD_UI_NONE = 2;
     private const uint WTD_REVOKE_NONE = 0;
     private const uint WTD_CHOICE_FILE = 1;
     private const uint WTD_STATE_ACTION_VERIFY = 1;
     private const uint WTD_STATE_ACTION_CLOSE = 2;
+    private const uint WTD_CACHE_ONLY_URL_RETRIEVAL = 0x00001000;
+    private const uint WTD_REVOCATION_CHECK_NONE = 0x00000010;
     private static readonly Guid GenericVerifyV2 = new Guid("{00AAC56B-CD44-11d0-8CC2-00C04FC295EE}");
 
     /// <summary>验证文件具有有效的 Authenticode 签名（不吊销检查：离线/内网环境可用）。</summary>
@@ -62,20 +62,28 @@ internal static class ServiceIdentity
             fdwRevocationChecks = WTD_REVOKE_NONE,
             dwUnionChoice = WTD_CHOICE_FILE,
             pFile = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WINTRUST_FILE_INFO))),
-            dwStateAction = WTD_STATE_ACTION_VERIFY
+            dwStateAction = WTD_STATE_ACTION_VERIFY,
+            dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE
         };
+        bool marshalled = false;
+        Guid action = GenericVerifyV2;
         try
         {
             Marshal.StructureToPtr(fileInfo, data.pFile, false);
-            int result = WinVerifyTrust(IntPtr.Zero, GenericVerifyV2.ToString("B"), ref data);
-            // 无论如何都要关闭状态句柄
-            WINTRUST_DATA close = data;
-            close.dwStateAction = WTD_STATE_ACTION_CLOSE;
-            try { WinVerifyTrust(IntPtr.Zero, GenericVerifyV2.ToString("B"), ref close); } catch { }
-            return result == 0;
+            marshalled = true;
+            return WinVerifyTrust(new IntPtr(-1), ref action, ref data) == 0;
         }
         catch { return false; }
-        finally { Marshal.FreeHGlobal(data.pFile); }
+        finally
+        {
+            if (marshalled)
+            {
+                data.dwStateAction = WTD_STATE_ACTION_CLOSE;
+                try { WinVerifyTrust(new IntPtr(-1), ref action, ref data); } catch { }
+                Marshal.DestroyStructure(data.pFile, typeof(WINTRUST_FILE_INFO));
+            }
+            Marshal.FreeHGlobal(data.pFile);
+        }
     }
 
     /// <summary>
@@ -88,12 +96,25 @@ internal static class ServiceIdentity
         try
         {
             if (!HasValidSignature(exePath)) return false;
-            var cert = System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(exePath);
-            string subject = cert == null ? "" : cert.Subject ?? "";
-            return subject.IndexOf("电信", StringComparison.Ordinal) >= 0 ||
-                   subject.IndexOf("telecom", StringComparison.OrdinalIgnoreCase) >= 0;
+            using (var cert = new System.Security.Cryptography.X509Certificates.X509Certificate2(
+                System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(exePath)))
+            {
+                // Exact known publisher identity; unknown publishers require explicit review.
+                string name = cert.GetNameInfo(System.Security.Cryptography.X509Certificates.X509NameType.SimpleName, false);
+                return IsKnownPublisher(name, cert.Subject);
+            }
         }
         catch { return false; }
+    }
+
+    internal static bool IsKnownPublisher(string name, string subject)
+    {
+        if (String.Equals(name, "中数通信息有限公司", StringComparison.Ordinal) ||
+            String.Equals(name, "中数通信息有限公司·电信信息化部", StringComparison.Ordinal)) return true;
+        // Match an exact organization RDN, not arbitrary "telecom" substrings.
+        return System.Text.RegularExpressions.Regex.IsMatch(subject ?? "",
+            @"(?:^|,\s*)O=(?:""中数通信息有限公司""|中数通信息有限公司)(?:,|$)",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
     }
 
     internal static string Describe(string exePath)
