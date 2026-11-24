@@ -252,6 +252,20 @@ internal static class Program
         return count > 0;
     }
 
+    // 服务事务记录用：当前服务状态快照（读不到=unknown）
+    private static string CurrentServiceState()
+    {
+        try
+        {
+            using (var service = new ServiceController(ServiceName))
+            {
+                service.Refresh();
+                return service.Status.ToString();
+            }
+        }
+        catch { return "unknown"; }
+    }
+
     // Any install location is accepted; the service must be unique and its executable
     // must still be the expected ESurfingSvr.exe so the elevated stop never targets a look-alike.
     private static string ServiceExePath()
@@ -276,7 +290,10 @@ internal static class Program
 
     private static bool IsExpectedService()
     {
-        return ServiceExePath() != null;
+        // A14：文件名匹配 + Authenticode 签名链验证 + 签名者厂商核对（电信系）。
+        // 任一不满足即身份不符，提权子进程 fail-closed（guard 21 拒绝操作）。
+        string path = ServiceExePath();
+        return path != null && ServiceIdentity.VerifyExpectedService(path);
     }
 
     // 优先从天翼服务所在目录找原客户端 (用户可能装在任意位置), 再兜底官方默认路径
@@ -304,7 +321,13 @@ internal static class Program
             {
                 foreach (ManagementObject row in rows)
                 {
-                    if (row["NetConnectionStatus"] != null && Convert.ToInt32(row["NetConnectionStatus"]) == 2) return false;
+                    object status = row["NetConnectionStatus"];
+                    // 保守处理（A09/P6）：适配器存在但状态未知(null)时视为"非空闲"，
+                    // 只有明确断开(0)/媒体断开(7)/硬件不存在(4/5/6)才允许服务切换。
+                    if (status == null) return false;
+                    int s = Convert.ToInt32(status);
+                    if (s == 0 || s == 7 || s == 4 || s == 5 || s == 6) continue;
+                    return false; // 1/2/3/8/9/10/11/12 一律视为可能在使用
                 }
             }
         }
@@ -924,6 +947,7 @@ internal static class Program
                 else if (blocked != null) SetStatus(blocked, ToneWarn);
                 else if (loadedCredential) SetStatus("已载入保存的账号，点击“立即连接”即可。", ToneOk);
                 else SetStatus("输入校园网账号和密码，点击“立即连接”即可。", ToneInfo);
+                if (!isSelfTest) PromptPendingServiceRecovery(); // A09：识别未完成的服务切换
             };
             timer.Interval = 1000;
             timer.Tick += delegate {
@@ -1736,6 +1760,30 @@ internal static class Program
             try { BeginStop(); } catch { exitRequested = false; closingAfterStop = false; SetStatus("停止请求发送失败，窗口将保持开启。", ToneFail); }
         }
 
+        // A09：程序重启后识别未完成的服务切换，向用户提供"经授权的恢复选项"（不擅自操作服务）
+        private void PromptPendingServiceRecovery()
+        {
+            try
+            {
+                var journal = ServiceJournal.Load(ServiceJournal.DefaultPath());
+                if (!journal.HasPending) return;
+                if (journal.Action == "prepare")
+                {
+                    SetStatus("检测到上次“准备连接”未完成收尾，天翼后台服务可能仍处于停用状态。", ToneWarn);
+                    if (MessageBox.Show(this, "上次停用天翼后台服务后，程序没有正常完成收尾。\r\n\r\n是否现在恢复天翼后台服务？（会请求管理员确认）", "恢复天翼服务", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+#pragma warning disable 4014 // 有意 fire-and-forget：方法内部 await 捕获 UI 上下文并自带完整异常处理
+                        RunServiceAction(false);
+#pragma warning restore 4014
+                }
+                else
+                {
+                    SetStatus("检测到上次“恢复天翼”未完成，服务当前状态未知，可用“恢复天翼”重试。", ToneWarn);
+                    journal.Clear(); // restore 未完成无可自动建议的恢复动作，提示后清除
+                }
+            }
+            catch { }
+        }
+
         private async Task RunServiceAction(bool forPrepare)
         {
             if (serviceBusy) return;
@@ -1746,6 +1794,10 @@ internal static class Program
             if (MessageBox.Show(this, instructions, forPrepare ? "准备连接" : "恢复天翼", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
             serviceBusy = true; prepare.Enabled = false; restore.Enabled = false; connect.Enabled = false;
             SetStatus("请在弹出的管理员确认窗口中操作……", ToneBusy, true);
+            // A09 事务记录：提权子进程启动前写入 pending；程序此时异常退出则记录保留，
+            // 下次启动提示恢复。子进程退出后（无论成败）回写结果。
+            var journal = isSelfTest ? null : ServiceJournal.Load(ServiceJournal.DefaultPath());
+            try { if (journal != null) journal.Begin(forPrepare ? "prepare" : "restore", CurrentServiceState()); } catch { journal = null; }
             try
             {
                 var info = new ProcessStartInfo { FileName = Application.ExecutablePath, Arguments = forPrepare ? "--admin-prepare" : "--admin-restore", UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
@@ -1754,6 +1806,7 @@ internal static class Program
                     if (p == null) throw new InvalidOperationException();
                     await Task.Run(() => p.WaitForExit());
                     int code = p.ExitCode;
+                    try { if (journal != null) journal.Complete(code); } catch { }
                     if (code == 0)
                     {
                         if (forPrepare) SetStatus("准备完成！输入账号密码即可连接。", ToneOk);

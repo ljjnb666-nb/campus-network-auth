@@ -108,7 +108,15 @@
 
 **CI 设计修正**：CI 只运行 Build-Core.ps1（同批产出核心+GUI，哈希自洽）；不运行 Build.ps1——提交的 CoreHash 与 CI 现编核心哈希逐字节一致在本工具链下不可保证（见证据 3）。
 
-### P5 稳定性与异常恢复（本阶段）
+### P6 Windows 服务管理整改（本阶段）
+**A14 身份校验强化**：新增 `ServiceIdentity.cs`——WinVerifyTrust（WINTRUST_ACTION_GENERIC_VERIFY_V2，免吊销检查以适配离线/内网）验证 Authenticode 签名链 + 签名者证书主题包含"电信/telecom"（实测本机官方 ESurfingSvr.exe 由"中数通信息有限公司·电信信息化部"签名、且**不带版本资源**——元数据不可用作身份依据，故以证书主题为准）。`IsExpectedService` 升级为文件名+签名+厂商三重校验，任一不符提权子进程 fail-closed（guard 21）。
+**A09 事务记录**：新增 `ServiceJournal.cs`（%LOCALAPPDATA%\CheZhiTech\CampusNetwork\service-journal.v1.json，原子写入，无凭据）。GUI 在提权子进程启动前写 pending（含操作前服务状态快照 CurrentServiceState()），退出后回写 ok/failed:code；程序异常退出则 pending 留存——下次启动 `PromptPendingServiceRecovery()` 识别：prepare 未完成→提示+经授权的恢复选项（用户确认才触发，仍走完整 UAC+防护链）；restore 未完成→提示后清除。
+**热点状态保守处理**：`DirectAdaptersIdle` 从"仅 status==2 视为忙"改为白名单放行（0 断开/7 媒体断开/4/5/6 硬件态才空闲，**null=未知一律视为忙**）——状态未知时禁止服务切换（保守方向）。
+**已具备项复核**：WMI 5s 超时+异常回退 ✓、UAC 1223 拒绝恢复提示 ✓、未安装场景 ✓、切换后 WaitForStatus 状态复核（提权子进程内）✓、重复检测/执行竞争（子进程内二次校验）✓。
+**验证**：logic/credentials/core/ui 全 PASS；编译零警告（CS4014 fire-and-forget 以 pragma 显式标注）。
+**状态更新**：A14 → FIXED_VERIFIED（真实服务二进制实测通过校验逻辑）；A09 → FIXED_VERIFIED（事务记录+重启识别+经授权恢复）；A25 之外的 P6 需求全部落实。
+
+### P5 稳定性与异常恢复
 **N01 修复（C11 原子）**：`Shutdown.c` 的 `static volatile bool shutting_down` check-then-set 竞态改为 `atomic_exchange`（stdatomic.h）——首个触发的线程独占关闭流程，其余直接返回。
 **A18 修复**：`CleanupStaleCoreDirs()` 在 GUI 启动（ExtractCore 后）与退出（CleanupCore）时清扫 `%TEMP%\Chezhi-*` 历史残留（单实例互斥保证非当前目录均为残留；被运行中核心占用的目录因文件锁删除失败而安全跳过）。
 **A06 有界自动恢复**：
