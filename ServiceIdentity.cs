@@ -109,12 +109,9 @@ internal static class ServiceIdentity
 
     internal static bool IsKnownPublisher(string name, string subject)
     {
-        if (String.Equals(name, "中数通信息有限公司", StringComparison.Ordinal) ||
-            String.Equals(name, "中数通信息有限公司·电信信息化部", StringComparison.Ordinal)) return true;
-        // Match an exact organization RDN, not arbitrary "telecom" substrings.
-        return System.Text.RegularExpressions.Regex.IsMatch(subject ?? "",
-            @"(?:^|,\s*)O=(?:""中数通信息有限公司""|中数通信息有限公司)(?:,|$)",
-            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        // Do not interpret arbitrary substrings of a rendered distinguished name as an identity.
+        return String.Equals(name, "中数通信息有限公司", StringComparison.Ordinal) ||
+            String.Equals(name, "中数通信息有限公司·电信信息化部", StringComparison.Ordinal);
     }
 
     internal static string Describe(string exePath)

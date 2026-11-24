@@ -19,6 +19,7 @@ internal sealed class ServiceJournal
     internal bool NeedsRecovery { get; private set; }
     internal bool Uncertain { get; private set; }
     internal bool Invalid { get; private set; }
+    private bool PriorUncertain { get; set; }
     internal bool HasPending { get { return Result == "pending"; } }
 
     internal static string DefaultPath()
@@ -31,6 +32,12 @@ internal sealed class ServiceJournal
         return value == "Running" || value == "Stopped" || value == "NotInstalled" ||
             value == "StartPending" || value == "StopPending" || value == "ContinuePending" ||
             value == "PausePending" || value == "Paused" || value == "unknown";
+    }
+    private static bool ValidFailure(string value)
+    {
+        if (value == "failed:unknown") return true;
+        int code;
+        return value.StartsWith("failed:", StringComparison.Ordinal) && Int32.TryParse(value.Substring(7), out code);
     }
     private static string StringField(Dictionary<string, object> obj, string key)
     {
@@ -64,7 +71,7 @@ internal sealed class ServiceJournal
             j.TimeUtc = StringField(obj, "time");
             if ((j.Action != "prepare" && j.Action != "restore") || !ValidState(j.StateBefore) ||
                 String.IsNullOrEmpty(j.Result) || !(j.Result == "pending" || j.Result == "ok" ||
-                j.Result == "cancelled" || j.Result.StartsWith("failed:", StringComparison.Ordinal))) throw new InvalidDataException();
+                j.Result == "cancelled" || ValidFailure(j.Result))) throw new InvalidDataException();
             if (obj.ContainsKey("v"))
             {
                 if (!(obj["v"] is int) || (int)obj["v"] != 2) throw new InvalidDataException();
@@ -73,6 +80,7 @@ internal sealed class ServiceJournal
                 if (!Guid.TryParse(j.OperationId, out id)) throw new InvalidDataException();
                 j.NeedsRecovery = BoolField(obj, "needsRecovery");
                 j.Uncertain = BoolField(obj, "uncertain");
+                j.PriorUncertain = obj.ContainsKey("priorUncertain") && BoolField(obj, "priorUncertain");
             }
             else
             {
@@ -102,7 +110,7 @@ internal sealed class ServiceJournal
         var json = new JavaScriptSerializer().Serialize(new
         {
             v = 2, action = Action, state = StateBefore, result = Result, time = TimeUtc,
-            operationId = OperationId, needsRecovery = NeedsRecovery, uncertain = Uncertain
+            operationId = OperationId, needsRecovery = NeedsRecovery, uncertain = Uncertain, priorUncertain = PriorUncertain
         });
         string temp = filePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
@@ -122,6 +130,7 @@ internal sealed class ServiceJournal
     internal void Begin(string action, string stateBefore)
     {
         if (Invalid || (action != "prepare" && action != "restore") || !ValidState(stateBefore)) throw new InvalidDataException();
+        PriorUncertain = Uncertain;
         Action = action; StateBefore = stateBefore; Result = "pending";
         OperationId = Guid.NewGuid().ToString("N");
         // Once written, interruption is an uncertain outcome, not a no-op.
@@ -137,14 +146,14 @@ internal sealed class ServiceJournal
             Result = "cancelled";
             // No elevated child was started. Preserve previous confirmed responsibility;
             // a prior uncertain outcome must not be silently discarded.
-            Uncertain = actualState != "Running" && (NeedsRecovery || StateBefore != "Stopped");
+            Uncertain = actualState != "Running" && PriorUncertain;
         }
         else if (code == 0 || code == 10)
         {
             Result = "ok";
             if (Action == "prepare" && code == 10) NeedsRecovery = true; // elevated child actually stopped a running service
             if (actualState == "Running") { NeedsRecovery = false; Uncertain = false; }
-            else Uncertain = Action == "restore" || (actualState != "Stopped" && actualState != "NotInstalled");
+            else Uncertain = Action == "restore" || (code == 0 && PriorUncertain) || (actualState != "Stopped" && actualState != "NotInstalled");
         }
         else
         {

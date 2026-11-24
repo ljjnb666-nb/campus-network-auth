@@ -98,6 +98,25 @@ jobs:
           Write-Host "UI test exit: $($p.ExitCode)"
           if ($p.ExitCode -ne 0) { throw "UI self-test failed: $($p.ExitCode)" }
 
+      - name: Authenticode regression (signed and tampered fixture)
+        shell: pwsh
+        run: |
+          $candidates = @(
+            (Get-Command pwsh.exe).Source,
+            "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe",
+            "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          )
+          $fixture = $candidates | Where-Object {
+            if ($_ -and (Test-Path -LiteralPath $_)) {
+              $sig = Get-AuthenticodeSignature -LiteralPath $_
+              $sig.Status -eq 'Valid' -and $sig.SignatureType -eq 'Authenticode'
+            }
+          } | Select-Object -First 1
+          if (-not $fixture) { throw 'No trusted embedded-signature fixture found' }
+          $args = '--self-test-signature "' + $fixture + '"'
+          $p = Start-Process -FilePath 'build-core\澈知科技-源码重建.exe' -ArgumentList $args -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { throw "Signature regression failed: $($p.ExitCode)" }
+
       - name: Secret scan
         shell: pwsh
         run: ./scripts/scan-secrets.ps1

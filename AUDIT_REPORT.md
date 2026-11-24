@@ -230,3 +230,19 @@ FIXED_VERIFIED：A03 A04 A05 A06 A09 A11 A13 A14 A15 A18 A19 A20；FIXED_PENDING
 
 
 
+
+
+## 六、第二轮独立审计整改（新增记录，覆盖前文对应状态）
+
+基线 3c42408；本轮保留旧报告作为历史记录，不将其 PASS 自动继承到新代码。
+
+| 项目 | 本轮变更 | 当前状态 |
+|---|---|---|
+| B01 | WinVerifyTrust GUID 引用及结构体修复，已知发布者精确匹配，签名回归自测 | 待最新 CI 与真实官方文件验证 |
+| B02/B07/B08 | 状态迁移、退出事件去重及输出排空、认证与网络证据分离 | 待最新 CI；真实事件序列需实机验证 |
+| B03/B04/B05 | 任务快照、停止取消、重试前复查、代次隔离、仅明确网络探测失败重试 | 待最新 CI；交错与真实环境验证仍需补充 |
+| B06 | 持久化恢复责任、区分实际改变与幂等、事务测试 | 待最新 CI；UAC/崩溃实机验证待完成 |
+| B09 | 有界流读取、结构化白名单解析、诊断仅保存规范事件名 | 待最新 CI；协议完整乱序和模糊测试未穷尽 |
+| B10 | UI 与签名测试强制退出码检查，漏洞库获取失败阻断 | 待最新 CI；残余漏洞适用性未关闭 |
+
+CODE_IMPLEMENTED：上述机制已提交，尚不能认定全部 B 项 FIXED_VERIFIED。BUILD_VERIFIED/OFFLINE_TESTS_VERIFIED/CI_VERIFIED 必须针对最终提交重新核验。REAL_NETWORK_VERIFIED/LONG_RUNNING_VERIFIED/RELEASE_READY 仍未通过。未操作真实校园网或 Windows 服务。当前不合并 main、不打 tag。

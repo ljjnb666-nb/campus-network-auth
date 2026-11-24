@@ -43,6 +43,7 @@ internal static class Program
         if (args.Length == 1 && args[0] == "--admin-prepare") return ChangeService(true);
         if (args.Length == 1 && args[0] == "--admin-restore") return ChangeService(false);
         if (args.Length == 1 && args[0] == "--self-test-logic") return LogicTests();
+        if (args.Length == 2 && args[0] == "--self-test-signature") return SignatureTests(args[1]);
         if (args.Length == 1 && args[0] == "--self-test-core") return CoreTest(false);
         if (args.Length == 1 && args[0] == "--self-test-stop") return CoreTest(true);
         if (args.Length == 1 && args[0] == "--self-test-observe") return ObserveTests();
@@ -433,6 +434,36 @@ internal static class Program
         catch { return null; }
     }
 
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Process, Task> CoreReaders =
+        new System.Runtime.CompilerServices.ConditionalWeakTable<Process, Task>();
+
+    // A fixed-size reader enforces the bound before a complete line is allocated.
+    private static void ReadBoundedEvents(TextReader reader, Action<string> receive)
+    {
+        char[] buffer = new char[256];
+        var line = new StringBuilder(512);
+        bool oversized = false;
+        int count;
+        while ((count = reader.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                char ch = buffer[i];
+                if (ch == '\n')
+                {
+                    if (!oversized && receive != null) receive(line.ToString().TrimEnd('\r'));
+                    line.Length = 0; oversized = false;
+                }
+                else if (!oversized)
+                {
+                    if (line.Length == 512) { line.Length = 0; oversized = true; }
+                    else line.Append(ch);
+                }
+            }
+        }
+        // Incomplete final records are deliberately ignored.
+    }
+
     private static Process LaunchCore(string mode, string username, string password, int channel, Action<Process, string> status)
     {
         if (Utf8.GetByteCount(username) >= 16 || Utf8.GetByteCount(password) >= 128)
@@ -447,26 +478,29 @@ internal static class Program
             StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8
         };
         var p = new Process { StartInfo = si, EnableRaisingEvents = true };
-        DataReceivedEventHandler filter = delegate(object sender, DataReceivedEventArgs e) {
-            if (status == null || e.Data == null) return;
-            try
-            {
-                string ev = ParseCoreEvent(e.Data, ((Process)sender).Id);
-                if (ev != null) status((Process)sender, ev);
-            }
-            catch (InvalidOperationException) { }
-        };
-        // stderr is the sole protocol stream. stdout is drained but ignored.
-        p.ErrorDataReceived += filter;
+        p.Start();
+        int pid = p.Id;
+        TextReader errors = p.StandardError;
+        TextReader output = p.StandardOutput;
+        Task stderrTask = Task.Run(delegate {
+            ReadBoundedEvents(errors, delegate(string line) {
+                string ev = ParseCoreEvent(line, pid);
+                if (ev != null && status != null) status(p, ev);
+            });
+        });
+        Task stdoutTask = Task.Run(delegate {
+            char[] buffer = new char[256];
+            while (output.Read(buffer, 0, buffer.Length) > 0) { }
+        });
+        CoreReaders.Add(p, Task.WhenAll(stderrTask, stdoutTask));
 
-        p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine();
         try
         {
             byte[] bytes = Utf8.GetBytes(json + "\n");
             try { p.StandardInput.BaseStream.Write(bytes, 0, bytes.Length); p.StandardInput.BaseStream.Flush(); }
             finally { Array.Clear(bytes, 0, bytes.Length); }
         }
-        catch { try { p.StandardInput.Close(); } catch { } p.Dispose(); throw; }
+        catch { try { p.StandardInput.Close(); } catch { } try { if (!p.WaitForExit(5000)) p.Kill(); } catch { } p.Dispose(); throw; }
         return p;
     }
 
@@ -511,6 +545,33 @@ internal static class Program
 
     // 状态机不变量（7.2）：合法迁移被接受、非法迁移被拒绝；操作结果不改变连接状态；
     // 任何路径都不能"跳过认证直接变成已认证"；停止/登出后回到 Idle 而非保持已认证。
+    private static int SignatureTests(string signedPath)
+    {
+        // Read-only verification of an external signed fixture, never execute it.
+        string dir = Path.Combine(Path.GetTempPath(), "ChezhiSignatureTest-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(dir);
+            if (!ServiceIdentity.HasValidSignature(signedPath)) return 1;
+            string damaged = Path.Combine(dir, "damaged.exe");
+            File.Copy(signedPath, damaged);
+            using (var fs = new FileStream(damaged, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                if (fs.Length < 128) return 1;
+                fs.Position = 64;
+                int original = fs.ReadByte();
+                fs.Position = 64; fs.WriteByte((byte)(original ^ 1));
+            }
+            string unsigned = Path.Combine(dir, "unsigned.txt");
+            File.WriteAllText(unsigned, "unsigned fixture");
+            if (ServiceIdentity.HasValidSignature(damaged) || ServiceIdentity.HasValidSignature(unsigned)) return 1;
+            Console.WriteLine("SIGNATURE_PASS");
+            return 0;
+        }
+        catch { return 1; }
+        finally { try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { } }
+    }
+
     private static bool CoreEventInvariants()
     {
         string valid = "EPHEMERAL_EVENT {\"v\":1,\"pid\":42,\"event\":\"auth_ok\",\"code\":0,\"error\":\"unknown\"}";
@@ -520,7 +581,15 @@ internal static class Program
             && ParseCoreEvent(valid.Replace("auth_ok", "secret"), 42) == null
             && ParseCoreEvent(valid.Replace("\"code\":0", "\"code\":\"0\""), 42) == null
             && ParseCoreEvent(valid + new string('x', 512), 42) == null
-            && ParseCoreEvent("EPHEMERAL_AUTH_OK", 42) == null;
+            && ParseCoreEvent("EPHEMERAL_AUTH_OK", 42) == null && BoundedReaderInvariants();
+    }
+
+    private static bool BoundedReaderInvariants()
+    {
+        var lines = new List<string>();
+        using (var reader = new StringReader(new string('x', 65536) + "\nvalid\r\npartial"))
+            ReadBoundedEvents(reader, lines.Add);
+        return lines.Count == 1 && lines[0] == "valid";
     }
 
     private static bool StateMachineInvariants()
@@ -1111,10 +1180,12 @@ internal static class Program
             if (!running.HasExited) { userStopped = true; retryTimer.Stop(); return false; }
             // 泵消息让 Exited 回调（BeginInvoke）落地并执行 OnCoreExit → ScheduleAutoRetry
             for (int i = 0; i < 10; i++) { Application.DoEvents(); System.Threading.Thread.Sleep(50); }
-            bool ok = autoRetryCount == 1 && retryTimer.Enabled;
+            bool ok = autoRetryCount == 1 && retryTimer.Enabled && state.Auth == ConnectionStates.AuthState.RetryScheduled;
+            account.Text = "edited-user";
+            ok &= activeTask != null && activeTask.Username == "retry-user";
             // 清理：取消重试，模拟用户停止（不变量验证：停止后重试被取消）
             StopClicked(stop, EventArgs.Empty);
-            ok &= userStopped && !retryTimer.Enabled && activeTask == null;
+            ok &= userStopped && !retryTimer.Enabled && activeTask == null && state.Auth == ConnectionStates.AuthState.Idle;
             RetryTimerTick(null, EventArgs.Empty);
             ok &= running != null && running.HasExited;
             try { if (running != null) { running.Dispose(); running = null; } } catch { }
@@ -1656,12 +1727,13 @@ internal static class Program
         private async void RunPreConnectCheckAsync(bool showMessage)
         {
             if (checkingBlocked) return;
+            int generation = taskGeneration;
             checkingBlocked = true;
             try
             {
                 string blocked = await Task.Run((Func<string>)CheckBeforeConnect);
                 if (IsDisposed) return;
-                if (serviceBusy || connectCheckPending || (running != null && !running.HasExited)) return; // do not overwrite a newer operation
+                if (generation != taskGeneration || serviceBusy || connectCheckPending || (running != null && !running.HasExited)) return; // do not overwrite a newer operation
                 if (blocked != null)
                 {
                     SetStatus(blocked, ToneWarn);
@@ -1747,9 +1819,10 @@ internal static class Program
                     if (System.Threading.Interlocked.Exchange(ref completionQueued, 1) != 0) return;
                     Task.Run(delegate {
                         // WaitForExit() drains asynchronous output before queuing the terminal event.
-                        try { started.WaitForExit(); } catch { }
+                        bool drained = false;
+                        try { started.WaitForExit(); Task readers; drained = CoreReaders.TryGetValue(started, out readers) && readers.Wait(5000); } catch { }
                         if (!IsDisposed && IsHandleCreated) try {
-                            BeginInvoke((Action)delegate { OnCoreExit(started); });
+                            BeginInvoke((Action)delegate { if (!drained) retryEligible = false; OnCoreExit(started); });
                         } catch (InvalidOperationException) { }
                     });
                 };
