@@ -173,62 +173,64 @@ internal static class Program
 
     private static int ClientCount()
     {
-        // 优先 WMI: 能按可执行文件路径排除本程序释放到临时目录的核心 (含上次异常退出的残留),
-        // 只统计官方客户端; WMI 不可用时退回按进程名计数 (保守, 宁可多算)
+        // At handoff no live owned core is permitted; count even stale extracted cores.
+        Process[] matches = Process.GetProcessesByName("ESurfingClient");
         try
         {
-            string tempRoot = Path.GetFullPath(Path.GetTempPath());
             int count = 0;
-            using (var query = new ManagementObjectSearcher("SELECT ExecutablePath FROM Win32_Process WHERE Name='ESurfingClient.exe'"))
+            foreach (Process process in matches)
             {
-                query.Options.Timeout = TimeSpan.FromSeconds(5);
-                using (ManagementObjectCollection rows = query.Get())
-                {
-                    foreach (ManagementObject row in rows)
-                    {
-                        string path = Convert.ToString(row["ExecutablePath"]);
-                        if (!String.IsNullOrEmpty(path) &&
-                            path.StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase) &&
-                            path.IndexOf("\\Chezhi-", StringComparison.OrdinalIgnoreCase) >= 0) continue;
-                        count++;
-                    }
-                }
+                try { if (!process.HasExited) count++; } catch { count++; }
             }
             return count;
         }
-        catch
+        finally { foreach (Process process in matches) process.Dispose(); }
+    }
+
+    private static bool CanConnect(ServiceControllerStatus service, int count)
+    { return service == ServiceControllerStatus.Stopped && count == 0; }
+
+    private sealed class HandoffObservation
+    {
+        internal readonly ConnectionStates.ServiceState Service;
+        internal readonly int Clients;
+        internal HandoffObservation(ConnectionStates.ServiceState service, int clients) { Service = service; Clients = clients; }
+        internal ConnectionStates.HandoffDecision Decide(ConnectionStates.HandoffIntent intent)
+        { return ConnectionStates.DecideHandoff(intent, Service, Clients); }
+    }
+    private static ConnectionStates.ServiceState MapServiceState(string value)
+    {
+        switch (value)
         {
-            Process[] matches = Process.GetProcessesByName("ESurfingClient");
-            try { return matches.Length; }
-            finally { foreach (Process p in matches) p.Dispose(); }
+            case "Running": return ConnectionStates.ServiceState.Running;
+            case "Stopped": return ConnectionStates.ServiceState.Stopped;
+            case "NotInstalled": return ConnectionStates.ServiceState.NotInstalled;
+            case "StartPending": case "StopPending": case "PausePending": case "ContinuePending":
+                return ConnectionStates.ServiceState.Transitioning;
+            default: return ConnectionStates.ServiceState.Unknown;
         }
     }
-
-    private static bool CanConnect(ServiceControllerStatus state, int count)
+    private static HandoffObservation ObserveHandoff()
     {
-        return state == ServiceControllerStatus.Stopped && count == 0;
+        try { return new HandoffObservation(MapServiceState(CurrentServiceState()), ClientCount()); }
+        catch { return new HandoffObservation(ConnectionStates.ServiceState.Unknown, -1); }
     }
-
+    private static string HandoffMessage(ConnectionStates.HandoffDecision decision)
+    {
+        switch (decision)
+        {
+            case ConnectionStates.HandoffDecision.WaitForClient: return "仍检测到天翼或旧认证进程。请在客户端断开并退出；程序不会强制结束进程。";
+            case ConnectionStates.HandoffDecision.WaitForService: return "天翼服务正在切换，请等待系统完成后重试。";
+            case ConnectionStates.HandoffDecision.NeedStopService: return "天翼客户端已退出，后台服务仍运行。请授权准备连接。";
+            case ConnectionStates.HandoffDecision.NeedStartService: return "天翼服务已停止，需要授权恢复。";
+            case ConnectionStates.HandoffDecision.ExistingClient: return "检测到现有天翼或同名认证进程；未重复启动，请检查天翼窗口或托盘。";
+            default: return "暂时无法确认天翼服务或进程状态，未执行切换。";
+        }
+    }
     private static string CheckBeforeConnect()
     {
-        try
-        {
-            int count = ClientCount();
-            if (!ServiceInstalled())
-            {
-                // 没装天翼客户端 = 没有后台服务, 无需"准备连接"; 仍要求没有官方客户端进程在跑
-                return count == 0 ? null
-                    : "检测到天翼客户端仍在运行，请先在客户端里断开并完全退出，再回来连接。";
-            }
-            using (var service = new ServiceController(ServiceName))
-            {
-                service.Refresh();
-                if (CanConnect(service.Status, count)) return null;
-                if (count != 0) return "检测到天翼客户端仍在运行，请先在客户端里断开并完全退出，再回来连接。";
-                return "天翼后台服务正在运行，请先点击“准备连接”完成切换。";
-            }
-        }
-        catch { return "暂时读不到天翼服务状态，请稍后再试。"; }
+        var decision = ObserveHandoff().Decide(ConnectionStates.HandoffIntent.Connect);
+        return decision == ConnectionStates.HandoffDecision.Ready ? null : HandoffMessage(decision);
     }
 
     private static void QueryService(out int count, out string path)
@@ -359,7 +361,7 @@ internal static class Program
             if (!ServiceInstalled())
             {
                 // 没装天翼客户端就没有后台服务: “准备连接”无事可做直接成功, “恢复天翼”无从恢复
-                return prepare ? 0 : 21;
+                return prepare ? 0 : 26;
             }
             bool identityOk = IsExpectedService();
             int clients = ClientCount();
@@ -394,7 +396,8 @@ internal static class Program
             switch (code)
             {
                 case 20: return "未获得管理员权限，操作已取消。";
-                case 21: return "未找到天翼后台服务，或无法确认其身份，操作已取消。";
+                case 21: return "天翼服务文件路径或数字签名身份未通过验证；未执行切换。请核对官方客户端。";
+                case 26: return "未安装天翼后台服务，请检查官方客户端安装。";
                 case 22: return "仍有天翼客户端或认证进程在运行，请先断开并完全退出。";
                 case 23: return "移动热点或 Wi-Fi Direct 仍在使用（或状态未知），请先关闭热点。";
                 case 24: return "天翼服务正在切换中，请稍后再试。";
@@ -537,7 +540,7 @@ internal static class Program
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Running, false, true) == 24
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Running, true, true) == 0
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Stopped, false, false) == 0
-            && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && ServiceIdentity.NativeLayoutIsValid() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
+            && HandoffInvariants() && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && ServiceIdentity.NativeLayoutIsValid() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
             && !ServiceIdentity.IsKnownPublisher("fake telecom", "CN=fake telecom");
         Console.WriteLine(ok ? "LOGIC_PASS" : "LOGIC_FAIL");
         return ok ? 0 : 1;
@@ -545,6 +548,39 @@ internal static class Program
 
     // 状态机不变量（7.2）：合法迁移被接受、非法迁移被拒绝；操作结果不改变连接状态；
     // 任何路径都不能"跳过认证直接变成已认证"；停止/登出后回到 Idle 而非保持已认证。
+    private static bool HandoffInvariants()
+    {
+        var c = ConnectionStates.HandoffIntent.Connect;
+        var p = ConnectionStates.HandoffIntent.Prepare;
+        var r = ConnectionStates.HandoffIntent.Restore;
+        var running = ConnectionStates.ServiceState.Running;
+        var stopped = ConnectionStates.ServiceState.Stopped;
+        var absent = ConnectionStates.ServiceState.NotInstalled;
+        var moving = ConnectionStates.ServiceState.Transitioning;
+        var unknown = ConnectionStates.ServiceState.Unknown;
+        bool ok = true;
+        foreach (var intent in new[] { c, p, r })
+        {
+            ok &= ConnectionStates.DecideHandoff(intent, unknown, 0) == ConnectionStates.HandoffDecision.BlockUnknown;
+            ok &= ConnectionStates.DecideHandoff(intent, running, -1) == ConnectionStates.HandoffDecision.BlockUnknown;
+            ok &= ConnectionStates.DecideHandoff(intent, moving, 0) == ConnectionStates.HandoffDecision.WaitForService;
+            ok &= ConnectionStates.DecideHandoff(intent, stopped, 1) == ConnectionStates.HandoffDecision.WaitForClient;
+        }
+        ok &= ConnectionStates.DecideHandoff(c, running, 1) == ConnectionStates.HandoffDecision.WaitForClient;
+        ok &= ConnectionStates.DecideHandoff(c, running, 0) == ConnectionStates.HandoffDecision.NeedStopService;
+        ok &= ConnectionStates.DecideHandoff(c, stopped, 0) == ConnectionStates.HandoffDecision.Ready;
+        ok &= ConnectionStates.DecideHandoff(p, stopped, 0) == ConnectionStates.HandoffDecision.Ready;
+        ok &= ConnectionStates.DecideHandoff(p, absent, 0) == ConnectionStates.HandoffDecision.Ready;
+        ok &= ConnectionStates.DecideHandoff(r, running, 0) == ConnectionStates.HandoffDecision.LaunchClient;
+        ok &= ConnectionStates.DecideHandoff(r, running, 1) == ConnectionStates.HandoffDecision.ExistingClient;
+        ok &= ConnectionStates.DecideHandoff(r, stopped, 0) == ConnectionStates.HandoffDecision.NeedStartService;
+        var model = new ConnectionState();
+        foreach (ConnectionStates.HandoffState phase in Enum.GetValues(typeof(ConnectionStates.HandoffState)))
+        { model.SetHandoff(phase); ok &= model.Auth == ConnectionStates.AuthState.Idle && model.PillText != "认证失败"; }
+        Console.WriteLine(ok ? "HANDOFF_PASS" : "HANDOFF_FAIL");
+        return ok;
+    }
+
     private static int SignatureTests(string signedPath)
     {
         // Read-only verification of an external signed fixture, never execute it.
@@ -1072,7 +1108,7 @@ internal static class Program
                                 rowTable.ColumnStyles[0].Width = labelWidth;
                         }
 
-                        int pillWidth = Math.Max(px(116), MeasureLine(g, "已联网·会话", statusPill.Font).Width + px(36));
+                        int pillWidth = Math.Max(px(116), Math.Max(MeasureLine(g, "已联网·会话", statusPill.Font).Width, MeasureLine(g, "等待天翼退出", statusPill.Font).Width) + px(36));
                         header.ColumnStyles[0].Width = px(56);
                         header.ColumnStyles[2].Width = pillWidth + px(8);
                         statusPill.Size = new Size(pillWidth, Math.Max(px(30), MeasureLine(g, "已联网·会话", statusPill.Font).Height + px(8)));
@@ -1947,7 +1983,40 @@ internal static class Program
             if (state.PillBusy) pillColor = ToneBusy;
             else if (a == ConnectionStates.AuthState.Authenticated || a == ConnectionStates.AuthState.AuthenticatedBySession) pillColor = ToneOk;
             else if (a == ConnectionStates.AuthState.Failed) pillColor = ToneFail;
+            else if (state.Handoff == ConnectionStates.HandoffState.Blocked || state.Handoff == ConnectionStates.HandoffState.PreparationRequired) pillColor = ToneWarn;
             statusPill.UpdateStatus(state.PillText, pillColor);
+        }
+
+        private void SetHandoff(ConnectionStates.HandoffState phase, string message, Color tone, bool pulse = false)
+        {
+            state.SetHandoff(phase); SetStatus(message, tone, pulse); UpdateConnectionPill();
+        }
+        private bool HandoffCancelled(int generation, bool connectionTask)
+        {
+            return IsDisposed || Disposing || exitRequested || generation != taskGeneration ||
+                (connectionTask && (userStopped || activeTask == null));
+        }
+        private async Task<HandoffObservation> WaitForHandoffAsync(ConnectionStates.HandoffIntent intent, int generation, bool connectionTask)
+        {
+            var clock = Stopwatch.StartNew();
+            while (!HandoffCancelled(generation, connectionTask))
+            {
+                var observation = await Task.Run((Func<HandoffObservation>)ObserveHandoff);
+                if (HandoffCancelled(generation, connectionTask)) return null;
+                state.SetService(observation.Service);
+                var decision = observation.Decide(intent);
+                if (decision != ConnectionStates.HandoffDecision.WaitForClient &&
+                    decision != ConnectionStates.HandoffDecision.WaitForService) return observation;
+                if (clock.Elapsed.TotalSeconds >= 25) return observation;
+                int remaining = Math.Max(1, 25 - (int)clock.Elapsed.TotalSeconds);
+                SetHandoff(decision == ConnectionStates.HandoffDecision.WaitForClient ?
+                    ConnectionStates.HandoffState.WaitingForClient : ConnectionStates.HandoffState.WaitingForService,
+                    (decision == ConnectionStates.HandoffDecision.WaitForClient ?
+                        "等待天翼或旧认证进程正常退出（" + observation.Clients + " 个），" : "等待后台服务完成切换，") +
+                    "剩余约 " + remaining + " 秒。", ToneBusy, true);
+                await Task.Delay(1000);
+            }
+            return null;
         }
 
         // 连接状态迁移唯一入口：经迁移表校验，非法迁移拒绝并记录（供诊断/测试）
@@ -1980,12 +2049,12 @@ internal static class Program
                 if (generation != taskGeneration || serviceBusy || connectCheckPending || (running != null && !running.HasExited)) return; // do not overwrite a newer operation
                 if (blocked != null)
                 {
-                    SetStatus(blocked, ToneWarn);
+                    SetHandoff(ConnectionStates.HandoffState.Blocked, blocked, ToneWarn);
                     if (showMessage) MessageBox.Show(this, blocked, "暂不能连接", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 else if (!showMessage)
                 {
-                    if (loadedCredential) SetStatus("已载入保存的账号，点击“立即连接”即可。", ToneOk);
+                    if (loadedCredential) SetHandoff(ConnectionStates.HandoffState.Ready, "已载入保存的账号，点击“立即连接”即可。", ToneInfo);
                     else SetStatus("输入校园网账号和密码，点击“立即连接”即可。", ToneInfo);
                 }
             }
@@ -1994,7 +2063,7 @@ internal static class Program
 
         private async void ConnectClicked(object sender, EventArgs e)
         {
-            if (serviceBusy || checkingBlocked || connectCheckPending ||
+            if (serviceBusy || connectCheckPending ||
                 (running != null && !Object.ReferenceEquals(running, completedProcess))) return;
             if (account.Text.Length == 0 || password.Text.Length == 0)
             {
@@ -2011,29 +2080,48 @@ internal static class Program
         private async Task CheckAndStartAsync(int generation)
         {
             if (activeTask == null || userStopped || serviceBusy || exitRequested || connectCheckPending) return;
+            bool automaticRetry = autoRetryCount > 0;
             connectCheckPending = true;
             connect.Enabled = false; stop.Enabled = true; stop.Text = "取消连接";
             prepare.Enabled = false; restore.Enabled = false;
-            SetStatus("正在检查天翼服务状态……", ToneInfo, true);
-            string blocked = null;
-            try { blocked = await Task.Run((Func<string>)CheckBeforeConnect); }
-            catch { blocked = "无法检查服务状态，请手动重试。"; }
-            finally { connectCheckPending = false; }
-            if (IsDisposed || Disposing) return;
-            prepare.Enabled = !serviceBusy; restore.Enabled = !serviceBusy;
-            if (generation != taskGeneration || userStopped || exitRequested || serviceBusy || activeTask == null)
+            state.TrySetAuth(ConnectionStates.AuthState.Idle, "new preflight");
+            SetHandoff(ConnectionStates.HandoffState.Checking, "正在检查天翼服务和残留进程……", ToneInfo, true);
+            bool ready = false;
+            try
             {
-                connect.Enabled = !serviceBusy; stop.Enabled = false; stop.Text = "停止认证";
-                return;
+                var observation = await WaitForHandoffAsync(ConnectionStates.HandoffIntent.Connect, generation, true);
+                if (observation == null || HandoffCancelled(generation, true)) return;
+                var decision = observation.Decide(ConnectionStates.HandoffIntent.Connect);
+                if (decision == ConnectionStates.HandoffDecision.NeedStopService && !automaticRetry)
+                {
+                    SetHandoff(ConnectionStates.HandoffState.PreparationRequired, HandoffMessage(decision), ToneWarn);
+                    if (!await RunServiceAction(true, true) || HandoffCancelled(generation, true)) return;
+                    observation = await Task.Run((Func<HandoffObservation>)ObserveHandoff);
+                    if (HandoffCancelled(generation, true)) return;
+                    state.SetService(observation.Service);
+                    decision = observation.Decide(ConnectionStates.HandoffIntent.Connect);
+                }
+                if (decision != ConnectionStates.HandoffDecision.Ready)
+                {
+                    SetHandoff(decision == ConnectionStates.HandoffDecision.NeedStopService ?
+                        ConnectionStates.HandoffState.PreparationRequired : ConnectionStates.HandoffState.Blocked, HandoffMessage(decision), ToneWarn);
+                    return;
+                }
+                ready = true;
             }
-            if (blocked != null)
+            catch { if (!HandoffCancelled(generation, true)) SetHandoff(ConnectionStates.HandoffState.Blocked, "无法检查天翼环境，请稍后重试。", ToneWarn); }
+            finally
             {
-                activeTask = null; stop.Enabled = false; stop.Text = "停止认证";
-                connect.Enabled = true;
-                SetAuthState(ConnectionStates.AuthState.Failed, blocked, ToneWarn);
-                SetStatus(blocked, ToneWarn);
-                return;
+                connectCheckPending = false;
+                if (!IsDisposed && !Disposing)
+                {
+                    prepare.Enabled = !serviceBusy; restore.Enabled = !serviceBusy;
+                    if (!ready || HandoffCancelled(generation, true))
+                    { activeTask = null; connect.Enabled = !serviceBusy; stop.Enabled = false; stop.Text = "停止认证"; }
+                }
             }
+            if (!ready || HandoffCancelled(generation, true)) return;
+            state.SetHandoff(ConnectionStates.HandoffState.None);
             StartAuthProcess();
         }
 
@@ -2136,7 +2224,7 @@ internal static class Program
                 sb.AppendLine("生成时间(UTC): " + DateTime.UtcNow.ToString("o"));
                 Version v = Assembly.GetExecutingAssembly().GetName().Version;
                 sb.AppendLine("程序版本: " + (v == null ? "?" : v.ToString()));
-                sb.AppendLine("认证状态: " + state.Auth + "  核心进程: " + state.Core + "  网络: " + state.Network + "  服务: " + state.Service);
+                sb.AppendLine("认证状态: " + state.Auth + "  核心进程: " + state.Core + "  网络: " + state.Network + "  服务: " + state.Service + "  切换: " + state.Handoff);
                 sb.AppendLine("自动恢复: 重试 " + autoRetryCount + "/2, 用户已停止=" + userStopped + ", 本轮曾见网络=" + runSawProgress);
                 sb.AppendLine();
                 sb.AppendLine("== 非法状态迁移记录（应恒为空） ==");
@@ -2300,6 +2388,7 @@ internal static class Program
             {
                 stop.Enabled = false; stop.Text = "停止认证";
                 connect.Enabled = !connectCheckPending && !serviceBusy;
+                state.SetHandoff(ConnectionStates.HandoffState.None);
                 SetAuthState(ConnectionStates.AuthState.Idle, "已取消连接或重试。", ToneInfo);
                 return;
             }
@@ -2373,84 +2462,136 @@ internal static class Program
             catch { if (!IsDisposed) SetStatus("无法读取服务恢复记录，请手动核对。", ToneWarn); }
         }
 
-        private async Task RunServiceAction(bool forPrepare)
+        private async Task<bool> LaunchOfficialAsync(int generation)
         {
-            if (serviceBusy || connectCheckPending || retryTimer.Enabled || exitRequested) return;
-            if (running != null && !Object.ReferenceEquals(running, completedProcess))
+            SetHandoff(ConnectionStates.HandoffState.Launching, "正在定位并验证官方天翼客户端……", ToneBusy, true);
+            string client = await Task.Run(delegate {
+                string path = FindOfficialClient();
+                return path != null && ServiceIdentity.VerifyExpectedService(path) ? path : null;
+            });
+            if (HandoffCancelled(generation, false)) return false;
+            if (client == null)
             {
-                MessageBox.Show(this, "请先停止本程序的认证，再执行切换。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
+                SetHandoff(ConnectionStates.HandoffState.Blocked, "服务状态已处理，但未找到可验证身份的天翼客户端。请从开始菜单手动启动。", ToneWarn);
+                return false;
             }
+            var observation = await Task.Run((Func<HandoffObservation>)ObserveHandoff);
+            if (HandoffCancelled(generation, false)) return false;
+            state.SetService(observation.Service);
+            var decision = observation.Decide(ConnectionStates.HandoffIntent.Restore);
+            if (decision == ConnectionStates.HandoffDecision.ExistingClient)
+            { SetHandoff(ConnectionStates.HandoffState.OfficialRunning, HandoffMessage(decision), ToneInfo); return true; }
+            if (decision != ConnectionStates.HandoffDecision.LaunchClient)
+            { SetHandoff(ConnectionStates.HandoffState.Blocked, HandoffMessage(decision), ToneWarn); return false; }
+            using (Process child = Process.Start(new ProcessStartInfo { FileName = client, WorkingDirectory = Path.GetDirectoryName(client), UseShellExecute = true }))
+            {
+                if (child == null)
+                { SetHandoff(ConnectionStates.HandoffState.Blocked, "未能启动官方客户端，请从开始菜单打开。", ToneWarn); return false; }
+            }
+            SetHandoff(ConnectionStates.HandoffState.OfficialRunning, "已请求启动天翼客户端，请在官方窗口确认并登录。", ToneOk);
+            return true;
+        }
+
+        private async Task<bool> RunServiceAction(bool forPrepare, bool fromConnect = false)
+        {
+            if (serviceBusy || (connectCheckPending && !fromConnect) || retryTimer.Enabled || exitRequested) return false;
+            if (running != null && !Object.ReferenceEquals(running, completedProcess))
+            { MessageBox.Show(this, "请先停止本程序的认证，再执行切换。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information); return false; }
+            if (!fromConnect) { taskGeneration++; state.TrySetAuth(ConnectionStates.AuthState.Idle, "handoff request"); }
+            int generation = taskGeneration;
             serviceBusy = true; prepare.Enabled = false; restore.Enabled = false; connect.Enabled = false;
+            if (fromConnect) stop.Enabled = false;
             ServiceJournal journal = null;
             bool started = false;
             int? code = null;
             try
             {
-                string instructions = forPrepare
-                    ? "请确认已断开并退出官方客户端，且已关闭移动热点。继续将请求管理员权限停止天翼后台服务。"
-                    : "请确认已停止本程序认证并关闭移动热点。继续将请求管理员权限启动天翼后台服务。";
-                if (MessageBox.Show(this, instructions, forPrepare ? "准备连接" : "恢复天翼",
-                    MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
-                string before = await Task.Run((Func<string>)CurrentServiceState);
-                if (IsDisposed || Disposing || exitRequested) return;
-                if (before == "unknown" || (before != "Running" && before != "Stopped" && before != "NotInstalled"))
+                var intent = forPrepare ? ConnectionStates.HandoffIntent.Prepare : ConnectionStates.HandoffIntent.Restore;
+                SetHandoff(ConnectionStates.HandoffState.Checking, "正在检查天翼服务与进程……", ToneBusy, true);
+                var observation = await WaitForHandoffAsync(intent, generation, fromConnect);
+                if (observation == null || HandoffCancelled(generation, fromConnect)) return false;
+                var decision = observation.Decide(intent);
+                if (decision == ConnectionStates.HandoffDecision.Ready)
+                { SetHandoff(ConnectionStates.HandoffState.Ready, "天翼客户端已退出，后台服务无需停止，可以连接。", ToneOk); return true; }
+                if (decision == ConnectionStates.HandoffDecision.ExistingClient)
+                { SetHandoff(ConnectionStates.HandoffState.OfficialRunning, HandoffMessage(decision), ToneInfo); return true; }
+                if (decision == ConnectionStates.HandoffDecision.LaunchClient)
                 {
-                    SetStatus("服务状态未知或正在变化，未执行切换。", ToneWarn); return;
+                    if (MessageBox.Show(this, "无需切换后台服务，是否打开官方天翼客户端？", "恢复天翼",
+                        MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK)
+                    { SetHandoff(ConnectionStates.HandoffState.None, "已取消打开天翼客户端。", ToneInfo); return false; }
+                    return await LaunchOfficialAsync(generation);
                 }
+                if (decision != ConnectionStates.HandoffDecision.NeedStopService && decision != ConnectionStates.HandoffDecision.NeedStartService)
+                { SetHandoff(ConnectionStates.HandoffState.Blocked, HandoffMessage(decision), ToneWarn); return false; }
+                string instructions = forPrepare
+                    ? "天翼客户端已退出，但后台服务仍运行。请确认已断开天翼并关闭移动热点。继续将请求管理员权限停止后台服务。" +
+                        (fromConnect ? " 准备成功后将自动继续本次认证。" : "")
+                    : "请确认已停止澈知认证并关闭移动热点。继续将请求管理员权限启动天翼后台服务，然后打开官方客户端。";
+                if (MessageBox.Show(this, instructions, forPrepare ? "准备连接" : "恢复天翼",
+                    MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK)
+                { SetHandoff(ConnectionStates.HandoffState.None, "已取消服务切换。", ToneInfo); return false; }
+                observation = await Task.Run((Func<HandoffObservation>)ObserveHandoff);
+                if (HandoffCancelled(generation, fromConnect)) return false;
+                state.SetService(observation.Service);
+                if (observation.Decide(intent) != decision)
+                { SetHandoff(ConnectionStates.HandoffState.Blocked, "确认期间天翼状态发生变化，未执行切换，请重试。", ToneWarn); return false; }
+                string before = observation.Service == ConnectionStates.ServiceState.Running ? "Running" : "Stopped";
                 journal = ServiceJournal.Load(ServiceJournal.DefaultPath());
-                if (journal.Invalid) { SetStatus("服务事务记录损坏，需先人工核对，未执行切换。", ToneWarn); return; }
+                if (journal.Invalid)
+                { SetHandoff(ConnectionStates.HandoffState.Blocked, "服务事务记录损坏，需先人工核对，未执行切换。", ToneWarn); return false; }
                 journal.Begin(forPrepare ? "prepare" : "restore", before);
                 state.SetService(ConnectionStates.ServiceState.Transitioning);
-                SetStatus("请在弹出的管理员确认窗口中操作……", ToneBusy, true);
+                SetHandoff(forPrepare ? ConnectionStates.HandoffState.Preparing : ConnectionStates.HandoffState.Restoring, "请在弹出的管理员确认窗口中操作……", ToneBusy, true);
                 var info = new ProcessStartInfo { FileName = Application.ExecutablePath, Arguments = forPrepare ? "--admin-prepare" : "--admin-restore", UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
                 using (Process child = Process.Start(info))
                 {
                     if (child == null) throw new InvalidOperationException();
                     started = true;
-                    // Do not kill an elevated service operation mid-transaction.
                     bool exited = await Task.Run(() => child.WaitForExit(60000));
                     if (!exited)
                     {
-                        if (!IsDisposed) SetStatus("服务操作仍未结束，结果未知；请核对系统状态。", ToneWarn);
+                        if (!IsDisposed) SetHandoff(ConnectionStates.HandoffState.Blocked, "服务操作仍未结束，结果未知；请核对系统状态。", ToneWarn);
                         await Task.Run(() => child.WaitForExit());
                     }
                     code = child.ExitCode;
                 }
                 string actual = await Task.Run((Func<string>)CurrentServiceState);
                 journal.Complete(code, actual, false);
-                if (IsDisposed || Disposing) return;
-                state.SetService(actual == "Running" ? ConnectionStates.ServiceState.Running : actual == "Stopped" ? ConnectionStates.ServiceState.Stopped :
-                    actual == "NotInstalled" ? ConnectionStates.ServiceState.NotInstalled : ConnectionStates.ServiceState.Unknown);
+                if (HandoffCancelled(generation, fromConnect)) return false;
+                state.SetService(MapServiceState(actual));
                 bool expected = forPrepare ? actual == "Stopped" || actual == "NotInstalled" : actual == "Running";
                 if ((code == 0 || code == 10) && expected)
                 {
-                    if (forPrepare) SetStatus("准备完成！输入账号密码即可连接。", ToneOk);
-                    else
-                    {
-                        SetStatus("天翼服务已恢复，请在官方客户端重新登录。", ToneOk);
-                        string client = FindOfficialClient();
-                        if (client != null) Process.Start(new ProcessStartInfo { FileName = client, WorkingDirectory = Path.GetDirectoryName(client), UseShellExecute = true });
-                    }
+                    if (forPrepare)
+                    { SetHandoff(ConnectionStates.HandoffState.Ready, "准备完成，可以连接校园网。", ToneOk); return true; }
+                    return await LaunchOfficialAsync(generation);
                 }
-                else SetStatus(code == 0 || code == 10 ? "服务结果未得到确认，请核对实际状态。" : ServiceError(code ?? 25), ToneWarn);
+                SetHandoff(ConnectionStates.HandoffState.Blocked, code == 0 || code == 10 ? "服务结果未得到确认，请核对实际状态。" : ServiceError(code ?? 25), ToneWarn);
+                return false;
             }
             catch (Win32Exception e)
             {
                 if (!started && journal != null && journal.HasPending && e.NativeErrorCode == 1223)
-                {
-                    // UAC was cancelled before child creation; no service mutation by this task.
-                    // C# 5 forbids await in catch. Preserve prior uncertainty instead of probing synchronously.
                     try { journal.Complete(null, "unknown", true); } catch { }
-                }
                 state.SetService(ConnectionStates.ServiceState.Unknown);
-                if (!IsDisposed) SetStatus(e.NativeErrorCode == 1223 ? "已取消管理员授权。" : "无法启动管理员操作，请重试。", ToneWarn);
+                if (!IsDisposed) SetHandoff(ConnectionStates.HandoffState.Blocked, e.NativeErrorCode == 1223 ? "已取消管理员授权。" : "无法启动管理员操作或官方客户端，请重试。", ToneWarn);
+                return false;
             }
-            catch { state.SetService(ConnectionStates.ServiceState.Unknown); if (!IsDisposed) SetStatus("操作结果未知，已保留恢复记录，请检查服务状态。", ToneWarn); }
+            catch
+            {
+                state.SetService(ConnectionStates.ServiceState.Unknown);
+                if (!IsDisposed) SetHandoff(ConnectionStates.HandoffState.Blocked, "操作结果未知，请检查服务状态。", ToneWarn);
+                return false;
+            }
             finally
             {
                 serviceBusy = false;
-                if (!IsDisposed && !Disposing) { prepare.Enabled = true; restore.Enabled = true; connect.Enabled = true; }
+                if (!IsDisposed && !Disposing)
+                {
+                    prepare.Enabled = !connectCheckPending; restore.Enabled = !connectCheckPending; connect.Enabled = !connectCheckPending;
+                    if (fromConnect && connectCheckPending) stop.Enabled = true;
+                }
             }
         }
 

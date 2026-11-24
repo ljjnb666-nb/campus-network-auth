@@ -17,6 +17,20 @@ internal static class ConnectionStates
 
     // 天翼官方后台服务状态
     internal enum ServiceState { Unknown, NotInstalled, Running, Stopped, Transitioning, Failed }
+    internal enum HandoffState { None, Checking, WaitingForClient, WaitingForService, PreparationRequired, Preparing, Ready, Restoring, Launching, OfficialRunning, Blocked }
+    internal enum HandoffIntent { Connect, Prepare, Restore }
+    internal enum HandoffDecision { Ready, WaitForClient, WaitForService, NeedStopService, NeedStartService, LaunchClient, ExistingClient, BlockUnknown }
+
+    internal static HandoffDecision DecideHandoff(HandoffIntent intent, ServiceState service, int clients)
+    {
+        if (clients < 0 || service == ServiceState.Unknown || service == ServiceState.Failed) return HandoffDecision.BlockUnknown;
+        if (service == ServiceState.Transitioning) return HandoffDecision.WaitForService;
+        if (clients > 0)
+            return intent == HandoffIntent.Restore && service == ServiceState.Running ? HandoffDecision.ExistingClient : HandoffDecision.WaitForClient;
+        if (intent == HandoffIntent.Restore)
+            return service == ServiceState.Stopped ? HandoffDecision.NeedStartService : HandoffDecision.LaunchClient;
+        return service == ServiceState.Running ? HandoffDecision.NeedStopService : HandoffDecision.Ready;
+    }
 
     // 一次性操作结果（仅影响提示文案与配色，不影响连接状态）
     internal enum OpResult { Information, Success, Warning, Error }
@@ -30,6 +44,8 @@ internal sealed class ConnectionState
     private ConnectionStates.CoreState core = ConnectionStates.CoreState.NotStarted;
     private ConnectionStates.NetworkState network = ConnectionStates.NetworkState.Unknown;
     private ConnectionStates.ServiceState service = ConnectionStates.ServiceState.Unknown;
+    internal ConnectionStates.HandoffState Handoff { get; private set; }
+    internal void SetHandoff(ConnectionStates.HandoffState next) { Handoff = next; }
 
     private static readonly Dictionary<ConnectionStates.AuthState, ConnectionStates.AuthState[]> AllowedFrom = new Dictionary<ConnectionStates.AuthState, ConnectionStates.AuthState[]>
     {
@@ -84,6 +100,22 @@ internal sealed class ConnectionState
     {
         get
         {
+            if (auth == ConnectionStates.AuthState.Idle)
+            {
+                switch (Handoff)
+                {
+                    case ConnectionStates.HandoffState.Checking: return "检查中";
+                    case ConnectionStates.HandoffState.WaitingForClient: return "等待天翼退出";
+                    case ConnectionStates.HandoffState.WaitingForService: return "等待服务";
+                    case ConnectionStates.HandoffState.PreparationRequired: return "待准备";
+                    case ConnectionStates.HandoffState.Preparing: return "准备中";
+                    case ConnectionStates.HandoffState.Ready: return "待连接";
+                    case ConnectionStates.HandoffState.Restoring: return "恢复中";
+                    case ConnectionStates.HandoffState.Launching: return "启动天翼";
+                    case ConnectionStates.HandoffState.OfficialRunning: return "天翼模式";
+                    case ConnectionStates.HandoffState.Blocked: return "暂不可连接";
+                }
+            }
             switch (auth)
             {
                 case ConnectionStates.AuthState.Authenticating:
@@ -103,6 +135,10 @@ internal sealed class ConnectionState
     {
         get
         {
+            if (auth == ConnectionStates.AuthState.Idle &&
+                (Handoff == ConnectionStates.HandoffState.Checking || Handoff == ConnectionStates.HandoffState.WaitingForClient ||
+                 Handoff == ConnectionStates.HandoffState.WaitingForService || Handoff == ConnectionStates.HandoffState.Preparing ||
+                 Handoff == ConnectionStates.HandoffState.Restoring || Handoff == ConnectionStates.HandoffState.Launching)) return true;
             return auth == ConnectionStates.AuthState.RetryScheduled || auth == ConnectionStates.AuthState.Authenticating ||
                    auth == ConnectionStates.AuthState.Reauthenticating ||
                    auth == ConnectionStates.AuthState.WaitingForNetwork ||
