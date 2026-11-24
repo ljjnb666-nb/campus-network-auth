@@ -108,5 +108,17 @@
 
 **CI 设计修正**：CI 只运行 Build-Core.ps1（同批产出核心+GUI，哈希自洽）；不运行 Build.ps1——提交的 CoreHash 与 CI 现编核心哈希逐字节一致在本工具链下不可保证（见证据 3）。
 
-**状态更新**：A02 → FIXED_PENDING_VERIFICATION（待 CI 首跑验证）；A07 → FIXED_PENDING_VERIFICATION（同）；A21 → 证据已采集（54 CVE 命中，待 P3 处置）；N02 → FIXED_PENDING_VERIFICATION。
+### P3 安全整改（本阶段）
+**A04/A05 已修复并验证（96301cc）**：连接前不再强制保存凭据；新增「记住账号密码」复选框（默认不勾选，已有记录自动勾选）；勾选且认证成功（AUTH_OK/ONLINE）后才写入磁盘；保存失败仅弹窗提示不阻断已成功的连接；损坏记录拒绝覆盖（沿用 CredentialStore 原有防御）并给出处理指引。全部离线自测通过。
+
+**A21 依赖安全（本次提交）**：
+- `scripts/Test-CurlVulns.ps1` 重写为 OSV 区间精确判定（introduced≤V<fixed + versions + last_affected 兜底，并报告"提及但不受影响"的条目）。
+- 官方漏洞库精确核查：**8.20.0 受影响 84 条（含 High：CURL-CVE-2026-92392 HTTP/2 UAF）→ 升级 8.23.0 后 42 条（绝大多数 Low，均为截至最新版尚无修复版本的披露项）**。本项目使用面（纯 HTTP/Schannel/静态链接/无 HTTP2、WS、SSH、FTP、代理）相关子集已列明需人工复核，残余风险记录。
+- 升级流程：下载官方包（SHA-256 E3DE77CFA6367083C776A26647FC9F633B538C06C3BAA73D931A252AC8F72B49）→ 全量重建（新核心 7B043843…）→ CoreHash 同步 → 全部离线自测通过后采纳。三元组同步更新于 Fetch-Curl/Build-Core/CI 缓存键/文档。
+
+**新增文档**：`SECURITY.md`（威胁模型、已实施防护、UPSTREAM_LIMITATION 声明：HTTP 明文/密码可还原/无服务器身份验证、EXE 未签名、C# 字符串不可彻底擦除、Kill 后内存清理缺失等如实记录）；`THIRD_PARTY_NOTICES.md`（SBOM：ESurfingClient-CVersion 基线/libcurl 8.23.0/cJSON 1.7.19/.NET FX 4.x + 漏洞核查记录 + 分发注意）。
+
+**状态更新**：A04 → FIXED_VERIFIED（离线自测+UI 测试通过）；A05 → FIXED_VERIFIED；A21 → FIXED_PENDING_VERIFICATION（精确数据已采集，最新版残余 42 条披露项为上游未修复，人工复核完成前不宣称清零）；A01 → UPSTREAM_LIMITATION（SECURITY.md 已如实记录）。
+
+
 

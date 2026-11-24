@@ -21,7 +21,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: third-party
-          key: curl-8.20.0-FC5819CAD3F9F5482669ADCDC49A782C15F36D2A0715B395B06D9173593D2DC0
+          key: curl-8.23.0-E3DE77CFA6367083C776A26647FC9F633B538C06C3BAA73D931A252AC8F72B49
 
       - name: Fetch and verify dependencies
         shell: pwsh

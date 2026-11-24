@@ -29,7 +29,7 @@ internal static class Program
     private const string OfficialExe = @"C:\Program Files (x86)\Chinatelecom_GDPortal\ESurfingClient.exe";
     private const string CoreResource = "Chezhi.AuthCore";
     private const string LicenseResource = "Chezhi.Licenses";
-    private const string CoreHash = "3B51270E900840B146E88581C8D200183351B22491D952726A94D50362D74621";
+    private const string CoreHash = "7B0438434C42074F0B81E368C20147656F239D81BE610E277AB6A9EF8CAD39BF";
     private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
     private const string CredentialFileName = "credentials.v1.dat";
     private static string tempDir;

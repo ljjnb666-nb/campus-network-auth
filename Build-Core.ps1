@@ -56,7 +56,7 @@ foreach ($path in @((Join-Path $project 'CMakeLists.txt'), (Join-Path $PSScriptR
 }
 
 # 依赖获取：固定版本/来源/SHA-256，缓存命中即离线可用；失败或哈希不符直接终止
-$curlVersion = '8.20.0'
+$curlVersion = '8.23.0'
 $curlArchive = (& (Join-Path $PSScriptRoot 'scripts\Fetch-Curl.ps1') -Version $curlVersion) | Select-Object -Last 1
 if (-not (Test-Path -LiteralPath $curlArchive -PathType Leaf)) { throw "curl 源码包获取失败：$curlArchive" }
 
@@ -79,7 +79,7 @@ if ($tempRoot -match '[^\x20-\x7e]') { throw '临时目录含有非 ASCII 字符
 $work = Join-Path $tempRoot ('CheZhiBuild-' + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $build)
 [void](New-Item -ItemType Directory -Path $work)
-$curlSource = Join-Path $work 'curl-8.20.0'
+$curlSource = Join-Path $work "curl-$curlVersion"
 $curlBuild = Join-Path $work 'curl-build'
 $prefix = Join-Path $work 'curl-prefix'
 $coreBuild = Join-Path $work 'auth-build'
@@ -127,7 +127,7 @@ $manifest = [ordered]@{
     dependencies = [ordered]@{
         curl = [ordered]@{
             version = $curlVersion
-            sha256  = 'FC5819CAD3F9F5482669ADCDC49A782C15F36D2A0715B395B06D9173593D2DC0'
+            sha256  = 'E3DE77CFA6367083C776A26647FC9F633B538C06C3BAA73D931A252AC8F72B49'
             source  = "https://curl.se/download/curl-$curlVersion.tar.gz"
             archive = $curlArchive
         }

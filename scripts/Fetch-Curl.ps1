@@ -12,7 +12,7 @@
 ./scripts/Fetch-Curl.ps1 -OutputDir D:\deps    # 自定义缓存目录
 #>
 param(
-    [string]$Version = '8.20.0',
+    [string]$Version = '8.23.0',
     [string]$OutputDir = '',
     [string]$SourceUrl = ''
 )
@@ -20,7 +20,7 @@ $ErrorActionPreference = 'Stop'
 
 # 固定依赖三元组：版本 / 来源 / SHA-256（与本地长期使用的源码包逐字节核对过，
 # 亦可用官方 .asc 签名复核）。升级版本必须同步更新此处并重新核验哈希。
-$expectedSha256 = 'FC5819CAD3F9F5482669ADCDC49A782C15F36D2A0715B395B06D9173593D2DC0'
+$expectedSha256 = 'E3DE77CFA6367083C776A26647FC9F633B538C06C3BAA73D931A252AC8F72B49'
 if (-not $SourceUrl) { $SourceUrl = "https://curl.se/download/curl-$Version.tar.gz" }
 
 $archiveName = "curl-$Version.tar.gz"
