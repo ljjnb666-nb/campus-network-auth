@@ -108,7 +108,15 @@
 
 **CI 设计修正**：CI 只运行 Build-Core.ps1（同批产出核心+GUI，哈希自洽）；不运行 Build.ps1——提交的 CoreHash 与 CI 现编核心哈希逐字节一致在本工具链下不可保证（见证据 3）。
 
-### P3 安全整改（本阶段）
+### P4 状态机与结构化事件（本阶段）
+**A03/A13 根因修复**：新增 `ConnectionStates.cs`（领域状态模型：NetworkState/AuthState/CoreState/ServiceState/OpResult 五套枚举 + 迁移表校验 + pill 展示映射）。`SetStatus` 退化为纯展示层（文案/指示点/卡片配色）；顶部连接状态 pill 的唯一驱动来源改为 `UpdateConnectionPill()`（领域状态快照）——保存账号/删除账号/服务切换成功不再被显示为"已连接"。所有连接状态变化必经 `SetAuthState()`（非法迁移拒绝并记录）。
+**7.2 不变量**：`StateMachineInvariants()` 并入 `--self-test-logic`（实跑断言）：正常链路/失败链路/非法迁移拒绝（Idle 不能跳到已认证；已认证不经停止不能回等待网络）；操作结果（保存/删除/服务切换）不改变连接状态；拒绝记录可查。
+**7.3 结构化事件（协议 v1）**：核心侧 `ephemeral_emit_event()`（DialerAuth.c 定义、States.h 声明）在 7 个站点与旧令牌并行输出 `EPHEMERAL_EVENT {"v":1,"pid":...,"event":...,"code":...,"error":"unknown"}`；auth_failed 携带 dialer_app 返回码、exit 携带进程退出码；上游协议无法可靠分类失败原因，error 如实为 unknown（不编造）。GUI 侧管道过滤器转发结构化行 → `ArchiveCoreEvent`（截断 512 字符、环形 200 条，畸形行防御）。`CoreTest --self-test-stop` 新增端到端断言：probe 模式必须收到 EPHEMERAL_EVENT 行（本地被活进程锁阻塞，CI 覆盖）。
+**OnCoreExit 增强**：按退出码区分 Exited/Crashed 并入 CoreState（A15 的基础）。
+**验证**：logic（含新不变量）/credentials/core/ui 全 PASS；新核心 9644A4B2… 已同步 CoreHash；协议文档 EphemeralExperimental.md 增补 v1 章节。
+**状态更新**：A03 → FIXED_VERIFIED（不变量测试 + 迁移校验实跑）；A13 → FIXED_VERIFIED（NetworkState 与 AuthState 分离，"已联网·会话"与"已认证"明确区分）；A10 → FIXED_PENDING_VERIFICATION（结构化协议落地，错误分类=unknown 如实，终态区分待 CI stop 测试验证）；A15 → FIXED_PENDING_VERIFICATION（退出码已区分崩溃/正常）。
+
+### P3 安全整改
 **A04/A05 已修复并验证（96301cc）**：连接前不再强制保存凭据；新增「记住账号密码」复选框（默认不勾选，已有记录自动勾选）；勾选且认证成功（AUTH_OK/ONLINE）后才写入磁盘；保存失败仅弹窗提示不阻断已成功的连接；损坏记录拒绝覆盖（沿用 CredentialStore 原有防御）并给出处理指引。全部离线自测通过。
 
 **A21 依赖安全（本次提交）**：

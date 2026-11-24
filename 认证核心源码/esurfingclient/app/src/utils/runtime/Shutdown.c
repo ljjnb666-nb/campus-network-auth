@@ -35,6 +35,9 @@ void shut(const int8_t exit_code)
     }
     shutting_down = true;
 
+    /* 结构化事件：退出码随事件上报（崩溃=非 0），供桌面端区分正常退出/异常退出 */
+    ephemeral_emit_event("exit", exit_code);
+
     /**
      * 关闭流程一开始就停掉看门狗: 接下来主循环不再打卡,
      * 不停的话它会把正常退出误判成卡死, 还会盖掉真正的退出原因

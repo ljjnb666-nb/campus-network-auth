@@ -395,6 +395,7 @@ WaitResult wait_need_auth(void)
                 ephemeral_online_reported = true;
                 fputs("EPHEMERAL_ONLINE\n", stderr);
                 fflush(stderr);
+                ephemeral_emit_event("online", 0);
             }
             retry_network = 1;
             sleep_ms(3000, false);

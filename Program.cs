@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
@@ -29,7 +30,7 @@ internal static class Program
     private const string OfficialExe = @"C:\Program Files (x86)\Chinatelecom_GDPortal\ESurfingClient.exe";
     private const string CoreResource = "Chezhi.AuthCore";
     private const string LicenseResource = "Chezhi.Licenses";
-    private const string CoreHash = "7B0438434C42074F0B81E368C20147656F239D81BE610E277AB6A9EF8CAD39BF";
+    private const string CoreHash = "9644A4B2884B3229489D660C8B07CCC423A383F3F19E4221A6344150ACCD6FF0";
     private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
     private const string CredentialFileName = "credentials.v1.dat";
     private static string tempDir;
@@ -372,6 +373,13 @@ internal static class Program
         var p = new Process { StartInfo = si, EnableRaisingEvents = true };
         DataReceivedEventHandler filter = delegate(object sender, DataReceivedEventArgs e) {
             string s = e.Data;
+            if (s == null) return;
+            // 结构化事件（协议 v1，与旧令牌并行）：整行转发，由 OnCoreStatus 归档
+            if (s.StartsWith("EPHEMERAL_EVENT ", StringComparison.Ordinal) && status != null)
+            {
+                status((Process)sender, s);
+                return;
+            }
             if (status != null && (s == "EPHEMERAL_AUTH_OK" || s == "EPHEMERAL_AUTH_FAILED" ||
                 s == "EPHEMERAL_WAIT_NETWORK" || s == "EPHEMERAL_ONLINE" ||
                 s == "EPHEMERAL_STOP_ACCEPTED" || s == "EPHEMERAL_STOP_CHANNEL_FAILED"))
@@ -421,9 +429,52 @@ internal static class Program
             && ServiceGuard(true, 0, true, ServiceControllerStatus.StopPending, false, true) == 24
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Running, false, true) == 24
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Running, true, true) == 0
-            && ServiceGuard(true, 0, true, ServiceControllerStatus.Stopped, false, false) == 0;
+            && ServiceGuard(true, 0, true, ServiceControllerStatus.Stopped, false, false) == 0
+            && StateMachineInvariants();
         Console.WriteLine(ok ? "LOGIC_PASS" : "LOGIC_FAIL");
         return ok ? 0 : 1;
+    }
+
+    // 状态机不变量（7.2）：合法迁移被接受、非法迁移被拒绝；操作结果不改变连接状态；
+    // 任何路径都不能"跳过认证直接变成已认证"；停止/登出后回到 Idle 而非保持已认证。
+    private static bool StateMachineInvariants()
+    {
+        var m = new ConnectionState();
+        bool ok = true;
+
+        // 正常链路：Idle → Authenticating → Authenticated → LoggingOut → Idle
+        ok &= m.TrySetAuth(ConnectionStates.AuthState.Authenticating, "connect");
+        ok &= m.Auth == ConnectionStates.AuthState.Authenticating;
+        ok &= m.TrySetAuth(ConnectionStates.AuthState.Authenticated, "auth_ok");
+        ok &= m.PillText == "已认证";
+        ok &= m.TrySetAuth(ConnectionStates.AuthState.LoggingOut, "stop_accepted");
+        ok &= m.TrySetAuth(ConnectionStates.AuthState.Idle, "exited");
+        ok &= m.PillText == "未连接";
+
+        // 非法迁移：Idle 不能直接跳到"已认证"（未认证不得显示已连接）
+        ok &= !m.TrySetAuth(ConnectionStates.AuthState.Authenticated, "short-circuit");
+        ok &= m.Auth == ConnectionStates.AuthState.Idle;
+        // 已认证态不能"不经停止直接回等待网络"（须先停止/失败）
+        ok &= m.TrySetAuth(ConnectionStates.AuthState.Authenticating, "retry") && m.TrySetAuth(ConnectionStates.AuthState.Authenticated, "ok");
+        ok &= !m.TrySetAuth(ConnectionStates.AuthState.WaitingForNetwork, "invalid-from-authed");
+
+        // 失败链路：Authenticating → Failed →（重新认证）Authenticating
+        ok &= m.TrySetAuth(ConnectionStates.AuthState.Failed, "auth_failed");
+        ok &= m.PillText == "认证失败";
+        ok &= m.TrySetAuth(ConnectionStates.AuthState.Authenticating, "manual-retry");
+        ok &= m.TrySetAuth(ConnectionStates.AuthState.AuthenticatedBySession, "online");
+        ok &= m.PillText == "已联网·会话";
+
+        // 操作结果不变量：保存/删除/服务切换成功不得改变连接状态
+        ConnectionStates.AuthState before = m.Auth;
+        m.RecordOperation(ConnectionStates.OpResult.Success, "save-credentials");
+        m.RecordOperation(ConnectionStates.OpResult.Success, "forget-credentials");
+        m.RecordOperation(ConnectionStates.OpResult.Warning, "service-transition");
+        ok &= m.Auth == before;
+
+        // 非法迁移必须被记录（供诊断）
+        ok &= m.RejectedTransitions.Count >= 2;
+        return ok;
     }
 
     private static int ObserveTests()
@@ -552,13 +603,19 @@ internal static class Program
         {
             ExtractCore();
             var accepted = new System.Threading.ManualResetEvent(false);
+            // 结构化事件（协议 v1）端到端断言：probe 模式必须至少收到一行 EPHEMERAL_EVENT
+            var sawEvent = new System.Threading.ManualResetEvent(false);
             p = LaunchCore(stop ? "--ephemeral-probe" : "--ephemeral-check", "dummy-user", "dummy-pass", 1,
-                delegate(Process sender, string value) { if (value == "EPHEMERAL_STOP_ACCEPTED") accepted.Set(); });
+                delegate(Process sender, string value)
+                {
+                    if (value == "EPHEMERAL_STOP_ACCEPTED") accepted.Set();
+                    if (value != null && value.StartsWith("EPHEMERAL_EVENT ", StringComparison.Ordinal)) sawEvent.Set();
+                });
             bool ok;
             if (stop)
             {
                 System.Threading.Thread.Sleep(500);
-                ok = !p.HasExited && RequestStop(p) && accepted.WaitOne(5000) && p.WaitForExit(5000) && p.ExitCode == 0;
+                ok = !p.HasExited && RequestStop(p) && accepted.WaitOne(5000) && sawEvent.WaitOne(5000) && p.WaitForExit(5000) && p.ExitCode == 0;
             }
             else ok = p.WaitForExit(10000) && p.ExitCode == 0;
             Console.WriteLine(ok ? (stop ? "STOP_PASS" : "CORE_PASS") : "CORE_FAIL");
@@ -593,7 +650,11 @@ internal static class Program
         private readonly NotifyIcon tray = new NotifyIcon();
         private readonly ContextMenuStrip trayMenu = new ContextMenuStrip();
         private readonly CredentialStore credentials;
+        private readonly ConnectionState state = new ConnectionState();
         private readonly bool isSelfTest;
+        // 核心结构化事件归档（EPHEMERAL_EVENT v1，协议见 docs/EphemeralExperimental.md）：
+        // 环形上限 200 条，供诊断导出；畸形/超长行截断后原样保留，永不影响 UI 流程。
+        private readonly List<string> coreEvents = new List<string>();
         private string credentialLoadError;
         private bool loadedCredential;
         private Process running;
@@ -1397,24 +1458,37 @@ internal static class Program
 
         private void SetStatus(string text, Color tone, bool pulse = false)
         {
+            // 展示层：只更新文案/指示点/卡片配色。顶部连接状态 pill 由领域状态驱动
+            // （UpdateConnectionPill），操作成功不再被误显示为"已连接"（A03/A13 根因修复）。
             status.Text = text;
             if (!dot.IsDisposed) dot.Set(tone);
             if (statusCard != null && !statusCard.IsDisposed) statusCard.SetTone(tone);
-            if (statusPill != null && !statusPill.IsDisposed)
-            {
-                string pillText = "未连接";
-                if (tone == ToneOk) pillText = "已连接";
-                else if (tone == ToneBusy) pillText = "认证中";
-                else if (tone == ToneWarn) pillText = "需注意";
-                else if (tone == ToneFail) pillText = "连接失败";
-                statusPill.UpdateStatus(pillText, tone);
-            }
             if (pulse) animTimer.Start();
             else
             {
                 animTimer.Stop();
                 if (!dot.IsDisposed) dot.SetPulse(0);
             }
+        }
+
+        // 顶部连接状态 pill 的唯一驱动来源：领域状态快照（禁止从提示颜色推断）
+        private void UpdateConnectionPill()
+        {
+            if (statusPill == null || statusPill.IsDisposed) return;
+            ConnectionStates.AuthState a = state.Auth;
+            Color pillColor = ToneInfo;
+            if (state.PillBusy) pillColor = ToneBusy;
+            else if (a == ConnectionStates.AuthState.Authenticated || a == ConnectionStates.AuthState.AuthenticatedBySession) pillColor = ToneOk;
+            else if (a == ConnectionStates.AuthState.Failed) pillColor = ToneFail;
+            statusPill.UpdateStatus(state.PillText, pillColor);
+        }
+
+        // 连接状态迁移唯一入口：经迁移表校验，非法迁移拒绝并记录（供诊断/测试）
+        private void SetAuthState(ConnectionStates.AuthState next, string text, Color tone, bool pulse = false)
+        {
+            state.TrySetAuth(next, text);
+            SetStatus(text, tone, pulse);
+            UpdateConnectionPill();
         }
 
         private void StyleStopArmed(bool armed)
@@ -1446,7 +1520,8 @@ internal static class Program
                 password.UseSystemPasswordChar = true; reveal.Text = "显示";
                 connect.Text = "连接中…";
                 stop.Enabled = true;
-                SetStatus("正在连接校园网……", ToneBusy, true);
+                state.SetCore(ConnectionStates.CoreState.Running);
+                SetAuthState(ConnectionStates.AuthState.Authenticating, "正在连接校园网……", ToneBusy, true);
                 Process started = running;
                 started.Exited += delegate { if (!IsDisposed && IsHandleCreated) try { BeginInvoke((Action)delegate { OnCoreExit(started); }); } catch (InvalidOperationException) { } };
                 if (started.HasExited) OnCoreExit(started);
@@ -1471,27 +1546,48 @@ internal static class Program
                 MessageBox.Show(this, "连接成功，但账号密码未能加密保存（可能是本地记录损坏或目录不可写）。\r\n本次连接不受影响；如需保存请先用托盘菜单“清除已保存账号”。", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
+        // 归档核心结构化事件（含畸形行防御：截断到 512 字符、环形上限 200 条）
+        private void ArchiveCoreEvent(string line)
+        {
+            if (String.IsNullOrEmpty(line)) return;
+            if (line.Length > 512) line = line.Substring(0, 512);
+            coreEvents.Add(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + line);
+            if (coreEvents.Count > 200) coreEvents.RemoveRange(0, coreEvents.Count - 200);
+        }
+
         private void OnCoreStatus(Process sender, string token)
         {
             if (IsDisposed || !IsHandleCreated) return;
             try { BeginInvoke((Action)delegate {
                 if (!Object.ReferenceEquals(running, sender)) return;
+                // 结构化事件（v1）：仅归档，不驱动 UI 文案（旧令牌仍承担状态显示，兼容并行）
+                if (token.StartsWith("EPHEMERAL_EVENT ", StringComparison.Ordinal)) { ArchiveCoreEvent(token); return; }
                 if (stopping && token != "EPHEMERAL_STOP_ACCEPTED" && token != "EPHEMERAL_STOP_CHANNEL_FAILED") return;
                 if (token == "EPHEMERAL_AUTH_OK")
                 {
                     connect.Text = "运行中…"; // 已连上, 按钮反映"保持运行"而非"连接中"
-                    SetStatus("连接成功！现在可到 Windows 设置打开移动热点共享网络。", ToneOk);
+                    state.SetNetwork(ConnectionStates.NetworkState.AuthenticationRequired); // 认证前校园网待认证；成功后视为完成
+                    SetAuthState(ConnectionStates.AuthState.Authenticated, "连接成功！现在可到 Windows 设置打开移动热点共享网络。", ToneOk);
                     SaveAfterAuth();
                 }
-                else if (token == "EPHEMERAL_AUTH_FAILED") SetStatus("连接失败：请核对账号密码，并确认已连上校园网。", ToneFail);
-                else if (token == "EPHEMERAL_WAIT_NETWORK") SetStatus("正在等待接入校园网……请确认电脑已连上校园网的 Wi-Fi 或网线。", ToneBusy, true);
+                else if (token == "EPHEMERAL_AUTH_FAILED")
+                {
+                    state.SetNetwork(ConnectionStates.NetworkState.Unknown);
+                    SetAuthState(ConnectionStates.AuthState.Failed, "连接失败：请核对账号密码，并确认已连上校园网。", ToneFail);
+                }
+                else if (token == "EPHEMERAL_WAIT_NETWORK")
+                {
+                    state.SetNetwork(ConnectionStates.NetworkState.Unknown);
+                    SetAuthState(ConnectionStates.AuthState.WaitingForNetwork, "正在等待接入校园网……请确认电脑已连上校园网的 Wi-Fi 或网线。", ToneBusy, true);
+                }
                 else if (token == "EPHEMERAL_ONLINE")
                 {
                     connect.Text = "运行中…";
-                    SetStatus("网络已连通（可能沿用了先前的登录会话）。程序保持运行，会话失效后会自动重新认证。", ToneOk);
+                    state.SetNetwork(ConnectionStates.NetworkState.InternetAvailable); // 有互联网≠本程序完成认证（沿用会话）
+                    SetAuthState(ConnectionStates.AuthState.AuthenticatedBySession, "网络已连通（可能沿用了先前的登录会话）。程序保持运行，会话失效后会自动重新认证。", ToneOk);
                     SaveAfterAuth();
                 }
-                else if (token == "EPHEMERAL_STOP_ACCEPTED") SetStatus("正在退出认证并通知服务器登出……", ToneWarn, true);
+                else if (token == "EPHEMERAL_STOP_ACCEPTED") SetAuthState(ConnectionStates.AuthState.LoggingOut, "正在退出认证并通知服务器登出……", ToneWarn, true);
                 else if (token == "EPHEMERAL_STOP_CHANNEL_FAILED") SetStatus("停止指令发送失败，可稍后点“强制结束”。", ToneFail);
             }); } catch (InvalidOperationException) { }
         }
@@ -1500,7 +1596,13 @@ internal static class Program
         {
             if (!Object.ReferenceEquals(running, started)) return;
             timer.Stop(); stopping = false; stop.Enabled = false; stop.Text = "停止认证"; StyleStopArmed(false); connect.Enabled = true; connect.Text = "立即连接";
-            SetStatus("认证已停止。服务器上的会话可能稍后才释放。", ToneWarn);
+            int code = 0; bool crashed = false;
+            try { code = started.ExitCode; crashed = code != 0; } catch { crashed = true; }
+            state.SetCore(crashed ? ConnectionStates.CoreState.Crashed : ConnectionStates.CoreState.Exited);
+            // 收到退出 ≠ 服务器已登出（A06/A15：退出码仅区分崩溃/正常，登出结果未知）
+            SetAuthState(ConnectionStates.AuthState.Idle, crashed
+                ? "认证进程异常退出（退出码 " + code + "），服务器上的会话可能仍在。"
+                : "认证已停止。服务器上的会话可能稍后才释放。", ToneWarn);
             if (closingAfterStop) { closingAfterStop = false; Close(); }
         }
 

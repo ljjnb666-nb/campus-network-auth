@@ -224,6 +224,9 @@ extern bool g_ephemeral_probe;
 extern char g_ephemeral_input[4096];
 void clear_ephemeral_secrets(void);
 void clear_all_account_secrets(void);
+
+/* 结构化事件（协议 v1）：与旧 EPHEMERAL_* 令牌并行输出（定义在 DialerAuth.c） */
+void ephemeral_emit_event(const char* event, int code);
 void request_ephemeral_stop(void);
 bool stop_requested(void);
 

@@ -23,10 +23,27 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #ifndef __OPENWRT__
 #include "control/Control.h"
 #endif
+
+/**
+ * 结构化事件（协议 v1）：与旧 EPHEMERAL_* 令牌并行输出到 stderr，供桌面端
+ * 解析、诊断归档与前向兼容。字段：v=协议版本, pid=进程标识, event=事件类型,
+ * code=相关退出码/错误码（失败时为 dialer_app 返回值）, error=错误分类。
+ *
+ * 上游认证协议无法可靠区分失败原因（凭据错误/账号限制/服务器异常/超时），
+ * 按审计规则 error 一律如实填 "unknown"，不编造分类。
+ */
+void ephemeral_emit_event(const char* event, const int code)
+{
+    if (!g_ephemeral_auth) return;
+    fprintf(stderr, "EPHEMERAL_EVENT {\"v\":1,\"pid\":%ld,\"event\":\"%s\",\"code\":%d,\"error\":\"unknown\"}\n",
+            (long)getpid(), event, code);
+    fflush(stderr);
+}
 
 /* A caller-owned anonymous stdin pipe is also the sole stop channel. */
 static int ephemeral_stop_reader(void* unused)
@@ -41,6 +58,7 @@ static int ephemeral_stop_reader(void* unused)
             request_ephemeral_stop();
             fputs("EPHEMERAL_STOP_ACCEPTED\n", stderr);
             fflush(stderr);
+            ephemeral_emit_event("stop_accepted", 0);
             return 0;
         }
         discard = strchr(command, '\n') == NULL;
@@ -214,7 +232,7 @@ AuthStatus auth(void)
 
     g_prog_status[tl_thread_idx].runtime_status.is_authed = true;
     LOG_INFO("已认证登录");
-    if (g_ephemeral_auth) { fputs("EPHEMERAL_AUTH_OK\n", stderr); fflush(stderr); }
+    if (g_ephemeral_auth) { fputs("EPHEMERAL_AUTH_OK\n", stderr); fflush(stderr); ephemeral_emit_event("auth_ok", 0); }
 
     /**
      * 把"以后要登出所需要的现场"存下来。
@@ -294,6 +312,7 @@ int work_auth(void)
         {
             fputs("EPHEMERAL_STOP_CHANNEL_FAILED\n", stderr);
             fflush(stderr);
+            ephemeral_emit_event("stop_channel_failed", 0);
             shut(1);
         }
         sim_thread_destroy(reader);
@@ -389,7 +408,7 @@ int work_auth(void)
          */
         if (network_ready == false)
         {
-            if (g_ephemeral_auth) { fputs("EPHEMERAL_WAIT_NETWORK\n", stderr); fflush(stderr); }
+            if (g_ephemeral_auth) { fputs("EPHEMERAL_WAIT_NETWORK\n", stderr); fflush(stderr); ephemeral_emit_event("wait_network", 0); }
             const WaitResult wait_result = wait_need_auth();
 
             if (wait_result == WAIT_RETRY_EXHAUSTED) shut(1);
@@ -421,7 +440,7 @@ int work_auth(void)
 
         if (auth_code != 0)
         {
-            if (g_ephemeral_auth) { fputs("EPHEMERAL_AUTH_FAILED\n", stderr); fflush(stderr); }
+            if (g_ephemeral_auth) { fputs("EPHEMERAL_AUTH_FAILED\n", stderr); fflush(stderr); ephemeral_emit_event("auth_failed", auth_code); }
             LOG_ERROR("配置 %" PRIu8 " 认证失败, 进程退出, 由外部监管者重新拉起", g_prog_status[0].cfg.idx);
             return auth_code;
         }
