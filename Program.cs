@@ -7,6 +7,7 @@ using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Management;
+using Microsoft.Win32;
 using System.Reflection;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
@@ -30,7 +31,7 @@ internal static class Program
     private const string OfficialExe = @"C:\Program Files (x86)\Chinatelecom_GDPortal\ESurfingClient.exe";
     private const string CoreResource = "Chezhi.AuthCore";
     private const string LicenseResource = "Chezhi.Licenses";
-    private const string CoreHash = "9644A4B2884B3229489D660C8B07CCC423A383F3F19E4221A6344150ACCD6FF0";
+    private const string CoreHash = "1B3278A081DD643782C9C7ACD23260626ADC33C082EF67B104498E23940EE9D5";
     private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
     private const string CredentialFileName = "credentials.v1.dat";
     private static string tempDir;
@@ -131,6 +132,7 @@ internal static class Program
             using (var output = new FileStream(corePath, FileMode.CreateNew, FileAccess.Write, FileShare.None)) input.CopyTo(output);
         }
         VerifyCore();
+        CleanupStaleCoreDirs(dir); // 启动即清扫上次异常退出留下的残留（A18）
     }
 
     private static void VerifyCore()
@@ -147,6 +149,25 @@ internal static class Program
     {
         try { if (corePath != null && File.Exists(corePath)) File.Delete(corePath); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         try { if (tempDir != null && Directory.Exists(tempDir)) Directory.Delete(tempDir, false); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        CleanupStaleCoreDirs(tempDir);
+    }
+
+    // A18：程序崩溃/被强杀后 %TEMP%\Chezhi-* 会残留（含核心 exe）。单实例互斥保证
+    // 不存在第二个 GUI，因此非当前目录的 Chezhi-* 均为历史残留；正被运行中核心
+    // 占用的目录删除会失败（文件锁），静默跳过留给下次，绝不影响活动进程。
+    private static void CleanupStaleCoreDirs(string keep)
+    {
+        try
+        {
+            string root = Path.GetFullPath(Path.GetTempPath());
+            foreach (string dir in Directory.GetDirectories(root, "Chezhi-*"))
+            {
+                string full = Path.GetFullPath(dir);
+                if (String.Equals(full, keep, StringComparison.OrdinalIgnoreCase)) continue;
+                try { Directory.Delete(full, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
+        }
+        catch { }
     }
 
     private static int ClientCount()
@@ -659,6 +680,12 @@ internal static class Program
         private bool loadedCredential;
         private Process running;
         private bool stopping, closingAfterStop, serviceBusy, exitRequested;
+        // —— 有界自动恢复（A06，不变量：用户主动停止/退出后绝不自动重启）——
+        private bool userStopped;      // 用户主动停止或退出：取消一切待执行重试
+        private bool runSawProgress;   // 本轮核心是否到达过"等待网络/认证成功/已联网"（未到达即失败=疑似凭据问题，不自动重试）
+        private bool authFailureSeen;  // 本轮收到过 AUTH_FAILED（受控失败，退出不算崩溃，也不自动重试）
+        private int autoRetryCount;   // 自动重试计数（每次用户发起的连接最多 2 次：10s、40s 指数退避）
+        private readonly Timer retryTimer = new Timer();
         private Stopwatch grace;
         private readonly ToolTip tips = new ToolTip();
         private readonly Timer animTimer = new Timer();
@@ -874,6 +901,10 @@ internal static class Program
 
             connect.Click += ConnectClicked;
             stop.Click += StopClicked;
+            retryTimer.Tick += RetryTimerTick;
+            // 系统睡眠/休眠唤醒：不自动重启认证（核心自身的心跳/退避循环会重新确认），
+            // 仅提示状态待确认；用户停止过的会话保持停止
+            SystemEvents.PowerModeChanged += OnPowerModeChanged;
             save.Click += delegate { SaveCredentials(true); };
             reveal.Click += delegate {
                 password.UseSystemPasswordChar = !password.UseSystemPasswordChar;
@@ -904,9 +935,10 @@ internal static class Program
             };
             FormClosing += OnClosing;
             FormClosed += delegate {
-                animTimer.Stop();
+                animTimer.Stop(); retryTimer.Stop();
                 password.Clear(); tray.Visible = false; tray.Dispose(); trayMenu.Dispose(); tips.Dispose();
-                timer.Dispose(); animTimer.Dispose(); if (running != null) running.Dispose();
+                timer.Dispose(); animTimer.Dispose(); retryTimer.Dispose(); if (running != null) running.Dispose();
+                SystemEvents.PowerModeChanged -= OnPowerModeChanged;
                 if (appIcon != null) appIcon.Dispose(); // ExtractAssociatedIcon 的实例由本窗口统一释放
             };
         }
@@ -1511,6 +1543,14 @@ internal static class Program
             }
             string blocked = CheckBeforeConnect();
             if (blocked != null) { SetStatus(blocked, ToneWarn); MessageBox.Show(this, blocked, "暂不能连接", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+            // 用户手动发起新一轮连接：重置自动恢复预算与停止标志
+            userStopped = false; runSawProgress = false; authFailureSeen = false; autoRetryCount = 0; retryTimer.Stop();
+            StartAuthProcess();
+        }
+
+        // 认证进程启动（连接与自动重试共用）。异常时恢复按钮状态。
+        private void StartAuthProcess()
+        {
             connect.Enabled = false;
             try
             {
@@ -1532,6 +1572,39 @@ internal static class Program
                 connect.Text = "立即连接";
                 connect.Enabled = true;
             }
+        }
+
+        // —— 有界自动恢复（A06）——
+        // 触发条件（全部满足）：核心异常退出（非用户停止/退出、非受控认证失败）、
+        // 本轮曾经到达过"等待网络/认证成功/已联网"（瞬时环境问题，排除疑似凭据错误）、
+        // 重试次数 < 2。退避 10s → 40s。用户停止/退出/窗口关闭即刻取消；
+        // 不绕过服务器频率限制：凭据疑似错误（未见过网络）一律不自动重试。
+        private void ScheduleAutoRetry(int exitCode)
+        {
+            if (userStopped || exitRequested || stopping || runSawProgress == false || authFailureSeen || autoRetryCount >= 2) return;
+            autoRetryCount++;
+            int delay = autoRetryCount == 1 ? 10000 : 40000;
+            retryTimer.Stop(); retryTimer.Interval = delay; retryTimer.Start();
+            SetStatus("认证进程异常退出（退出码 " + exitCode + "），" + (delay / 1000) + " 秒后自动重试（第 " + autoRetryCount + "/2 次）。", ToneWarn, true);
+        }
+
+        private void RetryTimerTick(object sender, EventArgs e)
+        {
+            retryTimer.Stop();
+            if (userStopped || exitRequested || serviceBusy || stopping || (running != null && !running.HasExited)) return;
+            if (account.Text.Length == 0 || password.Text.Length == 0) return;
+            try { StartAuthProcess(); }
+            catch { SetAuthState(ConnectionStates.AuthState.Failed, "自动重试启动失败，请手动重连。", ToneFail); }
+        }
+
+        private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+        {
+            if (e.Mode != PowerModes.Resume || IsDisposed) return;
+            try { BeginInvoke((Action)delegate {
+                // 唤醒后不自动重启：运行中的核心由自身心跳/退避循环重新确认；
+                // 已停止的会话保持停止。仅提示状态待确认。
+                if (running != null && !running.HasExited) SetStatus("系统已唤醒，正在确认连接状态……", ToneInfo, true);
+            }); } catch (InvalidOperationException) { }
         }
 
         // 连接成功后的按需保存：未勾选"记住账号密码"时不写任何持久化凭据；
@@ -1566,22 +1639,26 @@ internal static class Program
                 if (token == "EPHEMERAL_AUTH_OK")
                 {
                     connect.Text = "运行中…"; // 已连上, 按钮反映"保持运行"而非"连接中"
+                    runSawProgress = true;
                     state.SetNetwork(ConnectionStates.NetworkState.AuthenticationRequired); // 认证前校园网待认证；成功后视为完成
                     SetAuthState(ConnectionStates.AuthState.Authenticated, "连接成功！现在可到 Windows 设置打开移动热点共享网络。", ToneOk);
                     SaveAfterAuth();
                 }
                 else if (token == "EPHEMERAL_AUTH_FAILED")
                 {
+                    runSawProgress = true; authFailureSeen = true; // 受控失败：退出不算崩溃、不自动重试
                     state.SetNetwork(ConnectionStates.NetworkState.Unknown);
                     SetAuthState(ConnectionStates.AuthState.Failed, "连接失败：请核对账号密码，并确认已连上校园网。", ToneFail);
                 }
                 else if (token == "EPHEMERAL_WAIT_NETWORK")
                 {
+                    runSawProgress = true;
                     state.SetNetwork(ConnectionStates.NetworkState.Unknown);
                     SetAuthState(ConnectionStates.AuthState.WaitingForNetwork, "正在等待接入校园网……请确认电脑已连上校园网的 Wi-Fi 或网线。", ToneBusy, true);
                 }
                 else if (token == "EPHEMERAL_ONLINE")
                 {
+                    runSawProgress = true;
                     connect.Text = "运行中…";
                     state.SetNetwork(ConnectionStates.NetworkState.InternetAvailable); // 有互联网≠本程序完成认证（沿用会话）
                     SetAuthState(ConnectionStates.AuthState.AuthenticatedBySession, "网络已连通（可能沿用了先前的登录会话）。程序保持运行，会话失效后会自动重新认证。", ToneOk);
@@ -1596,19 +1673,29 @@ internal static class Program
         {
             if (!Object.ReferenceEquals(running, started)) return;
             timer.Stop(); stopping = false; stop.Enabled = false; stop.Text = "停止认证"; StyleStopArmed(false); connect.Enabled = true; connect.Text = "立即连接";
-            int code = 0; bool crashed = false;
-            try { code = started.ExitCode; crashed = code != 0; } catch { crashed = true; }
+            int code = 0; bool exitedCleanly = false;
+            try { code = started.ExitCode; exitedCleanly = code == 0; } catch { }
+            bool crashed = !exitedCleanly && !authFailureSeen && !userStopped;
             state.SetCore(crashed ? ConnectionStates.CoreState.Crashed : ConnectionStates.CoreState.Exited);
-            // 收到退出 ≠ 服务器已登出（A06/A15：退出码仅区分崩溃/正常，登出结果未知）
-            SetAuthState(ConnectionStates.AuthState.Idle, crashed
-                ? "认证进程异常退出（退出码 " + code + "），服务器上的会话可能仍在。"
-                : "认证已停止。服务器上的会话可能稍后才释放。", ToneWarn);
+            // 收到退出 ≠ 服务器已登出（A06/A15：退出码区分崩溃/正常，登出结果未知）
+            if (crashed)
+            {
+                SetAuthState(ConnectionStates.AuthState.Failed, "认证进程异常退出（退出码 " + code + "），服务器上的会话可能仍在。", ToneFail);
+                ScheduleAutoRetry(code); // 有界自动恢复：满足条件才生效（见 ScheduleAutoRetry 注释）
+            }
+            else
+            {
+                SetAuthState(ConnectionStates.AuthState.Idle, authFailureSeen
+                    ? "连接失败已结束。服务器上的会话状态未知。"
+                    : "认证已停止。服务器上的会话可能稍后才释放。", ToneWarn);
+            }
             if (closingAfterStop) { closingAfterStop = false; Close(); }
         }
 
         private void BeginStop()
         {
             if (running == null || running.HasExited || stopping) return;
+            userStopped = true; retryTimer.Stop(); // 用户主动停止：取消一切待执行的自动重试（不变量）
             stopping = true; stop.Enabled = false; stop.Text = "正在停止…"; StyleStopArmed(false);
             grace = Stopwatch.StartNew(); timer.Start();
             bool sent = RequestStop(running);
@@ -1643,6 +1730,7 @@ internal static class Program
             if (!stopping && MessageBox.Show(this, "退出将断开校园网认证，共享的热点也会断网。确定退出？", "退出澈知科技", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) { exitRequested = false; return; }
             // 核心可能在确认框期间已自行退出 (确认框会泵消息): 此时无需再等待, 直接放行关闭
             if (running.HasExited) { stopping = false; e.Cancel = false; return; }
+            userStopped = true; retryTimer.Stop(); // 确认退出=停止意图：取消待执行的自动重试
             closingAfterStop = true;
             ShowFromTray();
             try { BeginStop(); } catch { exitRequested = false; closingAfterStop = false; SetStatus("停止请求发送失败，窗口将保持开启。", ToneFail); }

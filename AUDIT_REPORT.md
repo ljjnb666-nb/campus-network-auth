@@ -108,7 +108,22 @@
 
 **CI 设计修正**：CI 只运行 Build-Core.ps1（同批产出核心+GUI，哈希自洽）；不运行 Build.ps1——提交的 CoreHash 与 CI 现编核心哈希逐字节一致在本工具链下不可保证（见证据 3）。
 
-### P4 状态机与结构化事件（本阶段）
+### P5 稳定性与异常恢复（本阶段）
+**N01 修复（C11 原子）**：`Shutdown.c` 的 `static volatile bool shutting_down` check-then-set 竞态改为 `atomic_exchange`（stdatomic.h）——首个触发的线程独占关闭流程，其余直接返回。
+**A18 修复**：`CleanupStaleCoreDirs()` 在 GUI 启动（ExtractCore 后）与退出（CleanupCore）时清扫 `%TEMP%\Chezhi-*` 历史残留（单实例互斥保证非当前目录均为残留；被运行中核心占用的目录因文件锁删除失败而安全跳过）。
+**A06 有界自动恢复**：
+- 触发条件（全部满足）：核心异常退出（退出码非 0）且非用户停止/退出、非受控认证失败（authFailureSeen）、本轮曾到达"等待网络/认证成功/已联网"（runSawProgress——未见过网络即失败=疑似凭据错误，不自动重试，避免向服务器反复提交错误密码）。
+- 退避 10s→40s，每轮用户发起的连接最多 2 次；用户停止/确认退出/窗口关闭即刻取消（userStopped 不变量）；重试前检查无并发核心；RetryTimerTick 全条件守卫。
+- 唤醒（PowerModeChanged Resume）：不自动重启（核心自身心跳/退避循环重新确认；用户停止过的保持停止），仅状态提示。SystemEvents 订阅随窗口销毁注销。
+- 修复 P4 引入的文案回归：AUTH_FAILED 后核心退出不再显示"异常退出"（受控失败与崩溃区分）；强杀（userStopped）也不算崩溃。
+**8.4 并发审计（记录）**：
+- volatile 用途清点：安全清除模式（Config.c/States.c 的凭据擦除）✓ 正确；`volatile sig_atomic_t`（信号标志 g_stop_requested/g_shutdown_done/g_console_closed）✓ 符合标准；ControlServer/CheckNetwork/NetTraffic/Watchdog 的 `static volatile bool` 为单写者简单标志（无 check-then-set 复合更新）——目标平台事实安全，形式上应为 C11 atomic，记为低风险残余（改进涉及 4 文件多线程路径，独立验证成本高，本轮不做）。
+- ASan/UBSan：MinGW-w64 静态构建下未启用（与静态 curl/strip 组合稳定性未验证），记为 BLOCKED_WITH_REASON；CI 编译 -Wall -Wextra 零警告作为最低门槛建立。
+- 100 秒停止预算评估：保留。依据：核心登出走 HTTP（op_timeout 15s×重试）+ 控制通道/线程收尾，100s 高于最坏路径；无真实环境数据前不做推测性调整。
+**验证**：logic（含状态机不变量）/credentials/core/ui 全 PASS；新核心 1B3278A0… 已同步 CoreHash。
+**状态更新**：N01 → FIXED_VERIFIED；A18 → FIXED_VERIFIED（残留清扫+文件锁安全）；A06 → FIXED_PENDING_VERIFICATION（逻辑与守卫完成，崩溃注入测试在 P10 补充）；A15 → FIXED_VERIFIED（退出码分类 + 受控失败区分）。
+
+### P4 状态机与结构化事件
 **A03/A13 根因修复**：新增 `ConnectionStates.cs`（领域状态模型：NetworkState/AuthState/CoreState/ServiceState/OpResult 五套枚举 + 迁移表校验 + pill 展示映射）。`SetStatus` 退化为纯展示层（文案/指示点/卡片配色）；顶部连接状态 pill 的唯一驱动来源改为 `UpdateConnectionPill()`（领域状态快照）——保存账号/删除账号/服务切换成功不再被显示为"已连接"。所有连接状态变化必经 `SetAuthState()`（非法迁移拒绝并记录）。
 **7.2 不变量**：`StateMachineInvariants()` 并入 `--self-test-logic`（实跑断言）：正常链路/失败链路/非法迁移拒绝（Idle 不能跳到已认证；已认证不经停止不能回等待网络）；操作结果（保存/删除/服务切换）不改变连接状态；拒绝记录可查。
 **7.3 结构化事件（协议 v1）**：核心侧 `ephemeral_emit_event()`（DialerAuth.c 定义、States.h 声明）在 7 个站点与旧令牌并行输出 `EPHEMERAL_EVENT {"v":1,"pid":...,"event":...,"code":...,"error":"unknown"}`；auth_failed 携带 dialer_app 返回码、exit 携带进程退出码；上游协议无法可靠分类失败原因，error 如实为 unknown（不编造）。GUI 侧管道过滤器转发结构化行 → `ArchiveCoreEvent`（截断 512 字符、环形 200 条，畸形行防御）。`CoreTest --self-test-stop` 新增端到端断言：probe 模式必须收到 EPHEMERAL_EVENT 行（本地被活进程锁阻塞，CI 覆盖）。

@@ -6,6 +6,8 @@
 #include "utils/runtime/Watchdog.h"
 #include "utils/log/Logger.h"
 
+#include <stdatomic.h>
+
 #ifdef _WIN32
 #include <windows.h>
 extern bool get_service_mode(void);
@@ -25,15 +27,18 @@ extern void restart_process(void);
 
 void shut(const int8_t exit_code)
 {
-    // 关闭流程只允许进入一次
-    // (Web 端触发的重启与信号/错误触发的关闭可能同时发生)
-    static volatile bool shutting_down = false;
-    if (shutting_down)
+    /**
+     * 关闭流程只允许进入一次 (多个线程可能同时触发关闭)。
+     * 原实现是 volatile bool 的 check-then-set —— 两个线程可同时通过判断,
+     * 双双进入关闭流程 (N01)。改用 C11 原子交换: 第一个抢到的执行收尾,
+     * 其余线程在此处直接返回。
+     */
+    static atomic_bool shutting_down = false;
+    if (atomic_exchange(&shutting_down, true))
     {
         LOG_WARN("程序已在关闭流程中, 忽略重复的关闭请求");
         return;
     }
-    shutting_down = true;
 
     /* 结构化事件：退出码随事件上报（崩溃=非 0），供桌面端区分正常退出/异常退出 */
     ephemeral_emit_event("exit", exit_code);
