@@ -411,7 +411,7 @@ int work_auth(void)
             if (g_ephemeral_auth) { fputs("EPHEMERAL_WAIT_NETWORK\n", stderr); fflush(stderr); ephemeral_emit_event("wait_network", 0); }
             const WaitResult wait_result = wait_need_auth();
 
-            if (wait_result == WAIT_RETRY_EXHAUSTED) shut(1);
+            if (wait_result == WAIT_RETRY_EXHAUSTED) { ephemeral_emit_event("network_retry_exhausted", 1); shut(1); }
             if (wait_result == WAIT_EXIT) break;
             if (wait_result == WAIT_TIME_CLOSED) continue;
 

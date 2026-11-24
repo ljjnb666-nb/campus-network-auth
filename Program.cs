@@ -401,6 +401,37 @@ internal static class Program
             }
         }
 
+    // Parse only the authenticated child pipe's allowlisted protocol fields.
+    // Never retain arbitrary JSON strings in diagnostics.
+    private static string ParseCoreEvent(string line, int expectedPid)
+    {
+        const string prefix = "EPHEMERAL_EVENT ";
+        if (String.IsNullOrEmpty(line) || line.Length > 512 || !line.StartsWith(prefix, StringComparison.Ordinal)) return null;
+        try
+        {
+            var obj = new JavaScriptSerializer { MaxJsonLength = 512, RecursionLimit = 4 }
+                .DeserializeObject(line.Substring(prefix.Length)) as System.Collections.Generic.Dictionary<string, object>;
+            if (obj == null || obj.Count != 5 || !obj.ContainsKey("v") || !obj.ContainsKey("pid") ||
+                !obj.ContainsKey("event") || !obj.ContainsKey("code") || !obj.ContainsKey("error") ||
+                !(obj["v"] is int) || (int)obj["v"] != 1 || !(obj["pid"] is int) ||
+                (int)obj["pid"] != expectedPid || !(obj["code"] is int) ||
+                !String.Equals(obj["error"] as string, "unknown", StringComparison.Ordinal)) return null;
+            string ev = obj["event"] as string;
+            int code = (int)obj["code"];
+            switch (ev)
+            {
+                case "auth_ok": case "wait_network": case "online": case "stop_accepted": case "stop_channel_failed":
+                    return code == 0 ? ev : null;
+                case "auth_failed": return code != 0 ? ev : null;
+                case "network_retry_exhausted": return code == 1 ? ev : null;
+                case "test_crash": return code == 3 ? ev : null;
+                case "exit": return ev;
+                default: return null;
+            }
+        }
+        catch { return null; }
+    }
+
     private static Process LaunchCore(string mode, string username, string password, int channel, Action<Process, string> status)
     {
         if (Utf8.GetByteCount(username) >= 16 || Utf8.GetByteCount(password) >= 128)
@@ -416,20 +447,17 @@ internal static class Program
         };
         var p = new Process { StartInfo = si, EnableRaisingEvents = true };
         DataReceivedEventHandler filter = delegate(object sender, DataReceivedEventArgs e) {
-            string s = e.Data;
-            if (s == null) return;
-            // 结构化事件（协议 v1，与旧令牌并行）：整行转发，由 OnCoreStatus 归档
-            if (s.StartsWith("EPHEMERAL_EVENT ", StringComparison.Ordinal) && status != null)
+            if (status == null || e.Data == null) return;
+            try
             {
-                status((Process)sender, s);
-                return;
+                string ev = ParseCoreEvent(e.Data, ((Process)sender).Id);
+                if (ev != null) status((Process)sender, ev);
             }
-            if (status != null && (s == "EPHEMERAL_AUTH_OK" || s == "EPHEMERAL_AUTH_FAILED" ||
-                s == "EPHEMERAL_WAIT_NETWORK" || s == "EPHEMERAL_ONLINE" ||
-                s == "EPHEMERAL_STOP_ACCEPTED" || s == "EPHEMERAL_STOP_CHANNEL_FAILED"))
-                status((Process)sender, s);
+            catch (InvalidOperationException) { }
         };
-        p.OutputDataReceived += filter; p.ErrorDataReceived += filter;
+        // stderr is the sole protocol stream. stdout is drained but ignored.
+        p.ErrorDataReceived += filter;
+
         p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine();
         try
         {
@@ -474,13 +502,26 @@ internal static class Program
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Running, false, true) == 24
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Running, true, true) == 0
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Stopped, false, false) == 0
-            && StateMachineInvariants();
+            && StateMachineInvariants() && CoreEventInvariants() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
+            && !ServiceIdentity.IsKnownPublisher("fake telecom", "CN=fake telecom");
         Console.WriteLine(ok ? "LOGIC_PASS" : "LOGIC_FAIL");
         return ok ? 0 : 1;
     }
 
     // 状态机不变量（7.2）：合法迁移被接受、非法迁移被拒绝；操作结果不改变连接状态；
     // 任何路径都不能"跳过认证直接变成已认证"；停止/登出后回到 Idle 而非保持已认证。
+    private static bool CoreEventInvariants()
+    {
+        string valid = "EPHEMERAL_EVENT {\"v\":1,\"pid\":42,\"event\":\"auth_ok\",\"code\":0,\"error\":\"unknown\"}";
+        return ParseCoreEvent(valid, 42) == "auth_ok" && ParseCoreEvent(valid, 43) == null
+            && ParseCoreEvent(valid.Replace("\"v\":1", "\"v\":2"), 42) == null
+            && ParseCoreEvent(valid.Replace("unknown", "secret"), 42) == null
+            && ParseCoreEvent(valid.Replace("auth_ok", "secret"), 42) == null
+            && ParseCoreEvent(valid.Replace("\"code\":0", "\"code\":\"0\""), 42) == null
+            && ParseCoreEvent(valid + new string('x', 512), 42) == null
+            && ParseCoreEvent("EPHEMERAL_AUTH_OK", 42) == null;
+    }
+
     private static bool StateMachineInvariants()
     {
         var m = new ConnectionState();
@@ -500,12 +541,15 @@ internal static class Program
         ok &= m.Auth == ConnectionStates.AuthState.Idle;
         // 已认证态不能"不经停止直接回等待网络"（须先停止/失败）
         ok &= m.TrySetAuth(ConnectionStates.AuthState.Authenticating, "retry") && m.TrySetAuth(ConnectionStates.AuthState.Authenticated, "ok");
-        ok &= !m.TrySetAuth(ConnectionStates.AuthState.WaitingForNetwork, "invalid-from-authed");
+        ok &= m.TrySetAuth(ConnectionStates.AuthState.WaitingForNetwork, "network-lost");
+        ok &= !m.TrySetAuth(ConnectionStates.AuthState.RetryScheduled, "invalid-direct-retry");
+        ok &= m.TrySetAuth(ConnectionStates.AuthState.Authenticated, "auth-after-wait");
 
         // 失败链路：Authenticating → Failed →（重新认证）Authenticating
         ok &= m.TrySetAuth(ConnectionStates.AuthState.Failed, "auth_failed");
         ok &= m.PillText == "认证失败";
         ok &= m.TrySetAuth(ConnectionStates.AuthState.Authenticating, "manual-retry");
+        ok &= m.TrySetAuth(ConnectionStates.AuthState.WaitingForNetwork, "wait");
         ok &= m.TrySetAuth(ConnectionStates.AuthState.AuthenticatedBySession, "online");
         ok &= m.PillText == "已联网·会话";
 
@@ -659,8 +703,7 @@ internal static class Program
             p = LaunchCore(stop ? "--ephemeral-probe" : "--ephemeral-check", "dummy-user", "dummy-pass", 1,
                 delegate(Process sender, string value)
                 {
-                    if (value == "EPHEMERAL_STOP_ACCEPTED") accepted.Set();
-                    if (value != null && value.StartsWith("EPHEMERAL_EVENT ", StringComparison.Ordinal)) sawEvent.Set();
+                    if (value == "stop_accepted") { accepted.Set(); sawEvent.Set(); }
                 });
             bool ok;
             if (stop)
@@ -716,6 +759,18 @@ internal static class Program
         private bool authFailureSeen;  // 本轮收到过 AUTH_FAILED（受控失败，退出不算崩溃，也不自动重试）
         private int autoRetryCount;   // 自动重试计数（每次用户发起的连接最多 2 次：10s、40s 指数退避）
         private readonly Timer retryTimer = new Timer();
+        private sealed class AuthTask
+        {
+            internal readonly string Username, Password;
+            internal readonly int Channel;
+            internal readonly bool Remember;
+            internal AuthTask(string username, string password, int channel, bool remember)
+            { Username = username; Password = password; Channel = channel; Remember = remember; }
+        }
+        private AuthTask activeTask;
+        private bool connectCheckPending, retryEligible, rememberRevoked;
+        private int taskGeneration;
+        private Process completedProcess;
         private Stopwatch grace;
         private readonly ToolTip tips = new ToolTip();
         private readonly Timer animTimer = new Timer();
@@ -933,6 +988,7 @@ internal static class Program
             connect.Click += ConnectClicked;
             stop.Click += StopClicked;
             retryTimer.Tick += RetryTimerTick;
+            remember.CheckedChanged += delegate { if (!remember.Checked && activeTask != null) rememberRevoked = true; };
             // 系统睡眠/休眠唤醒：不自动重启认证（核心自身的心跳/退避循环会重新确认），
             // 仅提示状态待确认；用户停止过的会话保持停止
             SystemEvents.PowerModeChanged += OnPowerModeChanged;
@@ -970,6 +1026,7 @@ internal static class Program
             };
             FormClosing += OnClosing;
             FormClosed += delegate {
+                userStopped = true; taskGeneration++; activeTask = null;
                 animTimer.Stop(); retryTimer.Stop();
                 password.Clear(); tray.Visible = false; tray.Dispose(); trayMenu.Dispose(); tips.Dispose();
                 timer.Dispose(); animTimer.Dispose(); retryTimer.Dispose(); if (running != null) running.Dispose();
@@ -1046,6 +1103,7 @@ internal static class Program
             ExtractCore(); // 本测试要真实启动核心（--self-test-ui 主入口不预释放核心）
             account.Text = "retry-user"; password.Text = "retry-pass";
             userStopped = false; runSawProgress = false; authFailureSeen = false; autoRetryCount = 0;
+            activeTask = new AuthTask(account.Text, password.Text, channel.SelectedIndex + 1, false);
             StartAuthProcess("--ephemeral-crash");
             if (running == null) return false;
             for (int i = 0; i < 80 && !running.HasExited; i++) { System.Threading.Thread.Sleep(100); Application.DoEvents(); }
@@ -1054,7 +1112,10 @@ internal static class Program
             for (int i = 0; i < 10; i++) { Application.DoEvents(); System.Threading.Thread.Sleep(50); }
             bool ok = autoRetryCount == 1 && retryTimer.Enabled;
             // 清理：取消重试，模拟用户停止（不变量验证：停止后重试被取消）
-            userStopped = true; retryTimer.Stop();
+            StopClicked(stop, EventArgs.Empty);
+            ok &= userStopped && !retryTimer.Enabled && activeTask == null;
+            RetryTimerTick(null, EventArgs.Empty);
+            ok &= running != null && running.HasExited;
             try { if (running != null) { running.Dispose(); running = null; } } catch { }
             exitRequested = true; Close(); Application.DoEvents();
             return ok && IsDisposed && !retryTimer.Enabled;
@@ -1096,7 +1157,7 @@ internal static class Program
             if (MessageBox.Show(this, "确定删除已保存的账号和密码？（不影响当前连接）", "清除已保存账号", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
             try
             {
-                credentials.Forget(); account.Clear(); password.Clear();
+                credentials.Forget(); rememberRevoked = true; remember.Checked = false; account.Clear(); password.Clear();
                 password.UseSystemPasswordChar = true; reveal.Text = "显示";
                 credentialLoadError = null; loadedCredential = false;
                 SetStatus("已删除保存的账号密码。", ToneOk);
@@ -1576,7 +1637,7 @@ internal static class Program
         // 连接状态迁移唯一入口：经迁移表校验，非法迁移拒绝并记录（供诊断/测试）
         private void SetAuthState(ConnectionStates.AuthState next, string text, Color tone, bool pulse = false)
         {
-            state.TrySetAuth(next, text);
+            if (!state.TrySetAuth(next, text)) return;
             SetStatus(text, tone, pulse);
             UpdateConnectionPill();
         }
@@ -1599,7 +1660,7 @@ internal static class Program
             {
                 string blocked = await Task.Run((Func<string>)CheckBeforeConnect);
                 if (IsDisposed) return;
-                if (running != null && !running.HasExited) return; // 检查期间用户已连接
+                if (serviceBusy || connectCheckPending || (running != null && !running.HasExited)) return; // do not overwrite a newer operation
                 if (blocked != null)
                 {
                     SetStatus(blocked, ToneWarn);
@@ -1616,77 +1677,114 @@ internal static class Program
 
         private async void ConnectClicked(object sender, EventArgs e)
         {
-            if (serviceBusy || checkingBlocked || (running != null && !running.HasExited)) return;
-            // 输入校验、认证启动、凭据保存三者分离：连接前不再强制写盘（A04/A05）。
-            // 仅当用户勾选"记住账号密码"且认证成功后，才在 SaveAfterAuth() 中持久化。
+            if (serviceBusy || checkingBlocked || connectCheckPending ||
+                (running != null && !Object.ReferenceEquals(running, completedProcess))) return;
             if (account.Text.Length == 0 || password.Text.Length == 0)
             {
                 SetStatus("请输入校园网账号和密码。", ToneWarn);
                 return;
             }
-            // A11：阻塞式 WMI 检查移出 UI 线程；检查期间按钮禁用防重复点击
-            connect.Enabled = false;
+            retryTimer.Stop();
+            taskGeneration++;
+            activeTask = new AuthTask(account.Text, password.Text, channel.SelectedIndex + 1, remember.Checked);
+            userStopped = false; rememberRevoked = false; autoRetryCount = 0;
+            await CheckAndStartAsync(taskGeneration);
+        }
+
+        private async Task CheckAndStartAsync(int generation)
+        {
+            if (activeTask == null || userStopped || serviceBusy || exitRequested || connectCheckPending) return;
+            connectCheckPending = true;
+            connect.Enabled = false; stop.Enabled = true; stop.Text = "取消连接";
+            prepare.Enabled = false; restore.Enabled = false;
             SetStatus("正在检查天翼服务状态……", ToneInfo, true);
-            string blocked = await Task.Run((Func<string>)CheckBeforeConnect);
-            if (IsDisposed) return;
-            if (blocked != null)
+            string blocked = null;
+            try { blocked = await Task.Run((Func<string>)CheckBeforeConnect); }
+            catch { blocked = "无法检查服务状态，请手动重试。"; }
+            finally { connectCheckPending = false; }
+            if (IsDisposed || Disposing) return;
+            prepare.Enabled = !serviceBusy; restore.Enabled = !serviceBusy;
+            if (generation != taskGeneration || userStopped || exitRequested || serviceBusy || activeTask == null)
             {
-                SetStatus(blocked, ToneWarn); MessageBox.Show(this, blocked, "暂不能连接", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                connect.Enabled = true;
+                connect.Enabled = !serviceBusy; stop.Enabled = false; stop.Text = "停止认证";
                 return;
             }
-            // 用户手动发起新一轮连接：重置自动恢复预算与停止标志
-            userStopped = false; runSawProgress = false; authFailureSeen = false; autoRetryCount = 0; retryTimer.Stop();
+            if (blocked != null)
+            {
+                activeTask = null; stop.Enabled = false; stop.Text = "停止认证";
+                connect.Enabled = true;
+                SetAuthState(ConnectionStates.AuthState.Failed, blocked, ToneWarn);
+                SetStatus(blocked, ToneWarn);
+                return;
+            }
             StartAuthProcess();
         }
 
-        // 认证进程启动（连接与自动重试共用；测试可用 mode 注入崩溃钩子）。
+        // The actual process always uses the immutable, user-authorized task snapshot.
         private void StartAuthProcess(string mode = "--ephemeral-auth")
         {
+            if (activeTask == null || userStopped || serviceBusy || exitRequested) return;
+            if (isSelfTest && mode == "--ephemeral-auth") throw new InvalidOperationException("Offline test cannot authenticate.");
+            if (running != null && !Object.ReferenceEquals(running, completedProcess)) return;
             connect.Enabled = false;
             try
             {
                 if (running != null) { running.Dispose(); running = null; }
-                stopping = false; closingAfterStop = false; savedAfterAuth = false; stop.Text = "停止认证"; StyleStopArmed(false); timer.Stop();
-                running = LaunchCore(mode, account.Text, password.Text, channel.SelectedIndex + 1, OnCoreStatus);
+                completedProcess = null;
+                stopping = false; closingAfterStop = false; savedAfterAuth = false;
+                runSawProgress = false; authFailureSeen = false; retryEligible = false;
+                stop.Text = "停止认证"; StyleStopArmed(false); timer.Stop();
+                running = LaunchCore(mode, activeTask.Username, activeTask.Password, activeTask.Channel, OnCoreStatus);
                 password.UseSystemPasswordChar = true; reveal.Text = "显示";
-                connect.Text = "连接中…";
-                stop.Enabled = true;
+                connect.Text = "连接中…"; stop.Enabled = true;
                 state.SetCore(ConnectionStates.CoreState.Running);
+                state.SetNetwork(ConnectionStates.NetworkState.Unknown);
                 SetAuthState(ConnectionStates.AuthState.Authenticating, "正在连接校园网……", ToneBusy, true);
                 Process started = running;
-                started.Exited += delegate { if (!IsDisposed && IsHandleCreated) try { BeginInvoke((Action)delegate { OnCoreExit(started); }); } catch (InvalidOperationException) { } };
-                if (started.HasExited) OnCoreExit(started);
+                int completionQueued = 0;
+                Action complete = delegate {
+                    if (System.Threading.Interlocked.Exchange(ref completionQueued, 1) != 0) return;
+                    Task.Run(delegate {
+                        // WaitForExit() drains asynchronous output before queuing the terminal event.
+                        try { started.WaitForExit(); } catch { }
+                        if (!IsDisposed && IsHandleCreated) try {
+                            BeginInvoke((Action)delegate { OnCoreExit(started); });
+                        } catch (InvalidOperationException) { }
+                    });
+                };
+                started.Exited += delegate { complete(); };
+                if (started.HasExited) complete();
             }
             catch (Exception ex)
             {
+                activeTask = null; state.SetCore(ConnectionStates.CoreState.Exited);
+                SetAuthState(ConnectionStates.AuthState.Failed, ex is ArgumentException ? ex.Message : "启动认证失败，请重试。", ToneFail);
                 SetStatus(ex is ArgumentException ? ex.Message : "启动认证失败，请重试。", ToneFail);
-                connect.Text = "立即连接";
-                connect.Enabled = true;
+                connect.Text = "立即连接"; connect.Enabled = true;
+                stop.Enabled = false; stop.Text = "停止认证";
             }
         }
 
-        // —— 有界自动恢复（A06）——
-        // 触发条件（全部满足）：核心异常退出（非用户停止/退出、非受控认证失败）、
-        // 本轮曾经到达过"等待网络/认证成功/已联网"（瞬时环境问题，排除疑似凭据错误）、
-        // 重试次数 < 2。退避 10s → 40s。用户停止/退出/窗口关闭即刻取消；
-        // 不绕过服务器频率限制：凭据疑似错误（未见过网络）一律不自动重试。
+        // Only an explicit network probe exhaustion event permits automatic recovery.
+        // Unknown failures, rejected credentials and arbitrary crashes require manual action.
         private void ScheduleAutoRetry(int exitCode)
         {
-            if (userStopped || exitRequested || stopping || runSawProgress == false || authFailureSeen || autoRetryCount >= 2) return;
+            if (userStopped || exitRequested || stopping || activeTask == null ||
+                !retryEligible || authFailureSeen || autoRetryCount >= 2) { activeTask = null; return; }
             autoRetryCount++;
             int delay = autoRetryCount == 1 ? 10000 : 40000;
             retryTimer.Stop(); retryTimer.Interval = delay; retryTimer.Start();
-            SetStatus("认证进程异常退出（退出码 " + exitCode + "），" + (delay / 1000) + " 秒后自动重试（第 " + autoRetryCount + "/2 次）。", ToneWarn, true);
+            stop.Enabled = true; stop.Text = "取消重试";
+            SetAuthState(ConnectionStates.AuthState.RetryScheduled, "网络探测失败（退出码 " + exitCode + "），" + (delay / 1000) + " 秒后重试（第 " + autoRetryCount + "/2 次）。", ToneWarn, true);
         }
 
-        private void RetryTimerTick(object sender, EventArgs e)
+        private async void RetryTimerTick(object sender, EventArgs e)
         {
+            if (!retryTimer.Enabled) return;
             retryTimer.Stop();
-            if (userStopped || exitRequested || serviceBusy || stopping || (running != null && !running.HasExited)) return;
-            if (account.Text.Length == 0 || password.Text.Length == 0) return;
-            try { StartAuthProcess(); }
-            catch { SetAuthState(ConnectionStates.AuthState.Failed, "自动重试启动失败，请手动重连。", ToneFail); }
+            if (userStopped || exitRequested || serviceBusy || stopping || activeTask == null ||
+                state.Auth != ConnectionStates.AuthState.RetryScheduled || isSelfTest) return;
+            await CheckAndStartAsync(taskGeneration);
         }
 
         private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
@@ -1695,7 +1793,7 @@ internal static class Program
             try { BeginInvoke((Action)delegate {
                 // 唤醒后不自动重启：运行中的核心由自身心跳/退避循环重新确认；
                 // 已停止的会话保持停止。仅提示状态待确认。
-                if (running != null && !running.HasExited) SetStatus("系统已唤醒，正在确认连接状态……", ToneInfo, true);
+                if (running != null && !running.HasExited) { state.SetNetwork(ConnectionStates.NetworkState.Unknown); SetAuthState(ConnectionStates.AuthState.WaitingForNetwork, "系统已唤醒，连接状态待确认……", ToneInfo, true); }
             }); } catch (InvalidOperationException) { }
         }
 
@@ -1754,9 +1852,16 @@ internal static class Program
         {
             if (savedAfterAuth) return;
             savedAfterAuth = true;
-            if (!remember.Checked || credentials == null) return;
-            if (!SaveCredentials(false))
+            if (activeTask == null || !activeTask.Remember || rememberRevoked || !remember.Checked || credentials == null) return;
+            try
+            {
+                credentials.Save(new SavedCredential { Username = activeTask.Username, Password = activeTask.Password, Channel = activeTask.Channel });
+                credentialLoadError = null; loadedCredential = true;
+            }
+            catch
+            {
                 MessageBox.Show(this, "连接成功，但账号密码未能加密保存（可能是本地记录损坏或目录不可写）。\r\n本次连接不受影响；如需保存请先用托盘菜单“清除已保存账号”。", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         // 归档核心结构化事件（含畸形行防御：截断到 512 字符、环形上限 200 条）
@@ -1772,70 +1877,92 @@ internal static class Program
         {
             if (IsDisposed || !IsHandleCreated) return;
             try { BeginInvoke((Action)delegate {
-                if (!Object.ReferenceEquals(running, sender)) return;
-                // 结构化事件（v1）：仅归档，不驱动 UI 文案（旧令牌仍承担状态显示，兼容并行）
-                if (token.StartsWith("EPHEMERAL_EVENT ", StringComparison.Ordinal)) { ArchiveCoreEvent(token); return; }
-                if (stopping && token != "EPHEMERAL_STOP_ACCEPTED" && token != "EPHEMERAL_STOP_CHANNEL_FAILED") return;
-                if (token == "EPHEMERAL_AUTH_OK")
+                if (!Object.ReferenceEquals(running, sender) || Object.ReferenceEquals(completedProcess, sender)) return;
+                // ParseCoreEvent already validated the PID, schema, event and code; token is allowlisted.
+                ArchiveCoreEvent(token);
+                if (stopping && token != "stop_accepted" && token != "stop_channel_failed") return;
+                if (authFailureSeen && token != "stop_accepted" && token != "stop_channel_failed") return;
+                if (token == "network_retry_exhausted" || (token == "test_crash" && isSelfTest))
                 {
-                    connect.Text = "运行中…"; // 已连上, 按钮反映"保持运行"而非"连接中"
-                    runSawProgress = true;
-                    state.SetNetwork(ConnectionStates.NetworkState.AuthenticationRequired); // 认证前校园网待认证；成功后视为完成
-                    SetAuthState(ConnectionStates.AuthState.Authenticated, "连接成功！现在可到 Windows 设置打开移动热点共享网络。", ToneOk);
+                    retryEligible = true;
+                    return;
+                }
+                if (token == "auth_ok")
+                {
+                    if (state.Auth != ConnectionStates.AuthState.Authenticating && state.Auth != ConnectionStates.AuthState.WaitingForNetwork &&
+                        state.Auth != ConnectionStates.AuthState.Reauthenticating && state.Auth != ConnectionStates.AuthState.Authenticated) return;
+                    connect.Text = "运行中…"; runSawProgress = true;
+                    state.SetNetwork(ConnectionStates.NetworkState.Unknown); // authentication is not a reachability probe
+                    SetAuthState(ConnectionStates.AuthState.Authenticated, "认证成功，互联网可达性待确认。", ToneOk);
                     SaveAfterAuth();
                 }
-                else if (token == "EPHEMERAL_AUTH_FAILED")
+                else if (token == "auth_failed")
                 {
-                    runSawProgress = true; authFailureSeen = true; // 受控失败：退出不算崩溃、不自动重试
+                    runSawProgress = true; authFailureSeen = true; retryEligible = false;
                     state.SetNetwork(ConnectionStates.NetworkState.Unknown);
-                    SetAuthState(ConnectionStates.AuthState.Failed, "连接失败：请核对账号密码，并确认已连上校园网。", ToneFail);
+                    SetAuthState(ConnectionStates.AuthState.Failed, "认证失败（原因未知），请检查网络及账号状态。", ToneFail);
                 }
-                else if (token == "EPHEMERAL_WAIT_NETWORK")
+                else if (token == "wait_network")
                 {
-                    runSawProgress = true;
-                    state.SetNetwork(ConnectionStates.NetworkState.Unknown);
+                    runSawProgress = true; state.SetNetwork(ConnectionStates.NetworkState.Unknown);
                     SetAuthState(ConnectionStates.AuthState.WaitingForNetwork, "正在等待接入校园网……请确认电脑已连上校园网的 Wi-Fi 或网线。", ToneBusy, true);
                 }
-                else if (token == "EPHEMERAL_ONLINE")
+                else if (token == "online")
                 {
-                    runSawProgress = true;
-                    connect.Text = "运行中…";
-                    state.SetNetwork(ConnectionStates.NetworkState.InternetAvailable); // 有互联网≠本程序完成认证（沿用会话）
-                    SetAuthState(ConnectionStates.AuthState.AuthenticatedBySession, "网络已连通（可能沿用了先前的登录会话）。程序保持运行，会话失效后会自动重新认证。", ToneOk);
-                    SaveAfterAuth();
+                    runSawProgress = true; connect.Text = "运行中…";
+                    state.SetNetwork(ConnectionStates.NetworkState.InternetAvailable);
+                    if (state.Auth == ConnectionStates.AuthState.Authenticated)
+                        SetStatus("网络已连通，本程序已完成认证。", ToneOk);
+                    else
+                        SetAuthState(ConnectionStates.AuthState.AuthenticatedBySession, "网络已连通；尚未验证本次输入的凭据。", ToneOk);
+                    // An existing internet connection does not validate the submitted credentials.
                 }
-                else if (token == "EPHEMERAL_STOP_ACCEPTED") SetAuthState(ConnectionStates.AuthState.LoggingOut, "正在退出认证并通知服务器登出……", ToneWarn, true);
-                else if (token == "EPHEMERAL_STOP_CHANNEL_FAILED") SetStatus("停止指令发送失败，可稍后点“强制结束”。", ToneFail);
+                else if (token == "stop_accepted") SetAuthState(ConnectionStates.AuthState.LoggingOut, "正在退出认证，服务器登出结果待确认。", ToneWarn, true);
+                else if (token == "stop_channel_failed") SetStatus("停止指令发送失败，可稍后点“强制结束”。", ToneFail);
             }); } catch (InvalidOperationException) { }
         }
 
         private void OnCoreExit(Process started)
         {
-            if (!Object.ReferenceEquals(running, started)) return;
-            timer.Stop(); stopping = false; stop.Enabled = false; stop.Text = "停止认证"; StyleStopArmed(false); connect.Enabled = true; connect.Text = "立即连接";
-            int code = 0; bool exitedCleanly = false;
-            try { code = started.ExitCode; exitedCleanly = code == 0; } catch { }
-            bool crashed = !exitedCleanly && !authFailureSeen && !userStopped;
+            if (!Object.ReferenceEquals(running, started) || Object.ReferenceEquals(completedProcess, started)) return;
+            completedProcess = started;
+            timer.Stop(); stopping = false; stop.Enabled = false; stop.Text = "停止认证";
+            StyleStopArmed(false); connect.Enabled = true; connect.Text = "立即连接";
+            int code = -1;
+            try { code = started.ExitCode; } catch { }
+            bool crashed = code != 0 && !authFailureSeen && !userStopped;
             state.SetCore(crashed ? ConnectionStates.CoreState.Crashed : ConnectionStates.CoreState.Exited);
-            // 收到退出 ≠ 服务器已登出（A06/A15：退出码区分崩溃/正常，登出结果未知）
-            if (crashed)
+            state.SetNetwork(ConnectionStates.NetworkState.Unknown);
+            if (authFailureSeen)
             {
-                SetAuthState(ConnectionStates.AuthState.Failed, "认证进程异常退出（退出码 " + code + "），服务器上的会话可能仍在。", ToneFail);
-                ScheduleAutoRetry(code); // 有界自动恢复：满足条件才生效（见 ScheduleAutoRetry 注释）
+                SetAuthState(ConnectionStates.AuthState.Failed, "认证失败，进程已退出；服务器会话状态未知。", ToneFail);
+                activeTask = null;
+            }
+            else if (crashed || (!userStopped && code == 0))
+            {
+                SetAuthState(ConnectionStates.AuthState.Failed, "认证进程退出（退出码 " + code + "），服务器会话状态未知。", ToneFail);
+                ScheduleAutoRetry(code);
             }
             else
             {
-                SetAuthState(ConnectionStates.AuthState.Idle, authFailureSeen
-                    ? "连接失败已结束。服务器上的会话状态未知。"
-                    : "认证已停止。服务器上的会话可能稍后才释放。", ToneWarn);
+                SetAuthState(ConnectionStates.AuthState.Idle, "认证已停止。服务器上的会话可能稍后才释放。", ToneWarn);
+                activeTask = null;
             }
             if (closingAfterStop) { closingAfterStop = false; Close(); }
         }
 
         private void BeginStop()
         {
-            if (running == null || running.HasExited || stopping) return;
-            userStopped = true; retryTimer.Stop(); // 用户主动停止：取消一切待执行的自动重试（不变量）
+            // Cancellation intent is independent of process existence and invalidates outstanding checks.
+            userStopped = true; taskGeneration++; retryTimer.Stop(); activeTask = null;
+            if (running == null || running.HasExited)
+            {
+                stop.Enabled = false; stop.Text = "停止认证";
+                connect.Enabled = !connectCheckPending && !serviceBusy;
+                SetAuthState(ConnectionStates.AuthState.Idle, "已取消连接或重试。", ToneInfo);
+                return;
+            }
+            if (stopping) return;
             stopping = true; stop.Enabled = false; stop.Text = "正在停止…"; StyleStopArmed(false);
             grace = Stopwatch.StartNew(); timer.Start();
             bool sent = RequestStop(running);
@@ -1861,11 +1988,12 @@ internal static class Program
             }
             if (e.CloseReason == CloseReason.WindowsShutDown || e.CloseReason == CloseReason.TaskManagerClosing)
             {
+                userStopped = true; taskGeneration++; retryTimer.Stop(); activeTask = null;
                 try { if (running != null && !running.HasExited) RequestStop(running); } catch { }
                 return;
             }
             if (serviceBusy) { e.Cancel = true; exitRequested = false; SetStatus("正在处理服务操作，请稍候……", ToneWarn, true); return; }
-            if (running == null || running.HasExited) return;
+            if (running == null || running.HasExited) { userStopped = true; taskGeneration++; retryTimer.Stop(); activeTask = null; return; }
             e.Cancel = true;
             if (!stopping && MessageBox.Show(this, "退出将断开校园网认证，共享的热点也会断网。确定退出？", "退出澈知科技", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) { exitRequested = false; return; }
             // 核心可能在确认框期间已自行退出 (确认框会泵消息): 此时无需再等待, 直接放行关闭
@@ -1902,7 +2030,7 @@ internal static class Program
 
         private async Task RunServiceAction(bool forPrepare)
         {
-            if (serviceBusy) return;
+            if (serviceBusy || connectCheckPending || retryTimer.Enabled) return;
             if (running != null && !running.HasExited) { MessageBox.Show(this, "请先停止本程序的认证，再执行切换。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
             string instructions = forPrepare
                 ? "继续前请确认：\r\n\r\n1. 已在天翼客户端中断开并完全退出；\r\n2. 移动热点已关闭。\r\n\r\n接下来将请求管理员权限，仅停用天翼后台服务，不会动其它程序或开机启动项。"

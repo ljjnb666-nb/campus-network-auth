@@ -450,6 +450,7 @@ int main(const int argc, char *argv[])
         {
             fputs("EPHEMERAL_WAIT_NETWORK\n", stderr);
             ephemeral_emit_event("wait_network", 0);
+            ephemeral_emit_event("test_crash", 3);
             fflush(stderr);
             sleep_ms(300, true);
             clear_ephemeral_secrets();

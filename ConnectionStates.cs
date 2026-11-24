@@ -10,7 +10,7 @@ internal static class ConnectionStates
     internal enum NetworkState { Unknown, Offline, InternetAvailable, AuthenticationRequired }
 
     // 本客户端的认证任务状态
-    internal enum AuthState { Idle, WaitingForNetwork, Authenticating, Authenticated, AuthenticatedBySession, Reauthenticating, Failed, LoggingOut }
+    internal enum AuthState { Idle, WaitingForNetwork, Authenticating, Authenticated, AuthenticatedBySession, Reauthenticating, Failed, RetryScheduled, LoggingOut }
 
     // 认证核心子进程状态
     internal enum CoreState { NotStarted, Starting, Running, Stopping, Exited, Crashed }
@@ -36,12 +36,13 @@ internal sealed class ConnectionState
         // 静止态可进入任意活动态；活动态之间允许核心驱动的正常流转；
         // 关键不变量：用户停止/退出后不允许"自动回到已认证"（只能经 Authenticating 重新获得）。
         { ConnectionStates.AuthState.Idle, new[] { ConnectionStates.AuthState.WaitingForNetwork, ConnectionStates.AuthState.Authenticating } },
-        { ConnectionStates.AuthState.WaitingForNetwork, new[] { ConnectionStates.AuthState.Authenticating, ConnectionStates.AuthState.Idle, ConnectionStates.AuthState.Failed, ConnectionStates.AuthState.LoggingOut } },
+        { ConnectionStates.AuthState.WaitingForNetwork, new[] { ConnectionStates.AuthState.Authenticating, ConnectionStates.AuthState.Authenticated, ConnectionStates.AuthState.AuthenticatedBySession, ConnectionStates.AuthState.Idle, ConnectionStates.AuthState.Failed, ConnectionStates.AuthState.LoggingOut } },
         { ConnectionStates.AuthState.Authenticating, new[] { ConnectionStates.AuthState.Authenticated, ConnectionStates.AuthState.AuthenticatedBySession, ConnectionStates.AuthState.Failed, ConnectionStates.AuthState.WaitingForNetwork, ConnectionStates.AuthState.LoggingOut, ConnectionStates.AuthState.Idle } },
-        { ConnectionStates.AuthState.Authenticated, new[] { ConnectionStates.AuthState.Reauthenticating, ConnectionStates.AuthState.LoggingOut, ConnectionStates.AuthState.Failed, ConnectionStates.AuthState.Idle } },
-        { ConnectionStates.AuthState.AuthenticatedBySession, new[] { ConnectionStates.AuthState.Reauthenticating, ConnectionStates.AuthState.LoggingOut, ConnectionStates.AuthState.Failed, ConnectionStates.AuthState.Idle } },
+        { ConnectionStates.AuthState.Authenticated, new[] { ConnectionStates.AuthState.Reauthenticating, ConnectionStates.AuthState.WaitingForNetwork, ConnectionStates.AuthState.LoggingOut, ConnectionStates.AuthState.Failed, ConnectionStates.AuthState.Idle } },
+        { ConnectionStates.AuthState.AuthenticatedBySession, new[] { ConnectionStates.AuthState.Reauthenticating, ConnectionStates.AuthState.WaitingForNetwork, ConnectionStates.AuthState.LoggingOut, ConnectionStates.AuthState.Failed, ConnectionStates.AuthState.Idle } },
         { ConnectionStates.AuthState.Reauthenticating, new[] { ConnectionStates.AuthState.Authenticated, ConnectionStates.AuthState.AuthenticatedBySession, ConnectionStates.AuthState.Failed, ConnectionStates.AuthState.WaitingForNetwork, ConnectionStates.AuthState.LoggingOut, ConnectionStates.AuthState.Idle } },
-        { ConnectionStates.AuthState.Failed, new[] { ConnectionStates.AuthState.Authenticating, ConnectionStates.AuthState.Idle, ConnectionStates.AuthState.WaitingForNetwork, ConnectionStates.AuthState.LoggingOut } },
+        { ConnectionStates.AuthState.Failed, new[] { ConnectionStates.AuthState.Authenticating, ConnectionStates.AuthState.Idle, ConnectionStates.AuthState.WaitingForNetwork, ConnectionStates.AuthState.LoggingOut, ConnectionStates.AuthState.RetryScheduled } },
+        { ConnectionStates.AuthState.RetryScheduled, new[] { ConnectionStates.AuthState.Authenticating, ConnectionStates.AuthState.Idle, ConnectionStates.AuthState.Failed } },
         { ConnectionStates.AuthState.LoggingOut, new[] { ConnectionStates.AuthState.Idle, ConnectionStates.AuthState.Failed } }
     };
 
@@ -63,7 +64,8 @@ internal sealed class ConnectionState
         ConnectionStates.AuthState[] allowed;
         if (!AllowedFrom.TryGetValue(auth, out allowed) || Array.IndexOf(allowed, next) < 0)
         {
-            RejectedTransitions.Add(auth + "->" + next + " (" + (reason ?? "?") + ")");
+            RejectedTransitions.Add(auth + "->" + next);
+            if (RejectedTransitions.Count > 200) RejectedTransitions.RemoveAt(0);
             return false;
         }
         auth = next;
@@ -90,6 +92,7 @@ internal sealed class ConnectionState
                 case ConnectionStates.AuthState.Authenticated: return "已认证";
                 case ConnectionStates.AuthState.AuthenticatedBySession: return "已联网·会话";
                 case ConnectionStates.AuthState.LoggingOut: return "登出中";
+                case ConnectionStates.AuthState.RetryScheduled: return "等待重试";
                 case ConnectionStates.AuthState.Failed: return "认证失败";
                 default: return "未连接";
             }
@@ -100,7 +103,7 @@ internal sealed class ConnectionState
     {
         get
         {
-            return auth == ConnectionStates.AuthState.Authenticating ||
+            return auth == ConnectionStates.AuthState.RetryScheduled || auth == ConnectionStates.AuthState.Authenticating ||
                    auth == ConnectionStates.AuthState.Reauthenticating ||
                    auth == ConnectionStates.AuthState.WaitingForNetwork ||
                    auth == ConnectionStates.AuthState.LoggingOut;
