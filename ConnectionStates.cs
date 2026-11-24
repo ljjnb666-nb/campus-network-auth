@@ -123,7 +123,7 @@ internal sealed class ConnectionState
                 case ConnectionStates.AuthState.Reauthenticating: return "认证中";
                 case ConnectionStates.AuthState.WaitingForNetwork: return "待入网";
                 case ConnectionStates.AuthState.Authenticated: return "已认证";
-                case ConnectionStates.AuthState.AuthenticatedBySession: return "已联网·会话";
+                case ConnectionStates.AuthState.AuthenticatedBySession: return network == ConnectionStates.NetworkState.InternetAvailable ? "已联网·会话" : "网络待确认";
                 case ConnectionStates.AuthState.LoggingOut: return "登出中";
                 case ConnectionStates.AuthState.RetryScheduled: return "等待重试";
                 case ConnectionStates.AuthState.Failed: return "认证失败";

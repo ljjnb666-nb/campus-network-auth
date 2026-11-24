@@ -524,10 +524,24 @@ internal static class Program
         // Incomplete final records are deliberately ignored.
     }
 
+    private static string ValidateAuthInput(string username, string password, int channel)
+    {
+        if (String.IsNullOrEmpty(username) || String.IsNullOrEmpty(password)) return "请输入校园网账号和密码。";
+        if (channel < 1 || channel > 5) return "请选择有效的设备类型。";
+        if (username.IndexOf('\0') >= 0 || password.IndexOf('\0') >= 0) return "账号或密码含无效字符。";
+        try
+        {
+            if (Utf8.GetByteCount(username) >= 16 || Utf8.GetByteCount(password) >= 128)
+                return "账号需少于 16 字节、密码需少于 128 字节。";
+            return null;
+        }
+        catch (EncoderFallbackException) { return "账号或密码含无效字符。"; }
+    }
+
     private static Process LaunchCore(string mode, string username, string password, int channel, Action<Process, string> status)
     {
-        if (Utf8.GetByteCount(username) >= 16 || Utf8.GetByteCount(password) >= 128)
-            throw new ArgumentException("账号需少于 16 字节、密码需少于 128 字节（一个汉字按 3 字节计）。");
+        string invalid = ValidateAuthInput(username, password, channel);
+        if (invalid != null) throw new ArgumentException(invalid);
         string json = new JavaScriptSerializer().Serialize(new { username = username, password = password, channel = channel });
         if (Utf8.GetByteCount(json) + 1 >= 4096) throw new ArgumentException("输入过长，请检查账号和密码。");
         VerifyCore();
@@ -597,6 +611,11 @@ internal static class Program
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Running, false, true) == 24
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Running, true, true) == 0
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Stopped, false, false) == 0
+            && ValidateAuthInput("a", "b", 1) == null
+            && ValidateAuthInput(new string('a', 16), "b", 1) != null
+            && ValidateAuthInput("a", new string('b', 128), 1) != null
+            && ValidateAuthInput("a", "b", 0) != null
+            && ValidateAuthInput("a", "b\0", 1) != null
             && ServicePathInvariants() && HandoffInvariants() && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && ServiceIdentity.NativeLayoutIsValid() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
             && !ServiceIdentity.IsKnownPublisher("fake telecom", "CN=fake telecom");
         Console.WriteLine(ok ? "LOGIC_PASS" : "LOGIC_FAIL");
@@ -736,7 +755,10 @@ internal static class Program
         ok &= m.TrySetAuth(ConnectionStates.AuthState.Authenticating, "manual-retry");
         ok &= m.TrySetAuth(ConnectionStates.AuthState.WaitingForNetwork, "wait");
         ok &= m.TrySetAuth(ConnectionStates.AuthState.AuthenticatedBySession, "online");
+        m.SetNetwork(ConnectionStates.NetworkState.InternetAvailable);
         ok &= m.PillText == "已联网·会话";
+        m.SetNetwork(ConnectionStates.NetworkState.Unknown);
+        ok &= m.PillText == "网络待确认";
 
         // 操作结果不变量：保存/删除/服务切换成功不得改变连接状态
         ConnectionStates.AuthState before = m.Auth;
@@ -845,6 +867,7 @@ internal static class Program
             {
                 first.Show(); Application.DoEvents();
                 if (!first.CheckAdaptiveLayoutForTest()) return 1;
+                if (!first.CheckHandoffCancellationForTest()) return 1;
                 if (!first.CheckTrayAndSaveForTest()) return 1;
             }
             using (var second = new MainWindow(dir, true))
@@ -955,11 +978,15 @@ internal static class Program
         }
         private AuthTask activeTask;
         private bool connectCheckPending, retryEligible, rememberRevoked;
+        private Func<HandoffObservation> observeHandoff = ObserveHandoff;
+        private long lastNetworkEvidence;
+        private readonly Stopwatch evidenceClock = Stopwatch.StartNew();
         private int taskGeneration;
         private Process completedProcess;
         private Stopwatch grace;
         private readonly ToolTip tips = new ToolTip();
         private readonly Timer animTimer = new Timer();
+        private readonly Timer evidenceTimer = new Timer();
         private readonly StatusDot dot = new StatusDot();
         private readonly StatusPill statusPill = new StatusPill();
         private readonly StatusCard statusCard = new StatusCard();
@@ -1318,9 +1345,19 @@ internal static class Program
                 if (credentialLoadError != null) SetStatus(credentialLoadError, ToneWarn);
                 else if (loadedCredential) SetStatus("已载入保存的账号，正在检查天翼服务状态……", ToneOk);
                 else SetStatus("正在检查天翼服务状态……", ToneInfo);
-                RunPreConnectCheckAsync(false);
-                if (!isSelfTest) PromptPendingServiceRecovery(); // A09：识别未完成的服务切换
+                if (!isSelfTest) RunStartupChecksAsync();
             };
+            evidenceTimer.Interval = 5000;
+            evidenceTimer.Tick += delegate {
+                if (state.Network == ConnectionStates.NetworkState.InternetAvailable &&
+                    evidenceClock.ElapsedMilliseconds - lastNetworkEvidence >= 45000)
+                {
+                    state.SetNetwork(ConnectionStates.NetworkState.Unknown);
+                    UpdateConnectionPill();
+                    if (!stopping) SetStatus("网络探测证据已过期，当前可达性待确认。", ToneWarn);
+                }
+            };
+            evidenceTimer.Start();
             timer.Interval = 1000;
             timer.Tick += delegate {
                 if (stopping && running != null && !running.HasExited && grace.Elapsed.TotalSeconds >= 100)
@@ -1334,7 +1371,7 @@ internal static class Program
                 userStopped = true; taskGeneration++; activeTask = null;
                 animTimer.Stop(); retryTimer.Stop();
                 password.Clear(); tray.Visible = false; tray.Dispose(); trayMenu.Dispose(); tips.Dispose();
-                timer.Dispose(); animTimer.Dispose(); retryTimer.Dispose(); if (running != null) running.Dispose();
+                timer.Dispose(); animTimer.Dispose(); retryTimer.Dispose(); evidenceTimer.Stop(); evidenceTimer.Dispose(); if (running != null) running.Dispose();
                 SystemEvents.PowerModeChanged -= OnPowerModeChanged;
                 SystemEvents.SessionSwitch -= OnSessionSwitch;
                 if (appIcon != null) appIcon.Dispose(); // ExtractAssociatedIcon 的实例由本窗口统一释放
@@ -1471,6 +1508,32 @@ internal static class Program
                 }
             }
             return true;
+        }
+
+        internal bool CheckHandoffCancellationForTest()
+        {
+            // Exercise the actual asynchronous preflight with injected observations.
+            // Never invoke authentication, elevation, or a real network operation.
+            account.Text = "test-user"; password.Text = "test-password";
+            activeTask = new AuthTask(account.Text, password.Text, 1, false);
+            userStopped = false;
+            int generation = ++taskGeneration;
+            observeHandoff = delegate { return new HandoffObservation(ConnectionStates.ServiceState.Running, 1); };
+            Task work = CheckAndStartAsync(generation);
+            var clock = Stopwatch.StartNew();
+            while (state.Handoff != ConnectionStates.HandoffState.WaitingForClient && !work.IsCompleted && clock.ElapsedMilliseconds < 3000)
+            { Application.DoEvents(); System.Threading.Thread.Sleep(20); }
+            bool ok = state.Handoff == ConnectionStates.HandoffState.WaitingForClient && !connect.Enabled && stop.Enabled;
+            BeginStop();
+            observeHandoff = delegate { return new HandoffObservation(ConnectionStates.ServiceState.Stopped, 0); };
+            while (!work.IsCompleted && clock.ElapsedMilliseconds < 6000)
+            { Application.DoEvents(); System.Threading.Thread.Sleep(20); }
+            ok &= work.Status == TaskStatus.RanToCompletion && running == null && activeTask == null &&
+                state.Auth == ConnectionStates.AuthState.Idle && state.Handoff == ConnectionStates.HandoffState.None &&
+                connect.Enabled && !stop.Enabled && prepare.Enabled && restore.Enabled;
+            observeHandoff = ObserveHandoff;
+            Console.WriteLine(ok ? "HANDOFF_CANCEL_PASS" : "HANDOFF_CANCEL_FAIL");
+            return ok;
         }
 
         internal bool CheckTrayAndSaveForTest()
@@ -2057,7 +2120,8 @@ internal static class Program
             ConnectionStates.AuthState a = state.Auth;
             Color pillColor = ToneInfo;
             if (state.PillBusy) pillColor = ToneBusy;
-            else if (a == ConnectionStates.AuthState.Authenticated || a == ConnectionStates.AuthState.AuthenticatedBySession) pillColor = ToneOk;
+            else if (a == ConnectionStates.AuthState.Authenticated || a == ConnectionStates.AuthState.AuthenticatedBySession)
+                pillColor = state.Network == ConnectionStates.NetworkState.InternetAvailable ? ToneOk : ToneWarn;
             else if (a == ConnectionStates.AuthState.Failed) pillColor = ToneFail;
             else if (state.Handoff == ConnectionStates.HandoffState.Blocked || state.Handoff == ConnectionStates.HandoffState.PreparationRequired || state.Handoff == ConnectionStates.HandoffState.LaunchUnconfirmed) pillColor = ToneWarn;
             statusPill.UpdateStatus(state.PillText, pillColor);
@@ -2077,7 +2141,7 @@ internal static class Program
             var clock = Stopwatch.StartNew();
             while (!HandoffCancelled(generation, connectionTask))
             {
-                var observation = await Task.Run((Func<HandoffObservation>)ObserveHandoff);
+                var observation = await Task.Run(observeHandoff);
                 if (HandoffCancelled(generation, connectionTask)) return null;
                 state.SetService(observation.Service);
                 var decision = observation.Decide(intent);
@@ -2113,7 +2177,14 @@ internal static class Program
 
         // A11：环境检查（WMI，冷启动可达数秒）异步化——事件处理与启动检查共用
         private bool checkingBlocked;
-        private async void RunPreConnectCheckAsync(bool showMessage)
+        private async void RunStartupChecksAsync()
+        {
+            int generation = taskGeneration;
+            await RunPreConnectCheckAsync(false);
+            if (!HandoffCancelled(generation, false) && !connectCheckPending && !serviceBusy && activeTask == null)
+                await PromptPendingServiceRecovery();
+        }
+        private async Task RunPreConnectCheckAsync(bool showMessage)
         {
             if (checkingBlocked) return;
             int generation = taskGeneration;
@@ -2143,11 +2214,8 @@ internal static class Program
         {
             if (serviceBusy || connectCheckPending ||
                 (running != null && !Object.ReferenceEquals(running, completedProcess))) return;
-            if (account.Text.Length == 0 || password.Text.Length == 0)
-            {
-                SetStatus("请输入校园网账号和密码。", ToneWarn);
-                return;
-            }
+            string invalid = ValidateAuthInput(account.Text, password.Text, channel.SelectedIndex + 1);
+            if (invalid != null) { SetStatus(invalid, ToneWarn); return; }
             retryTimer.Stop();
             taskGeneration++;
             activeTask = new AuthTask(account.Text, password.Text, channel.SelectedIndex + 1, remember.Checked);
@@ -2220,6 +2288,8 @@ internal static class Program
                 running = LaunchCore(mode, activeTask.Username, activeTask.Password, activeTask.Channel, OnCoreStatus);
                 password.UseSystemPasswordChar = true; reveal.Text = "显示";
                 connect.Text = "连接中…"; stop.Enabled = true;
+                prepare.Enabled = false; restore.Enabled = false;
+                lastNetworkEvidence = 0;
                 state.SetCore(ConnectionStates.CoreState.Running);
                 state.SetNetwork(ConnectionStates.NetworkState.Unknown);
                 SetAuthState(ConnectionStates.AuthState.Authenticating, "正在连接校园网……", ToneBusy, true);
@@ -2246,6 +2316,7 @@ internal static class Program
                 SetStatus(ex is ArgumentException ? ex.Message : "启动认证失败，请重试。", ToneFail);
                 connect.Text = "立即连接"; connect.Enabled = true;
                 stop.Enabled = false; stop.Text = "停止认证";
+                prepare.Enabled = true; restore.Enabled = true;
             }
         }
 
@@ -2259,6 +2330,7 @@ internal static class Program
             int delay = autoRetryCount == 1 ? 10000 : 40000;
             retryTimer.Stop(); retryTimer.Interval = delay; retryTimer.Start();
             stop.Enabled = true; stop.Text = "取消重试";
+            prepare.Enabled = false; restore.Enabled = false;
             SetAuthState(ConnectionStates.AuthState.RetryScheduled, "网络探测失败（退出码 " + exitCode + "），" + (delay / 1000) + " 秒后重试（第 " + autoRetryCount + "/2 次）。", ToneWarn, true);
         }
 
@@ -2277,7 +2349,9 @@ internal static class Program
             try { BeginInvoke((Action)delegate {
                 // 唤醒后不自动重启：运行中的核心由自身心跳/退避循环重新确认；
                 // 已停止的会话保持停止。仅提示状态待确认。
-                if (running != null && !running.HasExited) { state.SetNetwork(ConnectionStates.NetworkState.Unknown); SetStatus("系统已唤醒，连接状态待确认……", ToneInfo, true); }
+                if (running != null && !running.HasExited) { state.SetNetwork(ConnectionStates.NetworkState.Unknown); UpdateConnectionPill(); SetStatus("系统已唤醒，连接状态待确认……", ToneInfo, true); }
+                else if (!serviceBusy && !connectCheckPending && !retryTimer.Enabled && activeTask == null && !isSelfTest)
+                    RunPreConnectCheckAsync(false);
             }); } catch (InvalidOperationException) { }
         }
 
@@ -2373,7 +2447,9 @@ internal static class Program
                 }
                 if (token == "network_online")
                 {
+                    lastNetworkEvidence = evidenceClock.ElapsedMilliseconds;
                     state.SetNetwork(ConnectionStates.NetworkState.InternetAvailable);
+                    UpdateConnectionPill();
                     if (state.Auth == ConnectionStates.AuthState.Authenticated)
                         SetStatus("认证成功，互联网可达。", ToneOk);
                     else if (state.Auth == ConnectionStates.AuthState.WaitingForNetwork)
@@ -2416,8 +2492,10 @@ internal static class Program
                 }
                 else if (token == "online")
                 {
+                    lastNetworkEvidence = evidenceClock.ElapsedMilliseconds;
                     runSawProgress = true; connect.Text = "运行中…";
                     state.SetNetwork(ConnectionStates.NetworkState.InternetAvailable);
+                    UpdateConnectionPill();
                     if (state.Auth == ConnectionStates.AuthState.Authenticated)
                         SetStatus("网络已连通，本程序已完成认证。", ToneOk);
                     else
@@ -2435,12 +2513,19 @@ internal static class Program
             completedProcess = started;
             timer.Stop(); stopping = false; stop.Enabled = false; stop.Text = "停止认证";
             StyleStopArmed(false); connect.Enabled = true; connect.Text = "立即连接";
+            prepare.Enabled = true; restore.Enabled = true;
             int code = -1;
             try { code = started.ExitCode; } catch { }
             bool crashed = code != 0 && !authFailureSeen && !userStopped;
             state.SetCore(crashed ? ConnectionStates.CoreState.Crashed : ConnectionStates.CoreState.Exited);
             state.SetNetwork(ConnectionStates.NetworkState.Unknown);
-            if (authFailureSeen)
+            if (userStopped)
+            {
+                state.SetHandoff(ConnectionStates.HandoffState.None);
+                SetAuthState(ConnectionStates.AuthState.Idle, "认证已停止。服务器会话状态待确认。", ToneInfo);
+                activeTask = null;
+            }
+            else if (authFailureSeen)
             {
                 SetAuthState(ConnectionStates.AuthState.Failed, "认证失败，进程已退出；服务器会话状态未知。", ToneFail);
                 activeTask = null;
@@ -2467,12 +2552,15 @@ internal static class Program
             {
                 stop.Enabled = false; stop.Text = "停止认证";
                 connect.Enabled = !connectCheckPending && !serviceBusy;
+                prepare.Enabled = connect.Enabled; restore.Enabled = connect.Enabled;
                 state.SetHandoff(ConnectionStates.HandoffState.None);
                 SetAuthState(ConnectionStates.AuthState.Idle, "已取消连接或重试。", ToneInfo);
                 return;
             }
             if (stopping) return;
             stopping = true; stop.Enabled = false; stop.Text = "正在停止…"; StyleStopArmed(false);
+            state.SetCore(ConnectionStates.CoreState.Stopping);
+            SetAuthState(ConnectionStates.AuthState.LoggingOut, "正在停止认证……", ToneWarn, true);
             grace = Stopwatch.StartNew(); timer.Start();
             bool sent = RequestStop(running);
             SetStatus(sent ? "正在停止认证，等待程序清理退出……" : "停止指令未收到确认，继续等待退出……", ToneWarn, true);
@@ -2514,10 +2602,11 @@ internal static class Program
         }
 
         // A09：程序重启后识别未完成的服务切换，向用户提供"经授权的恢复选项"（不擅自操作服务）
-        private async void PromptPendingServiceRecovery()
+        private async Task PromptPendingServiceRecovery()
         {
             try
             {
+                int generation = taskGeneration;
                 var journal = ServiceJournal.Load(ServiceJournal.DefaultPath());
                 if (journal.Invalid)
                 {
@@ -2526,7 +2615,7 @@ internal static class Program
                 }
                 if (!journal.HasPending && !journal.NeedsRecovery && !journal.Uncertain) return;
                 string actual = await Task.Run((Func<string>)CurrentServiceState);
-                if (IsDisposed || Disposing || serviceBusy || connectCheckPending || activeTask != null) return;
+                if (HandoffCancelled(generation, false) || serviceBusy || connectCheckPending || activeTask != null) return;
                 if (actual == "Running") { journal.ReconcileRunning(); return; }
                 if (actual != "Stopped" || (!journal.NeedsRecovery && journal.StateBefore != "Running"))
                 {
@@ -2536,7 +2625,7 @@ internal static class Program
                 SetStatus("天翼后台服务已停止，存在尚未确认的恢复责任。", ToneWarn);
                 if (MessageBox.Show(this, "检测到上次操作可能停止了原本运行的天翼服务。是否恢复？（需要管理员确认）",
                     "恢复天翼服务", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
-                    await RunServiceAction(false);
+                    if (!HandoffCancelled(generation, false) && activeTask == null) await RunServiceAction(false);
             }
             catch { if (!IsDisposed) SetStatus("无法读取服务恢复记录，请手动核对。", ToneWarn); }
         }
