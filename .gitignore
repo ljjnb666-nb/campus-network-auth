@@ -7,3 +7,4 @@ curl-*.tar.gz
 
 # 本地工具状态
 .mimosa/
+.zcode/
