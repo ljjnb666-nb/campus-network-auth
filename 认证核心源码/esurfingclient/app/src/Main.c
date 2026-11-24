@@ -410,7 +410,8 @@ int main(const int argc, char *argv[])
     /* One JSON line through a pipe, never through argv or a visible console. */
     const bool ephemeral_check = argc == 2 && strcmp(argv[1], "--ephemeral-check") == 0;
     const bool ephemeral_probe = argc == 2 && strcmp(argv[1], "--ephemeral-probe") == 0;
-    if (argc == 2 && (ephemeral_check || ephemeral_probe || strcmp(argv[1], "--ephemeral-auth") == 0))
+    const bool ephemeral_crash = argc == 2 && strcmp(argv[1], "--ephemeral-crash") == 0;
+    if (argc == 2 && (ephemeral_check || ephemeral_probe || ephemeral_crash || strcmp(argv[1], "--ephemeral-auth") == 0))
     {
 #ifdef _WIN32
         if (GetFileType(GetStdHandle(STD_INPUT_HANDLE)) != FILE_TYPE_PIPE)
@@ -441,6 +442,18 @@ int main(const int argc, char *argv[])
             clear_ephemeral_secrets();
             fprintf(stderr, "%s\n", ok ? "EPHEMERAL_CONFIG_OK" : "EPHEMERAL_CONFIG_INVALID");
             return ok ? 0 : 1;
+        }
+        /* 离线测试钩子: 模拟"到达等待网络后核心崩溃退出"——先发 WAIT_NETWORK
+         * 让启动器记录本轮已见网络, 再以非零退出码结束, 用于桌面端验证有界
+         * 自动恢复的调度逻辑。不执行任何网络探测与真实认证。 */
+        if (ephemeral_crash)
+        {
+            fputs("EPHEMERAL_WAIT_NETWORK\n", stderr);
+            ephemeral_emit_event("wait_network", 0);
+            fflush(stderr);
+            sleep_ms(300, true);
+            clear_ephemeral_secrets();
+            return 3;
         }
         work();
         return 0;

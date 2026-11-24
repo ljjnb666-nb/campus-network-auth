@@ -31,7 +31,7 @@ internal static class Program
     private const string OfficialExe = @"C:\Program Files (x86)\Chinatelecom_GDPortal\ESurfingClient.exe";
     private const string CoreResource = "Chezhi.AuthCore";
     private const string LicenseResource = "Chezhi.Licenses";
-    private const string CoreHash = "1B3278A081DD643782C9C7ACD23260626ADC33C082EF67B104498E23940EE9D5";
+    private const string CoreHash = "7AA893C569CB9C714539F1430352CB8404C2900D9C7F87734D384DD24B57397F";
     private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
     private const string CredentialFileName = "credentials.v1.dat";
     private static string tempDir;
@@ -622,12 +622,19 @@ internal static class Program
                 second.Show(); Application.DoEvents();
                 if (!second.CheckCredentialReloadForTest()) return 1;
             }
+            // P10/A06：崩溃注入——核心崩溃钩子模式下验证"有界自动恢复"被正确调度
+            using (var third = new MainWindow(dir, true))
+            {
+                third.Show(); Application.DoEvents();
+                if (!third.CheckAutoRetryForTest()) return 1;
+            }
             Console.WriteLine("UI_TRAY_PASS");
             return 0;
         }
         catch (Exception e) { Console.WriteLine("UI_TEST_ERROR " + e.GetType().Name); return 1; }
         finally
         {
+            CleanupCore(); // 崩溃注入测试释放过核心，统一清理
             try { if (File.Exists(store.FilePath)) File.Delete(store.FilePath); } catch { }
             try { if (Directory.Exists(dir)) Directory.Delete(dir, false); } catch { }
         }
@@ -1029,6 +1036,28 @@ internal static class Program
                 channel.SelectedIndex + 1 == dummy.Channel && password.UseSystemPasswordChar && reveal.Text == "显示";
             exitRequested = true; Close(); Application.DoEvents();
             return ok && IsDisposed;
+        }
+
+        // P10/A06 崩溃注入验证：以 --ephemeral-crash 钩子启动（发 WAIT_NETWORK 后非零退出），
+        // 断言 OnCoreExit 将其判定为崩溃并调度了有界自动重试（第 1/2 次、10 秒档）。
+        // 全程离线，无任何网络探测与真实认证。
+        internal bool CheckAutoRetryForTest()
+        {
+            ExtractCore(); // 本测试要真实启动核心（--self-test-ui 主入口不预释放核心）
+            account.Text = "retry-user"; password.Text = "retry-pass";
+            userStopped = false; runSawProgress = false; authFailureSeen = false; autoRetryCount = 0;
+            StartAuthProcess("--ephemeral-crash");
+            if (running == null) return false;
+            for (int i = 0; i < 80 && !running.HasExited; i++) { System.Threading.Thread.Sleep(100); Application.DoEvents(); }
+            if (!running.HasExited) { userStopped = true; retryTimer.Stop(); return false; }
+            // 泵消息让 Exited 回调（BeginInvoke）落地并执行 OnCoreExit → ScheduleAutoRetry
+            for (int i = 0; i < 10; i++) { Application.DoEvents(); System.Threading.Thread.Sleep(50); }
+            bool ok = autoRetryCount == 1 && retryTimer.Enabled;
+            // 清理：取消重试，模拟用户停止（不变量验证：停止后重试被取消）
+            userStopped = true; retryTimer.Stop();
+            try { if (running != null) { running.Dispose(); running = null; } } catch { }
+            exitRequested = true; Close(); Application.DoEvents();
+            return ok && IsDisposed && !retryTimer.Enabled;
         }
 
         private bool SaveCredentials(bool announce)
@@ -1611,15 +1640,15 @@ internal static class Program
             StartAuthProcess();
         }
 
-        // 认证进程启动（连接与自动重试共用）。异常时恢复按钮状态。
-        private void StartAuthProcess()
+        // 认证进程启动（连接与自动重试共用；测试可用 mode 注入崩溃钩子）。
+        private void StartAuthProcess(string mode = "--ephemeral-auth")
         {
             connect.Enabled = false;
             try
             {
                 if (running != null) { running.Dispose(); running = null; }
                 stopping = false; closingAfterStop = false; savedAfterAuth = false; stop.Text = "停止认证"; StyleStopArmed(false); timer.Stop();
-                running = LaunchCore("--ephemeral-auth", account.Text, password.Text, channel.SelectedIndex + 1, OnCoreStatus);
+                running = LaunchCore(mode, account.Text, password.Text, channel.SelectedIndex + 1, OnCoreStatus);
                 password.UseSystemPasswordChar = true; reveal.Text = "显示";
                 connect.Text = "连接中…";
                 stop.Enabled = true;

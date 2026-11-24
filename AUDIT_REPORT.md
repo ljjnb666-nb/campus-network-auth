@@ -108,7 +108,25 @@
 
 **CI 设计修正**：CI 只运行 Build-Core.ps1（同批产出核心+GUI，哈希自洽）；不运行 Build.ps1——提交的 CoreHash 与 CI 现编核心哈希逐字节一致在本工具链下不可保证（见证据 3）。
 
-### P7 UI 与交互优化（本阶段）
+### P8/P9/P10 架构·性能·测试（本阶段）
+**P8（A16）**：模块化已完成 5 个独立文件（CredentialStore/ConnectionStates/ServiceIdentity/ServiceJournal/Program+计划中的接口边界见 ARCHITECTURE.md）。Program.cs 完整拆分（含 UI/编排层）标记 DEFERRED_WITH_REASON：文件级搬运在当前工具链下回归风险大于收益（partial 类迁移需要大段文本搬移并重验全部自测），留专门重构窗口执行；A25 多设备管理接口以文档化接口预留（不引入任何监听服务/攻击面）。
+**P10（A06 验证）**：核心新增离线崩溃钩子 `--ephemeral-crash`（读管道凭据→发 WAIT_NETWORK→300ms→退出码 3，无网络探测/真实认证）；GUI `CheckAutoRetryForTest()` 注入式验证完整链路：事件→状态机→runSawProgress→退出分类（崩溃）→ScheduleAutoRetry（第 1/2 次、10s 档）→用户停止取消重试。并入 `--self-test-ui`（首轮失败暴露了自测模式未释放核心的问题，已修复：CheckAutoRetryForTest 内 ExtractCore + finally CleanupCore）。
+**P9 实测数据（2026-11-24，本机 Win10 x64，.NET FX 4.8 运行时）**：
+| 指标 | 实测 | 目标 | 结论 |
+|---|---|---|---|
+| 冷启动（进程初始化，logic 自测） | 29–42 ms | ≤3 s | ✅ |
+| 核心释放+SHA-256+管道集成（core 自测） | 257–268 ms | — | ✅ |
+| UI+崩溃注入+自动重试全链路（ui 自测） | 1387–1411 ms | — | ✅ |
+| GUI 进程内存（活实例 PID 19768） | 56.3 MB WS / 39.3 MB Private | 双进程 ≤100 MB | ✅（合计 ~65 MB） |
+| 核心进程内存（用户会话 15.2h） | 8.7 MB / 131 句柄 / 4 线程 | 无泄漏 | ✅ |
+| 核心平均 CPU（15.2h/112.9s CPU 时间） | 0.206% | <1% | ✅ |
+| 5 次启停后残留进程 | 0（排除用户会话） | 0 | ✅ |
+| GDI 对象计数 | 未采样（需 GetGuiResources API，工具链未接入） | — | 记录为缺口 |
+| 72 小时长跑 | 未执行 | — | BLOCKED（需真实环境时间） |
+**单实例机制顺带验证**：活实例存在时第二实例 1.2s 内信号退出 ✓。
+**状态更新**：A06 → FIXED_VERIFIED（注入测试实跑）；A16 → DEFERRED_WITH_REASON；A24 → 部分 FIXED_PENDING_VERIFICATION（上表实测，长跑项 BLOCKED）；A25 → DEFERRED_WITH_REASON（按要求仅预留）。
+
+### P7 UI 与交互优化
 **A17 高 DPI**：新增 `app.manifest`（PerMonitorV2 声明 + Win10/11 supportedOS）与 `app.config`（System.Windows.Forms.ApplicationConfigurationSection DpiAwareness=PerMonitorV2）；两构建脚本接线（`/win32manifest:` 嵌入 + `app.config` 随产物复制为 `澈知科技.exe.config`）。.NET FX 4.7+ 生效，旧运行时自动回退系统级缩放；分发形态从单 exe 变为 exe+config 两个文件（已写入文档）。注：多档 DPI 实机渲染验证（100%–200%）待用户环境执行（P11 清单），当前以框架机制落地为准。
 **A11 UI 线程阻塞**：`CheckBeforeConnect`（WMI 冷启动可达数秒）全面异步化——启动检查 `RunPreConnectCheckAsync`（先显示"正在检查"，完成后回填结论）、`ConnectClicked` 改 async（检查期间禁用连接按钮防重复点击）；检查期间窗口不再冻结。
 **A19 诊断入口**：托盘菜单"导出诊断信息"→ 写出脱敏文本（程序版本/四类领域状态快照/自动恢复计数/非法状态迁移记录/核心事件归档 200 条/服务事务记录/OS 与 DPI），不含任何账号、密码、票据；导出到 %TEMP%\CheZhiDiag。
