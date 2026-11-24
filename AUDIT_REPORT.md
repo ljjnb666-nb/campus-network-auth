@@ -88,4 +88,25 @@
 > 状态说明：FIXED_VERIFIED / FIXED_PENDING_VERIFICATION / NOT_REPRODUCED / UPSTREAM_LIMITATION / BLOCKED / DEFERRED_WITH_REASON。本表随各阶段修复滚动更新，全部整改完成后进行三轮复审并出具最终验收报告。
 
 ## 四、阶段提交记录
-（随整改滚动追加）
+
+### P1 工程基线（bcb18af）
+- 全量源码通读完成；25 项原始问题逐项核实（A01-A25）+ 新增 6 项（N01-N06）。
+- 基线自测：logic/credentials/core/ui PASS；stop BLOCKED（用户 GUI 会话的活核心 PID 13196 持有 auth-1 单实例锁，实测同条件旧版同样失败）。
+- 发现 PID 13196 为用户 2026-11-23 22:59 启动的真实认证核心（GUI 已退出但核心仍保活）——A06/A18 的真实样本。
+
+### P2 构建修复（本阶段）
+**新增**：`scripts/Fetch-Curl.ps1`（依赖三元组固定：curl 8.20.0 / curl.se 官方源 / FC5819CA…，缓存复用+离线构建+哈希不符即停）；`scripts/scan-secrets.ps1`（敏感信息启发式扫描）；`scripts/Test-CurlVulns.ps1`（对照官方 vuln.json 核查）；`.github/workflows/build.yml`（Windows 构建+离线自检+安全扫描+产物上传）。
+**改造**：`Build-Core.ps1`（依赖经 Fetch-Curl 获取；vswhere 通用发现 VS 自带 CMake/Ninja，移除个人路径硬编码；生成 build-manifest.json：版本/提交/工具链/依赖/产物哈希）；`Build.ps1`（CoreHash 以 Program.cs 为唯一来源；-CorePath 参数与产物自动定位；临时输出成功后才替换正式产物，失败不覆盖；生成 gui-build-manifest.json）。
+
+**实测证据**：
+1. 下载路径：从 curl.se 官方下载的 curl-8.20.0.tar.gz 与固定 SHA-256 逐字节一致（third-party-test 已清理）。
+2. 缓存路径：仓库根历史包校验通过直接复用。
+3. **字节不可复现实证**：相同核心源码两次构建哈希不同（A691A52D… → 3B51270E…，MinGW PE 时间戳/构建路径差异）。本项目构建为"过程可复现、字节不可复现"；CoreHash 同步流程（Build-Core 输出 → 更新 Program.cs）为必经步骤，已写入文档。
+4. vswhere 发现解决本机 VS 自带工具链定位（首次改造曾因移除个人路径导致 cmake 找不到，已用通用方案修复）。
+5. 全部离线自测在新构建产物上通过：logic/credentials/core/ui PASS；stop 仍 BLOCKED（同 PID 13196 锁，与代码无关）。
+6. 密钥扫描通过；curl 8.20.0 在官方漏洞库有 54 条命中记录（启发式含可能误报）——已列为 A21 证据，curl 升级（8.23.0）作为独立可验证变更放入 P3，不擅自混入。
+
+**CI 设计修正**：CI 只运行 Build-Core.ps1（同批产出核心+GUI，哈希自洽）；不运行 Build.ps1——提交的 CoreHash 与 CI 现编核心哈希逐字节一致在本工具链下不可保证（见证据 3）。
+
+**状态更新**：A02 → FIXED_PENDING_VERIFICATION（待 CI 首跑验证）；A07 → FIXED_PENDING_VERIFICATION（同）；A21 → 证据已采集（54 CVE 命中，待 P3 处置）；N02 → FIXED_PENDING_VERIFICATION。
+

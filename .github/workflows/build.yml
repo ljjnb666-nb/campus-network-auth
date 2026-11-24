@@ -1,0 +1,93 @@
+# 澈知科技校园网连接 — Windows 构建 + 离线自检 + 安全扫描
+# 仅执行离线构建与自检：CI 环境不配置真实校园网账号，不执行真实认证，
+# 核心侧 --ephemeral-check / --ephemeral-probe 均为官方离线测试钩子（见
+# 认证核心源码/docs/EphemeralExperimental.md 与 DialerAuth.c 的 probe 分支）。
+name: build
+
+on:
+  push:
+    branches: [main, 'fix/**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache curl source package
+        uses: actions/cache@v4
+        with:
+          path: third-party
+          key: curl-8.20.0-FC5819CAD3F9F5482669ADCDC49A782C15F36D2A0715B395B06D9173593D2DC0
+
+      - name: Fetch and verify dependencies
+        shell: pwsh
+        run: ./scripts/Fetch-Curl.ps1
+
+      - name: Set up MinGW-w64 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Toolchain versions
+        shell: pwsh
+        run: |
+          cmake --version | Select-Object -First 1
+          ninja --version
+          & 'C:\msys64\ucrt64\bin\gcc.exe' --version | Select-Object -First 1
+          Test-Path "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+
+      - name: Build core and GUI from source
+        shell: pwsh
+        run: |
+          ./Build-Core.ps1 `
+            -CMake (Get-Command cmake.exe).Source `
+            -Ninja 'C:\msys64\ucrt64\bin\ninja.exe' `
+            -Gcc 'C:\msys64\ucrt64\bin\gcc.exe' `
+            -Gxx 'C:\msys64\ucrt64\bin\g++.exe'
+      # 说明：Build-Core.ps1 同时产出认证核心与桌面 EXE（核心哈希已写入其生成源码），
+      # 二者自洽。不再在 CI 上运行 Build.ps1 —— 仓库提交的 CoreHash 与 CI 现编核心
+      # 的哈希逐字节一致在本工具链下不可保证（实测同机重编哈希即变）。
+
+      - name: Offline self-tests
+        shell: pwsh
+        run: |
+          $exe = 'build-core\澈知科技-源码重建.exe'
+          & $exe --self-test-logic;      if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $exe --self-test-credentials; if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $exe --self-test-core;       if ($LASTEXITCODE -ne 0) { exit 1 }
+          & $exe --self-test-stop        # 离线 probe 钩子：仅验证 STOP 通道，不触碰真实认证
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Offline UI self-test (best effort)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          & 'build-core\澈知科技-源码重建.exe' --self-test-ui
+
+      - name: Secret scan
+        shell: pwsh
+        run: ./scripts/scan-secrets.ps1
+
+      - name: Dependency vulnerability check (curl)
+        shell: pwsh
+        continue-on-error: true
+        run: ./scripts/Test-CurlVulns.ps1
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: chezhi-windows-build
+          path: |
+            build-core/澈知科技-源码重建.exe
+            build-core/认证核心-源码重建.exe
+            build-core/build-manifest.json
+            build-core/gui-build-manifest.json
+          if-no-files-found: error

@@ -17,13 +17,30 @@ function Find-Tool([string]$chosen, [string]$name, [string[]]$fallbacks) {
     foreach ($candidate in $fallbacks) { if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate } }
     throw "找不到 $name。请先安装 CMake、Ninja 和同一套 MinGW-w64 GCC/G++，或通过脚本参数指定路径。"
 }
+# 通过 vswhere 通用发现 Visual Studio 自带的 CMake/Ninja（不硬编码任何个人安装路径）
+function Find-VsTool([string]$relative) {
+    try {
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+        if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { return $null }
+        $vsRoot = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null | Select-Object -First 1)
+        if (-not $vsRoot) { $vsRoot = (& $vswhere -latest -products * -property installationPath 2>$null | Select-Object -First 1) }
+        if (-not $vsRoot) { return $null }
+        $candidate = Join-Path $vsRoot $relative
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    } catch { }
+    return $null
+}
 function Invoke-BuildTool([string]$tool, [string[]]$toolArgs) {
     & $tool @toolArgs
     if ($LASTEXITCODE -ne 0) { throw "构建命令失败，退出码 $LASTEXITCODE。请保留构建目录检查输出。" }
 }
 
-$CMake = Find-Tool $CMake 'cmake.exe' @('D:\Visual Studio\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe', 'C:\Program Files\CMake\bin\cmake.exe')
-$Ninja = Find-Tool $Ninja 'ninja.exe' @('D:\Visual Studio\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe', 'C:\msys64\ucrt64\bin\ninja.exe')
+$CMake = Find-Tool $CMake 'cmake.exe' @(
+    'C:\Program Files\CMake\bin\cmake.exe', 'C:\Program Files (x86)\CMake\bin\cmake.exe',
+    (Find-VsTool 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'))
+$Ninja = Find-Tool $Ninja 'ninja.exe' @(
+    'C:\msys64\ucrt64\bin\ninja.exe', 'C:\Program Files\CMake\bin\ninja.exe',
+    (Find-VsTool 'Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe'))
 $Gcc = Find-Tool $Gcc 'gcc.exe' @('C:\msys64\ucrt64\bin\gcc.exe')
 $Gxx = Find-Tool $Gxx 'g++.exe' @('C:\msys64\ucrt64\bin\g++.exe')
 # 固定优先使用 Windows 自带的 bsdtar (System32): 从 Git Bash/MSYS 环境启动时,
@@ -33,12 +50,26 @@ if (-not (Test-Path -LiteralPath $tar -PathType Leaf)) { $tar = Find-Tool '' 'ta
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw '找不到 .NET Framework C# 编译器。' }
 
-$curlArchive = Join-Path $PSScriptRoot 'curl-8.20.0.tar.gz'
 $project = Join-Path $PSScriptRoot '认证核心源码\esurfingclient\app'
-foreach ($path in @($curlArchive, (Join-Path $project 'CMakeLists.txt'), (Join-Path $PSScriptRoot 'Program.cs'), (Join-Path $PSScriptRoot 'CredentialStore.cs'), (Join-Path $PSScriptRoot 'chezhi.ico'), (Join-Path $PSScriptRoot 'Licenses.txt'))) {
+foreach ($path in @((Join-Path $project 'CMakeLists.txt'), (Join-Path $PSScriptRoot 'Program.cs'), (Join-Path $PSScriptRoot 'CredentialStore.cs'), (Join-Path $PSScriptRoot 'chezhi.ico'), (Join-Path $PSScriptRoot 'Licenses.txt'))) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "缺少构建文件：$path" }
 }
-if ((Get-FileHash -LiteralPath $curlArchive -Algorithm SHA256).Hash -ne 'FC5819CAD3F9F5482669ADCDC49A782C15F36D2A0715B395B06D9173593D2DC0') { throw 'curl 源码包哈希不符，未解压。' }
+
+# 依赖获取：固定版本/来源/SHA-256，缓存命中即离线可用；失败或哈希不符直接终止
+$curlVersion = '8.20.0'
+$curlArchive = (& (Join-Path $PSScriptRoot 'scripts\Fetch-Curl.ps1') -Version $curlVersion) | Select-Object -Last 1
+if (-not (Test-Path -LiteralPath $curlArchive -PathType Leaf)) { throw "curl 源码包获取失败：$curlArchive" }
+
+# 记录工具链版本（写入构建清单）
+function Get-FirstLine([string]$tool, [string[]]$toolArgs) {
+    try { $out = & $tool @toolArgs 2>$null | Select-Object -First 1; if ($out) { return ([string]$out).Trim() } } catch { }
+    return 'unknown'
+}
+$toolVersions = @{
+    cmake    = Get-FirstLine $CMake @('--version')
+    ninja    = Get-FirstLine $Ninja @('--version')
+    gcc      = Get-FirstLine $Gcc @('--version')
+}
 
 $build = Join-Path $PSScriptRoot 'build-core'
 if (Test-Path -LiteralPath $build) { throw "构建目录已存在：$build。为保护已有文件，请先自行选择其他目录保存旧结果。" }
@@ -76,6 +107,38 @@ $arguments = @('/nologo','/target:winexe','/optimize+','/platform:anycpu',('/win
 & $compiler $arguments $refs $generatedProgram (Join-Path $PSScriptRoot 'CredentialStore.cs')
 if ($LASTEXITCODE -ne 0) { throw '桌面程序编译失败。' }
 [System.IO.File]::Copy($core, (Join-Path $build '认证核心-源码重建.exe'), $false)
+
+# 构建清单：版本 / 提交 / 工具链 / 依赖 / 产物哈希（可复现性证据，随产物一起归档）
+$gitSha = 'unknown'
+try { $gitSha = (& git rev-parse HEAD 2>$null | Select-Object -First 1).Trim() } catch { }
+$appVersion = 'unknown'
+try {
+    $m = [regex]::Match((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Program.cs') -Raw -Encoding UTF8), 'AssemblyVersion\("([0-9.]+)"\)')
+    if ($m.Success) { $appVersion = $m.Groups[1].Value }
+} catch { }
+$guiOut = Join-Path $build '澈知科技-源码重建.exe'
+$coreCopy = Join-Path $build '认证核心-源码重建.exe'
+$manifest = [ordered]@{
+    appVersion = $appVersion
+    gitCommit  = $gitSha
+    builtAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+    toolchain  = $toolVersions
+    cscPath    = $compiler
+    dependencies = [ordered]@{
+        curl = [ordered]@{
+            version = $curlVersion
+            sha256  = 'FC5819CAD3F9F5482669ADCDC49A782C15F36D2A0715B395B06D9173593D2DC0'
+            source  = "https://curl.se/download/curl-$curlVersion.tar.gz"
+            archive = $curlArchive
+        }
+    }
+    outputs = @(
+        [ordered]@{ file = '认证核心-源码重建.exe'; sha256 = $coreHash; bytes = (Get-Item -LiteralPath $coreCopy).Length },
+        [ordered]@{ file = '澈知科技-源码重建.exe'; sha256 = (Get-FileHash -LiteralPath $guiOut -Algorithm SHA256).Hash; bytes = (Get-Item -LiteralPath $guiOut).Length }
+    )
+}
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $build 'build-manifest.json') -Encoding UTF8
+
 Write-Host "源码重建完成：$result"
 Write-Host "认证核心 SHA-256：$coreHash"
 Write-Host "临时构建文件：$work"

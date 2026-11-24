@@ -2,8 +2,9 @@
 *.exe
 build-core/
 
-# 第三方源码包
+# 第三方源码包与依赖缓存
 curl-*.tar.gz
+third-party/
 
 # 本地工具状态
 .mimosa/
