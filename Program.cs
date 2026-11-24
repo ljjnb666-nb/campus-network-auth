@@ -185,7 +185,13 @@ internal static class Program
             {
                 try { if (process.HasExited) continue; } catch { count++; continue; }
                 count++;
-                try { if (process.MainWindowHandle != IntPtr.Zero) visible = true; } catch { }
+                // The window alone is not proof of official identity.
+                try
+                {
+                    if (process.MainWindowHandle != IntPtr.Zero &&
+                        ServiceIdentity.VerifyExpectedService(process.MainModule.FileName)) visible = true;
+                }
+                catch { }
             }
             return count;
         }
@@ -275,26 +281,71 @@ internal static class Program
         catch { try { if (!ServiceInstalled()) return "NotInstalled"; } catch { } return "unknown"; }
     }
 
-    // Any install location is accepted; the service must be unique and its executable
-    // must still be the expected ESurfingSvr.exe so the elevated stop never targets a look-alike.
-    private static string ServiceExePath()
+    // Resolve the executable token without silently truncating a service path
+    // at the first space. Privileged actions must reject ambiguous unquoted
+    // paths rather than assume Windows would launch the intended executable.
+    private static string ParseServiceImage(string command, out string reason)
+    {
+        reason = "path_unresolved";
+        if (String.IsNullOrWhiteSpace(command)) return null;
+        string raw = Environment.ExpandEnvironmentVariables(command.Trim());
+        string path;
+        if (raw[0] == '"')
+        {
+            int end = raw.IndexOf('"', 1);
+            if (end <= 1 || (end + 1 < raw.Length && !Char.IsWhiteSpace(raw[end + 1]))) return null;
+            path = raw.Substring(1, end - 1);
+        }
+        else
+        {
+            int end = raw.IndexOf("ESurfingSvr.exe", StringComparison.OrdinalIgnoreCase);
+            if (end < 0) return null;
+            end += "ESurfingSvr.exe".Length;
+            if (end < raw.Length && !Char.IsWhiteSpace(raw[end])) return null;
+            path = raw.Substring(0, end);
+            if (path.Any(Char.IsWhiteSpace))
+            {
+                reason = "unquoted_service_path";
+                return null;
+            }
+        }
+        // Absolute local drive paths only: no relative, UNC or device paths.
+        if (path.Length < 4 || !Char.IsLetter(path[0]) || path[1] != ':' || path[2] != '\\' ||
+            path.IndexOfAny(new[] { '"', '\r', '\n', '\0', '%' }) >= 0) return null;
+        try
+        {
+            path = Path.GetFullPath(path);
+            if (!String.Equals(Path.GetFileName(path), "ESurfingSvr.exe", StringComparison.OrdinalIgnoreCase)) return null;
+        }
+        catch { return null; }
+        reason = "resolved";
+        return path;
+    }
+
+    private static string ServiceExePath(out string reason)
     {
         int count;
         string path;
         QueryService(out count, out path);
-        if (count != 1 || String.IsNullOrEmpty(path)) return null;
-        path = path.Trim();
-        if (path.Length > 0 && path[0] == '"')
+        reason = count == 0 ? "service_missing" : "path_unresolved";
+        return count == 1 ? ParseServiceImage(path, out reason) : null;
+    }
+
+    private static string ServiceExePath()
+    {
+        string reason;
+        return ServiceExePath(out reason);
+    }
+
+    private static string ServiceVerificationReason()
+    {
+        try
         {
-            int end = path.IndexOf('"', 1);
-            if (end > 1) path = path.Substring(1, end - 1); // PathName 常带引号, 也可能跟参数
+            string reason;
+            string path = ServiceExePath(out reason);
+            return path == null ? reason : ServiceIdentity.VerificationReason(path);
         }
-        else
-        {
-            int space = path.IndexOf(' ');
-            if (space > 0) path = path.Substring(0, space); // 未加引号但带参数的写法
-        }
-        return String.Equals(Path.GetFileName(path), "ESurfingSvr.exe", StringComparison.OrdinalIgnoreCase) ? path : null;
+        catch { return "path_unresolved"; }
     }
 
     private static bool IsExpectedService()
@@ -546,7 +597,7 @@ internal static class Program
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Running, false, true) == 24
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Running, true, true) == 0
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Stopped, false, false) == 0
-            && HandoffInvariants() && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && ServiceIdentity.NativeLayoutIsValid() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
+            && ServicePathInvariants() && HandoffInvariants() && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && ServiceIdentity.NativeLayoutIsValid() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
             && !ServiceIdentity.IsKnownPublisher("fake telecom", "CN=fake telecom");
         Console.WriteLine(ok ? "LOGIC_PASS" : "LOGIC_FAIL");
         return ok ? 0 : 1;
@@ -554,6 +605,24 @@ internal static class Program
 
     // 状态机不变量（7.2）：合法迁移被接受、非法迁移被拒绝；操作结果不改变连接状态；
     // 任何路径都不能"跳过认证直接变成已认证"；停止/登出后回到 Idle 而非保持已认证。
+    private static bool ServicePathInvariants()
+    {
+        string reason;
+        bool ok = ParseServiceImage("\"C:\\Program Files\\Vendor\\ESurfingSvr.exe\" -service", out reason)
+            == @"C:\Program Files\Vendor\ESurfingSvr.exe" && reason == "resolved";
+        ok &= ParseServiceImage(@"D:\Vendor\ESurfingSvr.exe -service", out reason)
+            == @"D:\Vendor\ESurfingSvr.exe" && reason == "resolved";
+        ok &= ParseServiceImage(@"C:\Program Files\Vendor\ESurfingSvr.exe -service", out reason) == null
+            && reason == "unquoted_service_path";
+        ok &= ParseServiceImage("\"C:\\Vendor\\ESurfingSvr.exe\"invalid", out reason) == null;
+        ok &= ParseServiceImage(@"C:\Vendor\ESurfingSvr.exe.fake", out reason) == null;
+        ok &= ParseServiceImage(@"ESurfingSvr.exe", out reason) == null;
+        ok &= ParseServiceImage(@"\\server\share\ESurfingSvr.exe", out reason) == null;
+        ok &= ParseServiceImage(@"C:\Vendor\Other.exe -arg ESurfingSvr.exe", out reason) == null;
+        Console.WriteLine(ok ? "SERVICE_PATH_PASS" : "SERVICE_PATH_FAIL");
+        return ok;
+    }
+
     private static bool HandoffInvariants()
     {
         var c = ConnectionStates.HandoffIntent.Connect;
@@ -1990,7 +2059,7 @@ internal static class Program
             if (state.PillBusy) pillColor = ToneBusy;
             else if (a == ConnectionStates.AuthState.Authenticated || a == ConnectionStates.AuthState.AuthenticatedBySession) pillColor = ToneOk;
             else if (a == ConnectionStates.AuthState.Failed) pillColor = ToneFail;
-            else if (state.Handoff == ConnectionStates.HandoffState.Blocked || state.Handoff == ConnectionStates.HandoffState.PreparationRequired) pillColor = ToneWarn;
+            else if (state.Handoff == ConnectionStates.HandoffState.Blocked || state.Handoff == ConnectionStates.HandoffState.PreparationRequired || state.Handoff == ConnectionStates.HandoffState.LaunchUnconfirmed) pillColor = ToneWarn;
             statusPill.UpdateStatus(state.PillText, pillColor);
         }
 
@@ -2051,19 +2120,21 @@ internal static class Program
             checkingBlocked = true;
             try
             {
-                string blocked = await Task.Run((Func<string>)CheckBeforeConnect);
-                if (IsDisposed) return;
-                if (generation != taskGeneration || serviceBusy || connectCheckPending || (running != null && !running.HasExited)) return; // do not overwrite a newer operation
-                if (blocked != null)
+                var observation = await Task.Run((Func<HandoffObservation>)ObserveHandoff);
+                if (HandoffCancelled(generation, false) || serviceBusy || connectCheckPending ||
+                    (running != null && !Object.ReferenceEquals(running, completedProcess))) return;
+                state.SetService(observation.Service);
+                var decision = observation.Decide(ConnectionStates.HandoffIntent.Connect);
+                if (decision != ConnectionStates.HandoffDecision.Ready)
                 {
-                    SetHandoff(ConnectionStates.HandoffState.Blocked, blocked, ToneWarn);
+                    string blocked = HandoffMessage(decision);
+                    SetHandoff(decision == ConnectionStates.HandoffDecision.NeedStopService ?
+                        ConnectionStates.HandoffState.PreparationRequired : ConnectionStates.HandoffState.Blocked, blocked, ToneWarn);
                     if (showMessage) MessageBox.Show(this, blocked, "暂不能连接", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 else if (!showMessage)
-                {
-                    if (loadedCredential) SetHandoff(ConnectionStates.HandoffState.Ready, "已载入保存的账号，点击“立即连接”即可。", ToneInfo);
-                    else SetStatus("输入校园网账号和密码，点击“立即连接”即可。", ToneInfo);
-                }
+                    SetHandoff(ConnectionStates.HandoffState.Ready, loadedCredential ?
+                        "已载入保存的账号，点击“立即连接”即可。" : "输入校园网账号和密码，点击“立即连接”即可。", ToneInfo);
             }
             finally { checkingBlocked = false; }
         }
@@ -2474,7 +2545,9 @@ internal static class Program
         {
             switch (reason)
             {
-                case "path_unresolved": return "未找到程序路径";
+                case "path_unresolved": return "无法解析官方程序路径";
+                case "service_missing": return "未找到后台服务";
+                case "unquoted_service_path": return "服务路径含空格但未加引号，存在启动歧义；请使用官方安装程序修复";
                 case "file_missing": return "文件不存在";
                 case "signature_untrusted": return "签名信任验证失败";
                 case "publisher_not_allowlisted": return "发布者尚未确认";
@@ -2508,8 +2581,24 @@ internal static class Program
                 if (child == null)
                 { SetHandoff(ConnectionStates.HandoffState.Blocked, "未能启动官方客户端，请从开始菜单打开。", ToneWarn); return false; }
             }
-            SetHandoff(ConnectionStates.HandoffState.OfficialRunning, "已请求启动天翼客户端，请在官方窗口确认并登录。", ToneOk);
-            return true;
+            // Process.Start returning a handle does not prove the UI appeared.
+            var launchClock = Stopwatch.StartNew();
+            while (launchClock.Elapsed.TotalSeconds < 8 && !HandoffCancelled(generation, false))
+            {
+                await Task.Delay(500);
+                var current = await Task.Run((Func<HandoffObservation>)ObserveHandoff);
+                if (HandoffCancelled(generation, false)) return false;
+                state.SetService(current.Service);
+                if (current.VisibleClient)
+                {
+                    SetHandoff(ConnectionStates.HandoffState.OfficialRunning, "已检测到经过身份验证的天翼窗口，请在官方客户端登录。", ToneOk);
+                    return true;
+                }
+            }
+            if (!HandoffCancelled(generation, false))
+                SetHandoff(ConnectionStates.HandoffState.LaunchUnconfirmed,
+                    "已发送启动请求，但尚未确认天翼窗口出现；请检查任务栏、托盘或开始菜单。", ToneWarn);
+            return false;
         }
 
         private async Task<bool> RunServiceAction(bool forPrepare, bool fromConnect = false)
@@ -2590,9 +2679,7 @@ internal static class Program
                 string failure = code == 0 || code == 10 ? "服务结果未得到确认，请核对实际状态。" : ServiceError(code ?? 25);
                 if (code == 21)
                 {
-                    string reason = await Task.Run(delegate {
-                        try { return ServiceIdentity.VerificationReason(ServiceExePath()); } catch { return "path_unresolved"; }
-                    });
+                    string reason = await Task.Run((Func<string>)ServiceVerificationReason);
                     if (HandoffCancelled(generation, fromConnect)) return false;
                     failure += " 当前只读检查：" + IdentityReasonText(reason) + "。";
                 }

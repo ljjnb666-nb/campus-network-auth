@@ -17,7 +17,7 @@ internal static class ConnectionStates
 
     // 天翼官方后台服务状态
     internal enum ServiceState { Unknown, NotInstalled, Running, Stopped, Transitioning, Failed }
-    internal enum HandoffState { None, Checking, WaitingForClient, WaitingForService, PreparationRequired, Preparing, Ready, Restoring, Launching, OfficialRunning, Blocked }
+    internal enum HandoffState { None, Checking, WaitingForClient, WaitingForService, PreparationRequired, Preparing, Ready, Restoring, Launching, LaunchUnconfirmed, OfficialRunning, Blocked }
     internal enum HandoffIntent { Connect, Prepare, Restore }
     internal enum HandoffDecision { Ready, WaitForClient, WaitForService, NeedStopService, NeedStartService, LaunchClient, ExistingClient, BlockUnknown }
 
@@ -112,6 +112,7 @@ internal sealed class ConnectionState
                     case ConnectionStates.HandoffState.Ready: return "待连接";
                     case ConnectionStates.HandoffState.Restoring: return "恢复中";
                     case ConnectionStates.HandoffState.Launching: return "启动天翼";
+                    case ConnectionStates.HandoffState.LaunchUnconfirmed: return "启动待确认";
                     case ConnectionStates.HandoffState.OfficialRunning: return "天翼模式";
                     case ConnectionStates.HandoffState.Blocked: return "暂不可连接";
                 }
