@@ -246,3 +246,10 @@ FIXED_VERIFIED：A03 A04 A05 A06 A09 A11 A13 A14 A15 A18 A19 A20；FIXED_PENDING
 | B10 | UI 与签名测试强制退出码检查，漏洞库获取失败阻断 | 待最新 CI；残余漏洞适用性未关闭 |
 
 CODE_IMPLEMENTED：上述机制已提交，尚不能认定全部 B 项 FIXED_VERIFIED。BUILD_VERIFIED/OFFLINE_TESTS_VERIFIED/CI_VERIFIED 必须针对最终提交重新核验。REAL_NETWORK_VERIFIED/LONG_RUNNING_VERIFIED/RELEASE_READY 仍未通过。未操作真实校园网或 Windows 服务。当前不合并 main、不打 tag。
+
+
+### 第二轮 CI 兼容性修复
+
+- 运行 45420876262、45421123500：原生 C 核心成功链接，旧版 .NET Framework C# 编译器报 CS1985（catch 中 await），后续测试未执行。
+- 修复：UAC 取消时保守记录实际服务状态 unknown，保留已有恢复责任，不在 catch 中 await 或同步执行 WMI。失败路径恢复服务状态为 Unknown。
+- 新提交必须重新运行完整 CI；前两次成功的 CI 不替代最终提交验收。

@@ -2195,11 +2195,14 @@ internal static class Program
             {
                 if (!started && journal != null && journal.HasPending && e.NativeErrorCode == 1223)
                 {
-                    try { journal.Complete(null, await Task.Run((Func<string>)CurrentServiceState), true); } catch { }
+                    // UAC was cancelled before child creation; no service mutation by this task.
+                    // C# 5 forbids await in catch. Preserve prior uncertainty instead of probing synchronously.
+                    try { journal.Complete(null, "unknown", true); } catch { }
                 }
+                state.SetService(ConnectionStates.ServiceState.Unknown);
                 if (!IsDisposed) SetStatus(e.NativeErrorCode == 1223 ? "已取消管理员授权。" : "无法启动管理员操作，请重试。", ToneWarn);
             }
-            catch { if (!IsDisposed) SetStatus("操作结果未知，已保留恢复记录，请检查服务状态。", ToneWarn); }
+            catch { state.SetService(ConnectionStates.ServiceState.Unknown); if (!IsDisposed) SetStatus("操作结果未知，已保留恢复记录，请检查服务状态。", ToneWarn); }
             finally
             {
                 serviceBusy = false;
