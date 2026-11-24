@@ -580,6 +580,7 @@ internal static class Program
         private readonly TextBox account = new TextBox();
         private readonly TextBox password = new TextBox();
         private readonly ComboBox channel = new ComboBox();
+        private readonly CheckBox remember = new CheckBox();
         private readonly ModernButton connect = new ModernButton();
         private readonly ModernButton stop = new ModernButton();
         private readonly ModernButton save = new ModernButton();
@@ -621,8 +622,8 @@ internal static class Program
             if (appIcon != null) Icon = appIcon;
             StartPosition = FormStartPosition.CenterScreen;
             AutoScaleMode = AutoScaleMode.Dpi;
-            ClientSize = new Size(540, 508);
-            MinimumSize = new Size(520, 508);
+            ClientSize = new Size(540, 532);
+            MinimumSize = new Size(520, 532);
             BackColor = FormBgColor;
             Font = new Font("Microsoft YaHei UI", 9F);
             DoubleBuffered = true;
@@ -632,7 +633,7 @@ internal static class Program
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52)); // Header
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 10)); // Spacer
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 222)); // Auth Card
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 246)); // Auth Card
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 10)); // Spacer
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 88)); // Tool Card
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 10)); // Spacer
@@ -650,12 +651,13 @@ internal static class Program
 
             // Auth Card
             var authCard = new ModernCard { Dock = DockStyle.Fill, BackColor = CardBgColor };
-            var authLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(16, 12, 16, 12), BackColor = CardBgColor, Margin = Padding.Empty };
+            var authLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Padding = new Padding(16, 12, 16, 12), BackColor = CardBgColor, Margin = Padding.Empty };
             authLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             authLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 22)); // Card Title
             authLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36)); // Account
             authLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36)); // Password
             authLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36)); // Device
+            authLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 24)); // Remember
             authLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46)); // Actions
 
             var authHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty, BackColor = CardBgColor };
@@ -687,6 +689,15 @@ internal static class Program
             var channelBox = new InputContainer(channel) { Dock = DockStyle.Fill, Height = 32, Margin = new Padding(0, 2, 0, 2), Padding = new Padding(6, 4, 6, 4), BackColor = CardBgColor };
             AddField(authLayout, "设备类型", channelBox, 3);
 
+            // 记住账号密码：仅用户明确勾选后才持久化（连接成功后写入）；默认不勾选。
+            // 勾选状态与本地已有记录保持一致；取消勾选不会删除已有记录（用托盘菜单清除）。
+            remember.Text = "记住账号密码（DPAPI 加密，仅当前 Windows 用户可读）";
+            remember.AutoSize = false; remember.Size = new Size(480, 20); remember.Dock = DockStyle.Fill;
+            remember.ForeColor = Color.FromArgb(71, 85, 105); remember.BackColor = CardBgColor;
+            remember.TextAlign = ContentAlignment.MiddleLeft; remember.Cursor = Cursors.Hand;
+            tips.SetToolTip(remember, "不勾选时凭据只在内存中使用，连接成功也不会写入磁盘");
+            authLayout.Controls.Add(remember, 0, 4);
+
             // Connection action buttons row
             var actionGrid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = new Padding(0, 6, 0, 0), BackColor = CardBgColor };
             actionGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 44));
@@ -699,7 +710,7 @@ internal static class Program
             ConfigureButton(save, "保存账号", ButtonKind.Normal);
             save.CornerRadius = 6; save.Dock = DockStyle.Fill; save.Margin = Padding.Empty;
             actionGrid.Controls.Add(connect, 0, 0); actionGrid.Controls.Add(stop, 1, 0); actionGrid.Controls.Add(save, 2, 0);
-            authLayout.Controls.Add(actionGrid, 0, 4);
+            authLayout.Controls.Add(actionGrid, 0, 5);
             authCard.Controls.Add(authLayout);
             layout.Controls.Add(authCard, 0, 2);
 
@@ -764,6 +775,7 @@ internal static class Program
                 {
                     account.Text = saved.Username; password.Text = saved.Password;
                     channel.SelectedIndex = saved.Channel - 1; loadedCredential = true;
+                    remember.Checked = true; // 与本地已有记录保持一致
                 }
             }
             catch { credentialLoadError = "读取已保存的账号失败，原有文件未改动。请确认与保存时使用同一个 Windows 用户。"; }
@@ -1416,14 +1428,20 @@ internal static class Program
         private void ConnectClicked(object sender, EventArgs e)
         {
             if (serviceBusy || (running != null && !running.HasExited)) return;
-            if (!SaveCredentials(false)) return;
+            // 输入校验、认证启动、凭据保存三者分离：连接前不再强制写盘（A04/A05）。
+            // 仅当用户勾选"记住账号密码"且认证成功后，才在 SaveAfterAuth() 中持久化。
+            if (account.Text.Length == 0 || password.Text.Length == 0)
+            {
+                SetStatus("请输入校园网账号和密码。", ToneWarn);
+                return;
+            }
             string blocked = CheckBeforeConnect();
             if (blocked != null) { SetStatus(blocked, ToneWarn); MessageBox.Show(this, blocked, "暂不能连接", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
             connect.Enabled = false;
             try
             {
                 if (running != null) { running.Dispose(); running = null; }
-                stopping = false; closingAfterStop = false; stop.Text = "停止认证"; StyleStopArmed(false); timer.Stop();
+                stopping = false; closingAfterStop = false; savedAfterAuth = false; stop.Text = "停止认证"; StyleStopArmed(false); timer.Stop();
                 running = LaunchCore("--ephemeral-auth", account.Text, password.Text, channel.SelectedIndex + 1, OnCoreStatus);
                 password.UseSystemPasswordChar = true; reveal.Text = "显示";
                 connect.Text = "连接中…";
@@ -1441,6 +1459,18 @@ internal static class Program
             }
         }
 
+        // 连接成功后的按需保存：未勾选"记住账号密码"时不写任何持久化凭据；
+        // 保存失败只提示，不影响已经成功的连接。
+        private bool savedAfterAuth;
+        private void SaveAfterAuth()
+        {
+            if (savedAfterAuth) return;
+            savedAfterAuth = true;
+            if (!remember.Checked || credentials == null) return;
+            if (!SaveCredentials(false))
+                MessageBox.Show(this, "连接成功，但账号密码未能加密保存（可能是本地记录损坏或目录不可写）。\r\n本次连接不受影响；如需保存请先用托盘菜单“清除已保存账号”。", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
         private void OnCoreStatus(Process sender, string token)
         {
             if (IsDisposed || !IsHandleCreated) return;
@@ -1451,6 +1481,7 @@ internal static class Program
                 {
                     connect.Text = "运行中…"; // 已连上, 按钮反映"保持运行"而非"连接中"
                     SetStatus("连接成功！现在可到 Windows 设置打开移动热点共享网络。", ToneOk);
+                    SaveAfterAuth();
                 }
                 else if (token == "EPHEMERAL_AUTH_FAILED") SetStatus("连接失败：请核对账号密码，并确认已连上校园网。", ToneFail);
                 else if (token == "EPHEMERAL_WAIT_NETWORK") SetStatus("正在等待接入校园网……请确认电脑已连上校园网的 Wi-Fi 或网线。", ToneBusy, true);
@@ -1458,6 +1489,7 @@ internal static class Program
                 {
                     connect.Text = "运行中…";
                     SetStatus("网络已连通（可能沿用了先前的登录会话）。程序保持运行，会话失效后会自动重新认证。", ToneOk);
+                    SaveAfterAuth();
                 }
                 else if (token == "EPHEMERAL_STOP_ACCEPTED") SetStatus("正在退出认证并通知服务器登出……", ToneWarn, true);
                 else if (token == "EPHEMERAL_STOP_CHANNEL_FAILED") SetStatus("停止指令发送失败，可稍后点“强制结束”。", ToneFail);
