@@ -20,8 +20,8 @@ internal static class ServiceIdentity
     private struct WINTRUST_DATA
     {
         public uint cbStruct;
-        public uint pPolicyCallbackData;
-        public uint pSIPCallbackData;
+        public IntPtr pPolicyCallbackData;
+        public IntPtr pSIPClientData;
         public uint dwUIChoice;
         public uint fdwRevocationChecks;
         public uint dwUnionChoice;
@@ -46,10 +46,33 @@ internal static class ServiceIdentity
     private const uint WTD_REVOCATION_CHECK_NONE = 0x00000010;
     private static readonly Guid GenericVerifyV2 = new Guid("{00AAC56B-CD44-11d0-8CC2-00C04FC295EE}");
 
+    // Native Windows SDK wintrust.h layout (default platform alignment).
+    // Verify every offset before calling into unmanaged code, on x86 and x64.
+    internal static bool NativeLayoutIsValid()
+    {
+        bool wide = IntPtr.Size == 8;
+        if (!wide && IntPtr.Size != 4) return false;
+        Type data = typeof(WINTRUST_DATA);
+        Type file = typeof(WINTRUST_FILE_INFO);
+        string[] fields = { "cbStruct", "pPolicyCallbackData", "pSIPClientData", "dwUIChoice",
+            "fdwRevocationChecks", "dwUnionChoice", "pFile", "dwStateAction",
+            "hWVTStateData", "pwszURLReference", "dwProvFlags", "dwUIContext", "pSignatureSettings" };
+        int[] expected = wide ? new[] { 0, 8, 16, 24, 28, 32, 40, 48, 56, 64, 72, 76, 80 }
+            : new[] { 0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48 };
+        for (int i = 0; i < fields.Length; i++)
+            if (Marshal.OffsetOf(data, fields[i]).ToInt32() != expected[i]) return false;
+        return Marshal.SizeOf(data) == (wide ? 88 : 52) &&
+            Marshal.SizeOf(file) == (wide ? 32 : 16) &&
+            Marshal.OffsetOf(file, "cbStruct").ToInt32() == 0 &&
+            Marshal.OffsetOf(file, "pcwszFilePath").ToInt32() == (wide ? 8 : 4) &&
+            Marshal.OffsetOf(file, "hFile").ToInt32() == (wide ? 16 : 8) &&
+            Marshal.OffsetOf(file, "pgKnownSubject").ToInt32() == (wide ? 24 : 12);
+    }
+
     /// <summary>验证文件具有有效的 Authenticode 签名（不吊销检查：离线/内网环境可用）。</summary>
     internal static bool HasValidSignature(string filePath)
     {
-        if (String.IsNullOrEmpty(filePath) || !File.Exists(filePath)) return false;
+        if (!NativeLayoutIsValid() || String.IsNullOrEmpty(filePath) || !File.Exists(filePath)) return false;
         var fileInfo = new WINTRUST_FILE_INFO
         {
             cbStruct = (uint)Marshal.SizeOf(typeof(WINTRUST_FILE_INFO)),

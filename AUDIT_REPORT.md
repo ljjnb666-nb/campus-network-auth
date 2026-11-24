@@ -253,3 +253,10 @@ CODE_IMPLEMENTED：上述机制已提交，尚不能认定全部 B 项 FIXED_VER
 - 运行 45420876262、45421123500：原生 C 核心成功链接，旧版 .NET Framework C# 编译器报 CS1985（catch 中 await），后续测试未执行。
 - 修复：UAC 取消时保守记录实际服务状态 unknown，保留已有恢复责任，不在 catch 中 await 或同步执行 WMI。失败路径恢复服务状态为 Unknown。
 - 新提交必须重新运行完整 CI；前两次成功的 CI 不替代最终提交验收。
+
+
+### 签名 ABI 回归修复
+
+- Run 45422759183（4ce8ba3）：全量构建通过；logic/credentials/core/stop 均 PASS，强制 UI 自测退出码 0；新增 Authenticode 自测真实失败，WinVerifyTrust 抛 AccessViolationException（-1073741819）。后续扫描与上传未执行。
+- 对照 Windows SDK WINTRUST_DATA 定义（https://learn.microsoft.com/windows/win32/api/wintrust/ns-wintrust-wintrust_data），修正两个 LPVOID 字段由 uint 为 IntPtr。增加 x86/x64 所有字段偏移和结构体大小校验，调用前 fail-closed；logic 自测覆盖布局，签名自测分阶段输出并重复验证可信文件。
+- 保留签名强制门禁，不捕获或忽略原生内存访问异常；新提交 CI 待验证。真实官方天翼文件仍需只读实机核验。

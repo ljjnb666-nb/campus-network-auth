@@ -537,7 +537,7 @@ internal static class Program
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Running, false, true) == 24
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Running, true, true) == 0
             && ServiceGuard(true, 0, true, ServiceControllerStatus.Stopped, false, false) == 0
-            && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
+            && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && ServiceIdentity.NativeLayoutIsValid() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
             && !ServiceIdentity.IsKnownPublisher("fake telecom", "CN=fake telecom");
         Console.WriteLine(ok ? "LOGIC_PASS" : "LOGIC_FAIL");
         return ok ? 0 : 1;
@@ -552,7 +552,8 @@ internal static class Program
         try
         {
             Directory.CreateDirectory(dir);
-            if (!ServiceIdentity.HasValidSignature(signedPath)) return 1;
+            if (!ServiceIdentity.NativeLayoutIsValid()) { Console.WriteLine("SIGNATURE_LAYOUT_FAIL"); return 1; }
+            if (!ServiceIdentity.HasValidSignature(signedPath)) { Console.WriteLine("SIGNATURE_VALID_FIXTURE_FAIL"); return 1; }
             string damaged = Path.Combine(dir, "damaged.exe");
             File.Copy(signedPath, damaged);
             using (var fs = new FileStream(damaged, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
@@ -564,7 +565,9 @@ internal static class Program
             }
             string unsigned = Path.Combine(dir, "unsigned.txt");
             File.WriteAllText(unsigned, "unsigned fixture");
-            if (ServiceIdentity.HasValidSignature(damaged) || ServiceIdentity.HasValidSignature(unsigned)) return 1;
+            if (ServiceIdentity.HasValidSignature(damaged)) { Console.WriteLine("SIGNATURE_TAMPERED_ACCEPTED"); return 1; }
+            if (ServiceIdentity.HasValidSignature(unsigned)) { Console.WriteLine("SIGNATURE_UNSIGNED_ACCEPTED"); return 1; }
+            if (!ServiceIdentity.HasValidSignature(signedPath)) { Console.WriteLine("SIGNATURE_REPEAT_FAIL"); return 1; }
             Console.WriteLine("SIGNATURE_PASS");
             return 0;
         }
