@@ -74,6 +74,30 @@ jobs:
         shell: pwsh
         run: ./scripts/Test-BuildDependencies.ps1 -MsysRoot $env:MSYS2_ROOT
 
+      - name: Offline Windows local adapter resource failure audit
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $temp = Join-Path $env:RUNNER_TEMP ('adapter-audit-' + [Guid]::NewGuid().ToString('N'))
+          [void](New-Item -ItemType Directory -Path $temp)
+          try {
+            $root = '认证核心源码/esurfingclient/app'
+            Copy-Item -LiteralPath (Join-Path $root 'include') -Destination $temp -Recurse
+            Copy-Item -LiteralPath (Join-Path $root 'third_party/cJSON') -Destination $temp -Recurse
+            Copy-Item -LiteralPath (Join-Path $root 'src/utils/platform/NetAdapters.c') -Destination $temp
+            Copy-Item -LiteralPath (Join-Path $root 'src/utils/platform/PlatformInternal.h') -Destination $temp
+            Copy-Item -LiteralPath 'scripts/tests/adapter_windows_audit.c' -Destination $temp
+            Push-Location -LiteralPath $temp
+            try {
+              $gcc = Join-Path $env:MSYS2_ROOT 'ucrt64/bin/gcc.exe'
+              & $gcc -std=gnu11 -O1 -Iinclude -I. adapter_windows_audit.c cJSON/cJSON.c -o adapter_audit.exe -liphlpapi -lws2_32
+              if ($LASTEXITCODE -ne 0) { throw 'Windows adapter audit compile failed' }
+              & ./adapter_audit.exe
+              if ($LASTEXITCODE -ne 0) { throw 'Windows adapter resource audit failed' }
+            } finally { Pop-Location }
+          } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
+
       - name: Build core and GUI from source
         shell: pwsh
         run: |
