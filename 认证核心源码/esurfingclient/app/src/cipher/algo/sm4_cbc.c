@@ -22,8 +22,11 @@ static uint8_t* sm4_encrypt_cbc(const uint8_t* key, const uint8_t* iv, const uin
         xor_bytes(padded + i*SM4_BLOCK_SIZE, prev, xored, SM4_BLOCK_SIZE);
         sm4_encrypt_block(xored, out + i*SM4_BLOCK_SIZE, rk);
         memcpy(prev, out + i*SM4_BLOCK_SIZE, SM4_BLOCK_SIZE);
+        cipher_secure_zero(xored, sizeof(xored));
     }
-    s_free(padded);
+    cipher_secure_zero(prev, sizeof(prev));
+    cipher_secure_zero(rk, sizeof(rk));
+    s_secure_free(padded, padded_len);
     *output_len = padded_len;
     return out;
 }
@@ -31,7 +34,7 @@ static uint8_t* sm4_encrypt_cbc(const uint8_t* key, const uint8_t* iv, const uin
 static uint8_t* sm4_decrypt_cbc(const uint8_t* key, const uint8_t* iv, const uint8_t* ciphertext,
                                 const size_t ciphertext_len, size_t* output_len)
 {
-    if(ciphertext_len % SM4_BLOCK_SIZE != 0) return NULL;
+    if(ciphertext_len == 0 || ciphertext_len % SM4_BLOCK_SIZE != 0) return NULL;
     uint8_t* out_blocks = s_malloc(ciphertext_len);
     uint8_t prev[SM4_BLOCK_SIZE]; memcpy(prev, iv, SM4_BLOCK_SIZE);
     uint32_t rk[32]; sm4_key_expansion(key, rk);
@@ -43,9 +46,12 @@ static uint8_t* sm4_decrypt_cbc(const uint8_t* key, const uint8_t* iv, const uin
         sm4_decrypt_block(block, dec, rk);
         xor_bytes(dec, prev, out_blocks + i*SM4_BLOCK_SIZE, SM4_BLOCK_SIZE);
         memcpy(prev, block, SM4_BLOCK_SIZE);
+        cipher_secure_zero(dec, sizeof(dec));
     }
+    cipher_secure_zero(prev, sizeof(prev));
+    cipher_secure_zero(rk, sizeof(rk));
     size_t unpadded_len=0; uint8_t* unpadded = rm_pkcs7_padding(out_blocks, ciphertext_len, &unpadded_len);
-    s_free(out_blocks);
+    s_secure_free(out_blocks, ciphertext_len);
     *output_len = unpadded_len;
     return unpadded;
 }
@@ -58,7 +64,7 @@ static char* sm4_cbc_encrypt(cipher_interface_t* self, const char* text)
     size_t out_len=0; uint8_t* out = sm4_encrypt_cbc(d->key, d->iv, (const uint8_t*)text, text_len, &out_len);
     if(!out) return NULL;
     char* hex = bytes_2_hex(out, out_len);
-    s_free(out);
+    s_secure_free(out, out_len);
     return hex;
 }
 
@@ -69,12 +75,12 @@ static char* sm4_cbc_decrypt(cipher_interface_t* self, const char* hex)
     size_t bytes_len=0; uint8_t* bytes = hex_2_bytes(hex, &bytes_len);
     if(!bytes) return NULL;
     size_t out_len=0; uint8_t* out = sm4_decrypt_cbc(d->key, d->iv, bytes, bytes_len, &out_len);
-    s_free(bytes);
+    s_secure_free(bytes, bytes_len);
     if(!out) return NULL;
     char* result = s_malloc(out_len + 1);
     memcpy(result, out, out_len);
     result[out_len] = '\0';
-    s_free(out);
+    s_secure_free(out, out_len);
     return result;
 }
 
@@ -82,7 +88,7 @@ static void sm4_cbc_destroy(cipher_interface_t* self)
 {
     if(self)
     {
-        s_free(self->private_data); s_free(self);
+        s_secure_free(self->private_data, sizeof(sm4_cbc_data_t)); s_free(self);
     }
 }
 
