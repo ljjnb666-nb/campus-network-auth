@@ -1159,6 +1159,11 @@ internal static class Program
                 fifth.Show(); Application.DoEvents();
                 if (!fifth.CheckServiceRecoveryForTest(dir)) return 1;
             }
+            using (var lifecycle = new MainWindow(dir, true))
+            {
+                lifecycle.Show(); Application.DoEvents();
+                if (!lifecycle.CheckRepeatedApplicationLifecycleForTest()) return 1;
+            }
             // Repeated direct Dispose must clean resources even without FormClosed.
             for (int i = 0; i < 5; i++)
             {
@@ -1256,6 +1261,7 @@ internal static class Program
         // —— 有界自动恢复（A06，不变量：用户主动停止/退出后绝不自动重启）——
         private bool userStopped;      // 用户主动停止或退出：取消一切待执行重试
         private bool runSawProgress;   // 本轮核心是否到达过"等待网络/认证成功/已联网"（未到达即失败=疑似凭据问题，不自动重试）
+        private bool runtimeFailureSeen;
         private bool authFailureSeen;  // 本轮收到过 AUTH_FAILED（受控失败，退出不算崩溃，也不自动重试）
         private int autoRetryCount;   // 自动重试计数（每次用户发起的连接最多 2 次：10s、40s 指数退避）
         private readonly Timer retryTimer = new Timer();
@@ -1270,6 +1276,7 @@ internal static class Program
         private AuthTask activeTask;
         private bool connectCheckPending, retryEligible, rememberRevoked;
         private Func<HandoffObservation> observeHandoff = ObserveHandoff;
+        private bool offlineLifecycleProbe;
         private long lastNetworkEvidence;
         private readonly Stopwatch evidenceClock = Stopwatch.StartNew();
         private int taskGeneration;
@@ -1945,6 +1952,123 @@ internal static class Program
                 running = null; completedProcess = null;
                 try { if (!stub.HasExited) { RequestStop(stub); if (!stub.WaitForExit(5000)) stub.Kill(); } } catch { }
                 stub.Dispose();
+            }
+        }
+
+        internal bool CheckRepeatedApplicationLifecycleForTest()
+        {
+            if (!isSelfTest) return false;
+            ExtractCore();
+            const int seed = 20261125, cycles = 100;
+            var random = new Random(seed);
+            var scenarios = new List<int>();
+            // Exactly 20 of each scenario, shuffled deterministically.
+            for (int i = 0; i < cycles; i++) scenarios.Add(i % 5);
+            for (int i = scenarios.Count - 1; i > 0; i--)
+            {
+                int k = random.Next(i + 1), temp = scenarios[i]; scenarios[i] = scenarios[k]; scenarios[k] = temp;
+            }
+            Process previous = null;
+            int completed = 0;
+            offlineLifecycleProbe = true;
+            try
+            {
+                remember.Checked = false;
+                account.Text = "offline-user"; password.Text = "offline-pass"; channel.SelectedIndex = 0;
+                for (int cycle = 0; cycle < cycles; cycle++)
+                {
+                    int scenario = scenarios[cycle];
+                    observeHandoff = delegate { return new HandoffObservation(ConnectionStates.ServiceState.Stopped, 0); };
+                    // Invoke the real UI command; injected observation never requests elevation.
+                    ConnectClicked(connect, EventArgs.Empty);
+                    var clock = Stopwatch.StartNew();
+                    while (connectCheckPending && clock.ElapsedMilliseconds < 5000)
+                    { Application.DoEvents(); System.Threading.Thread.Sleep(5); }
+                    Application.DoEvents();
+                    Process child = running;
+                    if (connectCheckPending || child == null || Object.ReferenceEquals(child, completedProcess) ||
+                        Object.ReferenceEquals(child, previous) || child.HasExited ||
+                        state.Auth != ConnectionStates.AuthState.Authenticating || connect.Enabled || !stop.Enabled ||
+                        prepare.Enabled || restore.Enabled || trayRecover.Enabled)
+                    { Console.WriteLine("APP_CYCLE_START_FAIL cycle=" + cycle + " scenario=" + scenario); return false; }
+                    // The real probe never authenticates. The events below simulate the UI's
+                    // validated protocol messages, not a successful network connection.
+                    if (previous != null)
+                    {
+                        OnCoreStatus(previous, "auth_failed");
+                        OnCoreStatus(previous, "network_online");
+                        OnCoreExit(previous);
+                        Application.DoEvents();
+                        if (state.Auth != ConnectionStates.AuthState.Authenticating ||
+                            state.Network != ConnectionStates.NetworkState.Unknown) return false;
+                    }
+                    string[] events;
+                    ConnectionStates.AuthState expected;
+                    ConnectionStates.NetworkState expectedNetwork;
+                    switch (scenario)
+                    {
+                        case 0:
+                            events = new[] { "auth_ok", "network_online", "auth_ok" };
+                            expected = ConnectionStates.AuthState.Authenticated;
+                            expectedNetwork = ConnectionStates.NetworkState.InternetAvailable;
+                            break;
+                        case 1:
+                            events = new[] { "wait_network", "online", "network_required" };
+                            expected = ConnectionStates.AuthState.WaitingForNetwork;
+                            expectedNetwork = ConnectionStates.NetworkState.AuthenticationRequired;
+                            break;
+                        case 2:
+                            events = new[] { "auth_failed", "network_online", "auth_ok" };
+                            expected = ConnectionStates.AuthState.Failed;
+                            expectedNetwork = ConnectionStates.NetworkState.Unknown;
+                            break;
+                        case 3:
+                            events = new[] { "core_failed", "network_online", "auth_start", "network_retry_exhausted" };
+                            expected = ConnectionStates.AuthState.Failed;
+                            expectedNetwork = ConnectionStates.NetworkState.Unknown;
+                            break;
+                        default:
+                            events = new[] { "auth_ok", "network_online", "network_retry_exhausted", "network_online" };
+                            expected = ConnectionStates.AuthState.Failed;
+                            expectedNetwork = ConnectionStates.NetworkState.Unknown;
+                            break;
+                    }
+                    foreach (string token in events) OnCoreStatus(child, token);
+                    Application.DoEvents();
+                    if (state.Auth != expected || state.Network != expectedNetwork ||
+                        (scenario == 2 && state.Failure != ConnectionStates.FailureKind.Authentication) ||
+                        (scenario == 3 && (state.Failure != ConnectionStates.FailureKind.Runtime || retryEligible)) ||
+                        (scenario == 4 && (state.Failure != ConnectionStates.FailureKind.Network || !retryEligible)))
+                    { Console.WriteLine("APP_CYCLE_EVENT_FAIL cycle=" + cycle + " scenario=" + scenario + " auth=" + state.Auth + " network=" + state.Network); return false; }
+                    StopClicked(stop, EventArgs.Empty);
+                    OnCoreStatus(child, "auth_ok"); OnCoreStatus(child, "network_online");
+                    // Exercise the real process Exited callback and reader drain, not a synthetic exit.
+                    clock.Restart();
+                    while (!Object.ReferenceEquals(completedProcess, child) && clock.ElapsedMilliseconds < 10000)
+                    { Application.DoEvents(); System.Threading.Thread.Sleep(5); }
+                    Application.DoEvents();
+                    if (!Object.ReferenceEquals(completedProcess, child) || !child.HasExited || child.ExitCode != 0 ||
+                        state.Auth != ConnectionStates.AuthState.Idle || state.Network != ConnectionStates.NetworkState.Unknown ||
+                        activeTask != null || retryTimer.Enabled || stopping || !connect.Enabled || !prepare.Enabled ||
+                        !restore.Enabled || stop.Enabled || trayStop.Enabled || !trayRecover.Enabled)
+                    { Console.WriteLine("APP_CYCLE_STOP_FAIL cycle=" + cycle + " scenario=" + scenario); return false; }
+                    previous = child;
+                    completed++;
+                    if (completed % 20 == 0) Console.WriteLine("APP_LIFECYCLE_PROGRESS=" + completed);
+                }
+                Console.WriteLine("APP_LIFECYCLE_PASS cycles=" + completed + " seed=" + seed);
+                return true;
+            }
+            finally
+            {
+                offlineLifecycleProbe = false; observeHandoff = ObserveHandoff;
+                userStopped = true; taskGeneration++; retryTimer.Stop(); activeTask = null;
+                if (running != null)
+                {
+                    Process owned = running;
+                    running = null; completedProcess = null;
+                    ReapOfflineOrFailedCore(owned);
+                }
             }
         }
 
@@ -2825,13 +2949,14 @@ internal static class Program
                 connectCheckPending = false;
                 if (!IsDisposed && !Disposing)
                 {
-                    if (!ready || HandoffCancelled(generation, true)) activeTask = null;
-                    RefreshOperationPermissions();
+                    if (!ready || HandoffCancelled(generation, true))
+                    { activeTask = null; RefreshOperationPermissions(); }
+                    // On success, do not briefly expose idle permissions before the synchronous launch.
                 }
             }
             if (!ready || HandoffCancelled(generation, true)) return;
             state.SetHandoff(ConnectionStates.HandoffState.None);
-            StartAuthProcess();
+            StartAuthProcess(isSelfTest && offlineLifecycleProbe ? "--ephemeral-probe" : "--ephemeral-auth");
         }
 
         // The actual process always uses the immutable, user-authorized task snapshot.
@@ -2845,7 +2970,7 @@ internal static class Program
                 if (running != null) { DisposeCoreProcess(running); running = null; }
                 completedProcess = null;
                 stopping = false; closingAfterStop = false; savedAfterAuth = false;
-                runSawProgress = false; authFailureSeen = false; retryEligible = false;
+                runSawProgress = false; authFailureSeen = false; runtimeFailureSeen = false; retryEligible = false;
                 stop.Text = "停止认证"; StyleStopArmed(false); timer.Stop();
                 running = LaunchCore(mode, activeTask.Username, activeTask.Password, activeTask.Channel, OnCoreStatus);
                 password.UseSystemPasswordChar = true; reveal.Text = "显示";
@@ -3002,9 +3127,10 @@ internal static class Program
                 ArchiveCoreEvent(token);
                 bool stopEvent = token == "stop_accepted" || token == "stop_channel_failed";
                 if (stopEvent && !stopping) return;
-                if ((stopping || userStopped || authFailureSeen || retryEligible) && !stopEvent) return;
+                if ((stopping || userStopped || authFailureSeen || runtimeFailureSeen || retryEligible) && !stopEvent) return;
                 if (token == "core_failed")
                 {
+                    runtimeFailureSeen = true;
                     state.Failure = ConnectionStates.FailureKind.Runtime;
                     state.SetNetwork(ConnectionStates.NetworkState.Unknown);
                     SetAuthState(ConnectionStates.AuthState.Failed, "认证核心运行中断，正在等待进程退出。", ToneFail);
@@ -3013,6 +3139,9 @@ internal static class Program
                 if (token == "network_retry_exhausted" || (token == "test_crash" && isSelfTest))
                 {
                     retryEligible = true;
+                    state.Failure = ConnectionStates.FailureKind.Network;
+                    state.SetNetwork(ConnectionStates.NetworkState.Unknown);
+                    SetAuthState(ConnectionStates.AuthState.Failed, "网络探测已耗尽，等待核心退出。", ToneWarn);
                     return;
                 }
                 if (token == "network_online")
@@ -3031,6 +3160,7 @@ internal static class Program
                     state.SetNetwork(token == "network_required" ? ConnectionStates.NetworkState.AuthenticationRequired : ConnectionStates.NetworkState.Unknown);
                     if (state.Auth == ConnectionStates.AuthState.Authenticated || state.Auth == ConnectionStates.AuthState.AuthenticatedBySession)
                         SetAuthState(ConnectionStates.AuthState.WaitingForNetwork, "网络状态变化，等待重新确认。", ToneWarn, true);
+                    UpdateConnectionPill();
                     return;
                 }
                 if (token == "auth_start")

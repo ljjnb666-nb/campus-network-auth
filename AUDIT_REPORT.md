@@ -327,3 +327,8 @@ Push 45551297375 / PR 45551302877 success；SERVICE_GATE_PASS / JOURNAL_CONCURRE
 ### 主动审计第八批（基线 4432edb）
 
 Push 45551781061 / PR 45551787864 success，JOURNAL_RESTART_PASS，110 次资源测试预热后 326→331，curl 双源 0。集中主要操作按钮及托盘权限，新增纯决策 256 组合 OPERATION_MATRIX_PASS 和 UI_OPERATION_PASS；取消进行中避免重复操作，服务结束不盲目开放按钮。底层操作标志仍保留，未宣称所有状态迁移完全统一。最新 CI 待验证；真实 UAC、校园网、DPI、72h、旧事务人工核对及正式签名仍开放。未修改 main。
+
+
+### 主动审计第九批（基线 b287c4e）
+
+Push 45552326254 / PR 45552334588 success；OPERATION_MATRIX_PASS cases=256、UI_OPERATION_PASS、110 次资源通过（326→331）、curl 双源 0。发现 core_failed 未锁存，后续网络事件可污染失败状态；网络耗尽等待退出时仍可能展示旧可达性；成功前置检查结束短暂刷新空闲权限。修复终态锁存、立即撤销网络证据、权限刷新时序；新增 APP_LIFECYCLE_PASS 100 次真实离线 probe UI 连接/停止，固定种子五类注入、真实进程退出回调。新 CI 待验证。未真实认证、未实际服务切换，未宣称100次全系统交接，真实 DPI/UAC/校园网、72h、签名、旧事务恢复仍开放，main 未修改。
