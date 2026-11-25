@@ -1,4 +1,5 @@
 #include "sm4_common.h"
+#include "cipher/CipherUtils.h"
 
 #include <stdint.h>
 
@@ -75,6 +76,8 @@ void sm4_key_expansion(const uint8_t* key, uint32_t* rk)
         K[i+4] = K[i] ^ Tp(K[i+1] ^ K[i+2] ^ K[i+3] ^ SM4_CK[i]);
         rk[i] = K[i+4];
     }
+    cipher_secure_zero(MK, sizeof(MK));
+    cipher_secure_zero(K, sizeof(K));
 }
 
 void sm4_encrypt_block(const uint8_t* in, uint8_t* out, const uint32_t* rk)
@@ -97,6 +100,7 @@ void sm4_encrypt_block(const uint8_t* in, uint8_t* out, const uint32_t* rk)
         out[i*4+2] = (uint8_t)(Y>>8);
         out[i*4+3] = (uint8_t)Y;
     }
+    cipher_secure_zero(X, sizeof(X));
 }
 
 void sm4_decrypt_block(const uint8_t* in, uint8_t* out, const uint32_t* rk)
@@ -119,5 +123,23 @@ void sm4_decrypt_block(const uint8_t* in, uint8_t* out, const uint32_t* rk)
         out[i*4+2] = (uint8_t)(Y>>8);
         out[i*4+3] = (uint8_t)(Y);
     }
+    cipher_secure_zero(X, sizeof(X));
 }
 
+
+/* GB/T 32907 / standard SM4 single-block example. */
+bool sm4_known_answer_self_test(void)
+{
+    const uint8_t key[16] = {0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,0xfe,0xdc,0xba,0x98,0x76,0x54,0x32,0x10};
+    const uint8_t expected[16] = {0x68,0x1e,0xdf,0x34,0xd2,0x06,0x96,0x5e,0x86,0xb3,0xe9,0x4f,0x53,0x6e,0x42,0x46};
+    uint32_t rk[32];
+    uint8_t enc[16], dec[16];
+    sm4_key_expansion(key, rk);
+    sm4_encrypt_block(key, enc, rk);
+    sm4_decrypt_block(expected, dec, rk);
+    const bool ok = memcmp(enc, expected, 16) == 0 && memcmp(dec, key, 16) == 0;
+    cipher_secure_zero(rk, sizeof(rk));
+    cipher_secure_zero(enc, sizeof(enc));
+    cipher_secure_zero(dec, sizeof(dec));
+    return ok;
+}
