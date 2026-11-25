@@ -322,3 +322,8 @@ Push 45550721734 / PR 45550731789 success；110 次循环，预热后 handles 32
 ### 主动审计第七批（基线 ebd3825）
 
 Push 45551297375 / PR 45551302877 success；SERVICE_GATE_PASS / JOURNAL_CONCURRENCY_PASS，110 次句柄 326→326。新增 v3 启动代次证据、托盘显式核对中断事务、二次观察、保守记录失败未知及恢复责任；JOURNAL_RESTART_PASS；禁止重试期间重复连接。未自动清除旧 pending 或损坏记录，缺少 WMI 启动证据时拒绝新服务切换。WMI 时间并非不可伪造的 boot ID，真实重启和跨会话仍待验证；未完全统一按钮管理，未修改 main，最新 CI 待验证。
+
+
+### 主动审计第八批（基线 4432edb）
+
+Push 45551781061 / PR 45551787864 success，JOURNAL_RESTART_PASS，110 次资源测试预热后 326→331，curl 双源 0。集中主要操作按钮及托盘权限，新增纯决策 256 组合 OPERATION_MATRIX_PASS 和 UI_OPERATION_PASS；取消进行中避免重复操作，服务结束不盲目开放按钮。底层操作标志仍保留，未宣称所有状态迁移完全统一。最新 CI 待验证；真实 UAC、校园网、DPI、72h、旧事务人工核对及正式签名仍开放。未修改 main。

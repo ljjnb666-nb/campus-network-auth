@@ -493,6 +493,28 @@ internal static class Program
         catch { return 27; }
     }
 
+    private static bool OperationPermissionInvariants()
+    {
+        bool ok = true;
+        // Exhaust all combinations of the eight ownership inputs, including inconsistent snapshots.
+        for (int mask = 0; mask < 256; mask++)
+        {
+            bool service = (mask & 1) != 0, check = (mask & 2) != 0, retry = (mask & 4) != 0,
+                core = (mask & 8) != 0, stopping = (mask & 16) != 0, force = (mask & 32) != 0,
+                exiting = (mask & 64) != 0, cancelled = (mask & 128) != 0;
+            var rights = ConnectionStates.DecideOperations(service, check, retry, core, stopping, force, exiting, cancelled);
+            bool idle = !service && !check && !retry && !core && !stopping && !exiting;
+            ok &= rights.CanConnect == idle && rights.CanSwitch == idle && rights.CanRecover == idle;
+            if (service) ok &= rights.Stop == ConnectionStates.StopIntent.None;
+            if (rights.Stop == ConnectionStates.StopIntent.ForceCore) ok &= core && stopping && force && !service;
+            if (rights.Stop == ConnectionStates.StopIntent.CancelConnection) ok &= check && !cancelled && !service && !core && !exiting;
+            if (rights.CanPrepareForConnection) ok &= check && !cancelled && !service && !core && !exiting;
+            if (rights.Stop == ConnectionStates.StopIntent.CancelRetry) ok &= retry && !check && !core && !service && !exiting;
+        }
+        Console.WriteLine(ok ? "OPERATION_MATRIX_PASS cases=256" : "OPERATION_MATRIX_FAIL");
+        return ok;
+    }
+
     private static bool ServiceGateInvariants()
     {
         Guid id = Guid.NewGuid();
@@ -855,7 +877,7 @@ internal static class Program
             && ValidateAuthInput("a", new string('b', 128), 1) != null
             && ValidateAuthInput("a", "b", 0) != null
             && ValidateAuthInput("a", "b\0", 1) != null
-            && ServiceGateInvariants() && CleanupScopeInvariants() && ServicePathInvariants() && HandoffInvariants() && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && ServiceIdentity.NativeLayoutIsValid() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
+            && OperationPermissionInvariants() && ServiceGateInvariants() && CleanupScopeInvariants() && ServicePathInvariants() && HandoffInvariants() && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && ServiceIdentity.NativeLayoutIsValid() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
             && !ServiceIdentity.IsKnownPublisher("fake telecom", "CN=fake telecom");
         Console.WriteLine(ok ? "LOGIC_PASS" : "LOGIC_FAIL");
         return ok ? 0 : 1;
@@ -1112,6 +1134,7 @@ internal static class Program
                 first.Show(); Application.DoEvents();
                 if (!first.CheckAdaptiveLayoutForTest()) return 1;
                 if (!first.CheckHandoffCancellationForTest()) return 1;
+                if (!first.CheckOperationProjectionForTest()) return 1;
                 if (!first.CheckCredentialSaveOrderingForTest()) return 1;
                 if (!first.CheckTrayAndSaveForTest()) return 1;
             }
@@ -1217,6 +1240,7 @@ internal static class Program
         private readonly Timer timer = new Timer();
         private readonly NotifyIcon tray = new NotifyIcon();
         private readonly ContextMenuStrip trayMenu = new ContextMenuStrip();
+        private ToolStripItem trayStop, trayRecover;
         private readonly CredentialStore credentials;
         private readonly ConnectionState state = new ConnectionState();
         private readonly bool isSelfTest;
@@ -1552,10 +1576,11 @@ internal static class Program
             tray.Icon = appIcon != null ? appIcon : SystemIcons.Application; // 复用同一个 Icon, 关闭时统一释放
             tray.Text = "澈知科技 - 校园网";
             trayMenu.Items.Add("打开主窗口", null, delegate { ShowFromTray(); });
-            trayMenu.Items.Add("停止认证", null, delegate { ShowFromTray(); StopClicked(stop, EventArgs.Empty); });
+            trayStop = trayMenu.Items.Add("停止认证", null, delegate { ShowFromTray(); StopClicked(stop, EventArgs.Empty); });
             trayMenu.Items.Add("清除已保存账号", null, delegate { ShowFromTray(); ForgetCredentials(); });
             trayMenu.Items.Add("导出诊断信息", null, delegate { ShowFromTray(); ExportDiagnostics(); });
-            trayMenu.Items.Add("核对遗留服务事务", null, async delegate { ShowFromTray(); await RecoverInterruptedJournalAsync(); });
+            trayRecover = trayMenu.Items.Add("核对遗留服务事务", null, async delegate { ShowFromTray(); await RecoverInterruptedJournalAsync(); });
+            trayMenu.Opening += delegate { RefreshOperationPermissions(); };
             trayMenu.Items.Add(new ToolStripSeparator());
             trayMenu.Items.Add("退出程序", null, delegate { ShowFromTray(); exitRequested = true; Close(); });
             tray.ContextMenuStrip = trayMenu;
@@ -1633,11 +1658,12 @@ internal static class Program
             timer.Tick += delegate {
                 if (stopping && running != null && !running.HasExited && grace.Elapsed.TotalSeconds >= 100)
                 {
-                    timer.Stop(); stop.Enabled = true; stop.Text = "强制结束"; StyleStopArmed(true);
+                    timer.Stop(); RefreshOperationPermissions();
                     SetStatus("等待停止已超过 100 秒。可点“强制结束”，服务器上的会话可能稍后才释放。", ToneFail);
                 }
             };
             FormClosing += OnClosing;
+            RefreshOperationPermissions();
         }
 
         protected override void Dispose(bool disposing)
@@ -1793,6 +1819,34 @@ internal static class Program
             return true;
         }
 
+        internal bool CheckOperationProjectionForTest()
+        {
+            bool ok = true;
+            // Idle -> pending connect -> cancellation -> service ownership -> idle.
+            Action<bool, bool, bool, string> check = delegate(bool allow, bool canStop, bool recover, string label) {
+                RefreshOperationPermissions();
+                ok &= connect.Enabled == allow && prepare.Enabled == allow && restore.Enabled == allow &&
+                    stop.Enabled == canStop && trayStop.Enabled == canStop && trayRecover.Enabled == recover &&
+                    stop.Text == label && trayStop.Text == label;
+            };
+            userStopped = false;
+            check(true, false, true, "停止认证");
+            connectCheckPending = true;
+            check(false, true, false, "取消连接");
+            serviceBusy = true;
+            check(false, false, false, "停止认证");
+            serviceBusy = false; userStopped = true;
+            check(false, false, false, "停止认证");
+            connectCheckPending = false;
+            check(true, false, true, "停止认证");
+            retryTimer.Start();
+            check(false, true, false, "取消重试");
+            retryTimer.Stop();
+            check(true, false, true, "停止认证");
+            Console.WriteLine(ok ? "UI_OPERATION_PASS" : "UI_OPERATION_FAIL");
+            return ok;
+        }
+
         internal bool CheckHandoffCancellationForTest()
         {
             // Exercise the actual asynchronous preflight with injected observations.
@@ -1905,7 +1959,7 @@ internal static class Program
                 journal.Begin("prepare", "Running");
                 // Inject the same ownership transfer state as a timed-out helper.
                 pendingServiceChild = stub; pendingServiceJournal = journal; serviceBusy = true;
-                connect.Enabled = false; prepare.Enabled = false; restore.Enabled = false;
+                RefreshOperationPermissions();
                 readServiceState = delegate { return "StopPending"; };
                 if (!PumpTaskForTest(PollTimedOutServiceAsync(), 3000) || !serviceBusy) return false;
                 Task<bool> conflicting = RunServiceAction(false);
@@ -2575,6 +2629,33 @@ internal static class Program
             UpdateConnectionPill();
         }
 
+        private ConnectionStates.OperationPermissions CurrentPermissions()
+        {
+            bool owned = running != null && !Object.ReferenceEquals(running, completedProcess);
+            bool force = stopping && grace != null && grace.Elapsed.TotalSeconds >= 100;
+            return ConnectionStates.DecideOperations(serviceBusy, connectCheckPending, retryTimer.Enabled,
+                owned, stopping, force, exitRequested, userStopped);
+        }
+
+        private void RefreshOperationPermissions()
+        {
+            if (IsDisposed || Disposing || resourcesDisposed) return;
+            var rights = CurrentPermissions();
+            connect.Enabled = rights.CanConnect;
+            prepare.Enabled = restore.Enabled = rights.CanSwitch;
+            stop.Enabled = rights.Stop != ConnectionStates.StopIntent.None;
+            switch (rights.Stop)
+            {
+                case ConnectionStates.StopIntent.CancelConnection: stop.Text = "取消连接"; break;
+                case ConnectionStates.StopIntent.CancelRetry: stop.Text = "取消重试"; break;
+                case ConnectionStates.StopIntent.ForceCore: stop.Text = "强制结束"; break;
+                default: stop.Text = rights.Phase == ConnectionStates.OperationPhase.Stopping ? "正在停止…" : "停止认证"; break;
+            }
+            StyleStopArmed(rights.Stop == ConnectionStates.StopIntent.ForceCore);
+            if (trayStop != null) { trayStop.Enabled = stop.Enabled; trayStop.Text = stop.Text; }
+            if (trayRecover != null) trayRecover.Enabled = rights.CanRecover;
+        }
+
         private void StyleStopArmed(bool armed)
         {
             stop.Tag = armed ? ButtonKind.DangerFilled : ButtonKind.Danger;
@@ -2635,8 +2716,7 @@ internal static class Program
 
         private async void ConnectClicked(object sender, EventArgs e)
         {
-            if (serviceBusy || connectCheckPending || retryTimer.Enabled || exitRequested ||
-                (running != null && !Object.ReferenceEquals(running, completedProcess))) return;
+            if (!CurrentPermissions().CanConnect) return;
             string invalid = ValidateAuthInput(account.Text, password.Text, channel.SelectedIndex + 1);
             if (invalid != null) { SetStatus(invalid, ToneWarn); return; }
             retryTimer.Stop();
@@ -2648,10 +2728,9 @@ internal static class Program
 
         private async Task RecoverInterruptedJournalAsync()
         {
-            if (isSelfTest || serviceBusy || connectCheckPending || retryTimer.Enabled || activeTask != null || exitRequested ||
-                (running != null && !Object.ReferenceEquals(running, completedProcess))) return;
+            if (isSelfTest || !CurrentPermissions().CanRecover || activeTask != null) return;
             int generation = ++taskGeneration;
-            serviceBusy = true; connect.Enabled = false; prepare.Enabled = false; restore.Enabled = false; stop.Enabled = false;
+            serviceBusy = true; RefreshOperationPermissions();
             try
             {
                 var journal = ServiceJournal.Load(ServiceJournal.DefaultPath());
@@ -2686,7 +2765,7 @@ internal static class Program
             finally
             {
                 serviceBusy = false;
-                if (!IsDisposed && !Disposing) { connect.Enabled = true; prepare.Enabled = true; restore.Enabled = true; }
+                RefreshOperationPermissions();
             }
         }
 
@@ -2709,13 +2788,12 @@ internal static class Program
                 activeTask = null; retryTimer.Stop();
                 state.TrySetAuth(ConnectionStates.AuthState.Idle, "unresolved journal");
                 UpdateConnectionPill();
-                connect.Enabled = true; prepare.Enabled = true; restore.Enabled = true; stop.Enabled = false; stop.Text = "停止认证";
+                RefreshOperationPermissions();
                 return;
             }
             bool automaticRetry = autoRetryCount > 0;
             connectCheckPending = true;
-            connect.Enabled = false; stop.Enabled = true; stop.Text = "取消连接";
-            prepare.Enabled = false; restore.Enabled = false;
+            RefreshOperationPermissions();
             state.TrySetAuth(ConnectionStates.AuthState.Idle, "new preflight");
             SetHandoff(ConnectionStates.HandoffState.Checking, "正在检查天翼服务和残留进程……", ToneInfo, true);
             bool ready = false;
@@ -2747,9 +2825,8 @@ internal static class Program
                 connectCheckPending = false;
                 if (!IsDisposed && !Disposing)
                 {
-                    prepare.Enabled = !serviceBusy; restore.Enabled = !serviceBusy;
-                    if (!ready || HandoffCancelled(generation, true))
-                    { activeTask = null; connect.Enabled = !serviceBusy; stop.Enabled = false; stop.Text = "停止认证"; }
+                    if (!ready || HandoffCancelled(generation, true)) activeTask = null;
+                    RefreshOperationPermissions();
                 }
             }
             if (!ready || HandoffCancelled(generation, true)) return;
@@ -2763,7 +2840,6 @@ internal static class Program
             if (activeTask == null || userStopped || serviceBusy || exitRequested) return;
             if (isSelfTest && mode == "--ephemeral-auth") throw new InvalidOperationException("Offline test cannot authenticate.");
             if (running != null && !Object.ReferenceEquals(running, completedProcess)) return;
-            connect.Enabled = false;
             try
             {
                 if (running != null) { DisposeCoreProcess(running); running = null; }
@@ -2773,8 +2849,7 @@ internal static class Program
                 stop.Text = "停止认证"; StyleStopArmed(false); timer.Stop();
                 running = LaunchCore(mode, activeTask.Username, activeTask.Password, activeTask.Channel, OnCoreStatus);
                 password.UseSystemPasswordChar = true; reveal.Text = "显示";
-                connect.Text = "连接中…"; stop.Enabled = true;
-                prepare.Enabled = false; restore.Enabled = false;
+                connect.Text = "连接中…"; RefreshOperationPermissions();
                 lastNetworkEvidence = 0;
                 state.SetCore(ConnectionStates.CoreState.Running);
                 state.SetNetwork(ConnectionStates.NetworkState.Unknown);
@@ -2801,9 +2876,7 @@ internal static class Program
                 state.Failure = ConnectionStates.FailureKind.Runtime;
                 SetAuthState(ConnectionStates.AuthState.Failed, ex is ArgumentException ? ex.Message : "启动认证失败，请重试。", ToneFail);
                 SetStatus(ex is ArgumentException ? ex.Message : "启动认证失败，请重试。", ToneFail);
-                connect.Text = "立即连接"; connect.Enabled = true;
-                stop.Enabled = false; stop.Text = "停止认证";
-                prepare.Enabled = true; restore.Enabled = true;
+                connect.Text = "立即连接"; RefreshOperationPermissions();
             }
         }
 
@@ -2816,8 +2889,7 @@ internal static class Program
             autoRetryCount++;
             int delay = autoRetryCount == 1 ? 10000 : 40000;
             retryTimer.Stop(); retryTimer.Interval = delay; retryTimer.Start();
-            stop.Enabled = true; stop.Text = "取消重试";
-            connect.Enabled = false; prepare.Enabled = false; restore.Enabled = false;
+            RefreshOperationPermissions();
             SetAuthState(ConnectionStates.AuthState.RetryScheduled, "网络探测失败（退出码 " + exitCode + "），" + (delay / 1000) + " 秒后重试（第 " + autoRetryCount + "/2 次）。", ToneWarn, true);
         }
 
@@ -2826,7 +2898,7 @@ internal static class Program
             if (!retryTimer.Enabled) return;
             retryTimer.Stop();
             if (userStopped || exitRequested || serviceBusy || stopping || activeTask == null ||
-                state.Auth != ConnectionStates.AuthState.RetryScheduled || isSelfTest) return;
+                state.Auth != ConnectionStates.AuthState.RetryScheduled || isSelfTest) { RefreshOperationPermissions(); return; }
             await CheckAndStartAsync(taskGeneration);
         }
 
@@ -3010,9 +3082,7 @@ internal static class Program
         {
             if (!Object.ReferenceEquals(running, started) || Object.ReferenceEquals(completedProcess, started)) return;
             completedProcess = started;
-            timer.Stop(); stopping = false; stop.Enabled = false; stop.Text = "停止认证";
-            StyleStopArmed(false); connect.Enabled = true; connect.Text = "立即连接";
-            prepare.Enabled = true; restore.Enabled = true;
+            timer.Stop(); stopping = false; connect.Text = "立即连接";
             int code = -1;
             try { code = started.ExitCode; } catch { }
             bool crashed = code != 0 && !authFailureSeen && !userStopped;
@@ -3040,6 +3110,7 @@ internal static class Program
                 SetAuthState(ConnectionStates.AuthState.Idle, "认证已停止。服务器上的会话可能稍后才释放。", ToneWarn);
                 activeTask = null;
             }
+            RefreshOperationPermissions();
             if (closingAfterStop) { closingAfterStop = false; Close(); }
         }
 
@@ -3050,26 +3121,25 @@ internal static class Program
             userStopped = true; taskGeneration++; retryTimer.Stop(); activeTask = null;
             if (running == null || running.HasExited)
             {
-                stop.Enabled = false; stop.Text = "停止认证";
-                connect.Enabled = !connectCheckPending && !serviceBusy;
-                prepare.Enabled = connect.Enabled; restore.Enabled = connect.Enabled;
+                RefreshOperationPermissions();
                 state.SetHandoff(ConnectionStates.HandoffState.None);
                 SetAuthState(ConnectionStates.AuthState.Idle, "已取消连接或重试。", ToneInfo);
                 return;
             }
             if (stopping) return;
-            stopping = true; stop.Enabled = false; stop.Text = "正在停止…"; StyleStopArmed(false);
+            stopping = true; grace = Stopwatch.StartNew(); RefreshOperationPermissions();
             state.SetCore(ConnectionStates.CoreState.Stopping);
             SetAuthState(ConnectionStates.AuthState.LoggingOut, "正在停止认证……", ToneWarn, true);
-            grace = Stopwatch.StartNew(); timer.Start();
+            timer.Start();
             bool sent = RequestStop(running);
             SetStatus(sent ? "正在停止认证，等待程序清理退出……" : "停止指令未收到确认，继续等待退出……", ToneWarn, true);
         }
 
         private void StopClicked(object sender, EventArgs e)
         {
-            if (!stopping) { try { BeginStop(); } catch { SetStatus("停止请求发送失败，窗口将保持开启。", ToneFail); } return; }
-            if (grace == null || grace.Elapsed.TotalSeconds < 100) return;
+            var intent = CurrentPermissions().Stop;
+            if (intent == ConnectionStates.StopIntent.None) return;
+            if (intent != ConnectionStates.StopIntent.ForceCore) { try { BeginStop(); } catch { SetStatus("停止请求发送失败，窗口将保持开启。", ToneFail); } return; }
             Process target = running;
             if (MessageBox.Show(this, "强制结束可能让服务器会话多保留一会儿，确定立即结束认证进程？", "强制结束", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
             try { if (stopping && target != null && Object.ReferenceEquals(running, target) && !target.HasExited) target.Kill(); }
@@ -3090,16 +3160,16 @@ internal static class Program
                 try { if (running != null && !running.HasExited) RequestStop(running); } catch { }
                 return;
             }
-            if (serviceBusy) { e.Cancel = true; exitRequested = false; SetStatus("正在处理服务操作，请稍候……", ToneWarn, true); return; }
+            if (serviceBusy) { e.Cancel = true; exitRequested = false; RefreshOperationPermissions(); SetStatus("正在处理服务操作，请稍候……", ToneWarn, true); return; }
             if (running == null || running.HasExited) { userStopped = true; taskGeneration++; retryTimer.Stop(); activeTask = null; return; }
             e.Cancel = true;
-            if (!stopping && MessageBox.Show(this, "退出将断开校园网认证，共享的热点也会断网。确定退出？", "退出澈知科技", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) { exitRequested = false; return; }
+            if (!stopping && MessageBox.Show(this, "退出将断开校园网认证，共享的热点也会断网。确定退出？", "退出澈知科技", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) { exitRequested = false; RefreshOperationPermissions(); return; }
             // 核心可能在确认框期间已自行退出 (确认框会泵消息): 此时无需再等待, 直接放行关闭
             if (running.HasExited) { stopping = false; e.Cancel = false; return; }
             userStopped = true; retryTimer.Stop(); // 确认退出=停止意图：取消待执行的自动重试
             closingAfterStop = true;
             ShowFromTray();
-            try { BeginStop(); } catch { exitRequested = false; closingAfterStop = false; SetStatus("停止请求发送失败，窗口将保持开启。", ToneFail); }
+            try { BeginStop(); } catch { exitRequested = false; closingAfterStop = false; RefreshOperationPermissions(); SetStatus("停止请求发送失败，窗口将保持开启。", ToneFail); }
         }
 
         // A09：程序重启后识别未完成的服务切换，向用户提供"经授权的恢复选项"（不擅自操作服务）
@@ -3198,14 +3268,12 @@ internal static class Program
 
         private async Task<bool> RunServiceAction(bool forPrepare, bool fromConnect = false)
         {
-            if (serviceBusy || (connectCheckPending && !fromConnect) || retryTimer.Enabled || exitRequested) return false;
-            if (running != null && !Object.ReferenceEquals(running, completedProcess))
-            { MessageBox.Show(this, "请先停止本程序的认证，再执行切换。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information); return false; }
+            var rights = CurrentPermissions();
+            if (exitRequested || (fromConnect ? !rights.CanPrepareForConnection : !rights.CanSwitch)) return false;
             if (!fromConnect) { taskGeneration++; state.TrySetAuth(ConnectionStates.AuthState.Idle, "handoff request"); }
             if (!JournalAllowsNewAction()) return false;
             int generation = taskGeneration;
-            serviceBusy = true; prepare.Enabled = false; restore.Enabled = false; connect.Enabled = false;
-            if (fromConnect) stop.Enabled = false;
+            serviceBusy = true; RefreshOperationPermissions();
             ServiceJournal journal = null;
             bool started = false;
             int? code = null;
@@ -3321,11 +3389,7 @@ internal static class Program
             finally
             {
                 serviceBusy = pendingServiceChild != null;
-                if (!IsDisposed && !Disposing)
-                {
-                    prepare.Enabled = !serviceBusy && !connectCheckPending; restore.Enabled = prepare.Enabled; connect.Enabled = prepare.Enabled;
-                    if (fromConnect && connectCheckPending) stop.Enabled = !serviceBusy;
-                }
+                RefreshOperationPermissions();
             }
         }
 
@@ -3357,8 +3421,7 @@ internal static class Program
             if (!IsDisposed && !Disposing && Object.ReferenceEquals(pendingServiceChild, child))
             {
                 pendingServiceChild = null; pendingServiceJournal = null; child.Dispose();
-                serviceBusy = false; connect.Enabled = true; prepare.Enabled = true; restore.Enabled = true;
-                stop.Enabled = false; stop.Text = "停止认证";
+                serviceBusy = false; RefreshOperationPermissions();
             }
         }
 

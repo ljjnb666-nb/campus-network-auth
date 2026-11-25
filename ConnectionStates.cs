@@ -33,6 +33,39 @@ internal static class ConnectionStates
         return service == ServiceState.Running ? HandoffDecision.NeedStopService : HandoffDecision.Ready;
     }
 
+    internal enum OperationPhase { Idle, Checking, Cancelling, ActiveCore, Stopping, ForceAvailable, RetryWaiting, ServiceBusy, Exiting }
+    internal enum StopIntent { None, CancelConnection, CancelRetry, StopCore, ForceCore }
+
+    // Pure projection of operation ownership; UI and command admission share it.
+    internal sealed class OperationPermissions
+    {
+        internal readonly OperationPhase Phase;
+        internal readonly StopIntent Stop;
+        internal bool CanConnect { get { return Phase == OperationPhase.Idle; } }
+        internal bool CanSwitch { get { return Phase == OperationPhase.Idle; } }
+        internal bool CanRecover { get { return Phase == OperationPhase.Idle; } }
+        internal bool CanPrepareForConnection { get { return Phase == OperationPhase.Checking; } }
+        internal OperationPermissions(OperationPhase phase, StopIntent stop) { Phase = phase; Stop = stop; }
+    }
+
+    internal static OperationPermissions DecideOperations(bool serviceBusy, bool preflight, bool retryWaiting,
+        bool coreOwned, bool stopping, bool forceAvailable, bool exitRequested, bool cancelled)
+    {
+        if (serviceBusy) return new OperationPermissions(OperationPhase.ServiceBusy, StopIntent.None);
+        if (coreOwned)
+        {
+            if (stopping) return new OperationPermissions(forceAvailable ? OperationPhase.ForceAvailable : OperationPhase.Stopping,
+                forceAvailable ? StopIntent.ForceCore : StopIntent.None);
+            return new OperationPermissions(OperationPhase.ActiveCore, StopIntent.StopCore);
+        }
+        if (exitRequested) return new OperationPermissions(OperationPhase.Exiting, StopIntent.None);
+        if (preflight) return new OperationPermissions(cancelled ? OperationPhase.Cancelling : OperationPhase.Checking,
+            cancelled ? StopIntent.None : StopIntent.CancelConnection);
+        if (retryWaiting) return new OperationPermissions(OperationPhase.RetryWaiting, StopIntent.CancelRetry);
+        if (stopping) return new OperationPermissions(OperationPhase.Stopping, StopIntent.None);
+        return new OperationPermissions(OperationPhase.Idle, StopIntent.None);
+    }
+
     // 一次性操作结果（仅影响提示文案与配色，不影响连接状态）
     internal enum OpResult { Information, Success, Warning, Error }
 }
