@@ -1,87 +1,158 @@
 ﻿<#
 .SYNOPSIS
-对照 curl 官方漏洞数据库（https://curl.se/docs/vuln.json）精确检查固定版本的已知 CVE。
-
+Verify the pinned curl release against the official version-based advisory data.
 .DESCRIPTION
-按 OSV 语义评估 affected 区间（introduced <= V < fixed，含开放式区间）、
-显式 versions 列表与 last_affected 兜底；同时报告"提到该版本但不受影响"
-（例如在该版本修复）的条目数量，避免子串误报。结果作为人工复核证据，
-不阻断构建（CI 中 continue-on-error）。
+Numeric release ranges only. Git commit ranges are not comparable to release
+versions. Cross-check the result against curl's version-specific JSON feed.
+Findings require release review; malformed data and disagreement fail CI.
 #>
 param(
     [string]$Version = '8.23.0',
-    [string]$VulnUrl = 'https://curl.se/docs/vuln.json'
+    [string]$VulnUrl = 'https://curl.se/docs/vuln.json',
+    [switch]$SelfTest
 )
 $ErrorActionPreference = 'Stop'
 
-function Compare-Semver([string]$a, [string]$b) {
-    # curl 版本均为数字点分（如 8.23.0），逐段数值比较；非数字段按字符串比较
+function Compare-Release([string]$a, [string]$b) {
+    foreach ($value in @($a, $b)) {
+        if ($value -notmatch '^\d+(\.\d+){0,3}$') { throw "Unsupported release version: $value" }
+    }
     $pa = $a -split '\.'
     $pb = $b -split '\.'
     for ($i = 0; $i -lt [Math]::Max($pa.Count, $pb.Count); $i++) {
-        $x = if ($i -lt $pa.Count) { $pa[$i] } else { '0' }
-        $y = if ($i -lt $pb.Count) { $pb[$i] } else { '0' }
-        $nx = 0; $ny = 0
-        $bothNum = [int]::TryParse($x, [ref]$nx) -and [int]::TryParse($y, [ref]$ny)
-        $cmp = if ($bothNum) { $nx.CompareTo($ny) } else { [string]::Compare($x, $y) }
+        $x = if ($i -lt $pa.Count) { [long]$pa[$i] } else { 0L }
+        $y = if ($i -lt $pb.Count) { [long]$pb[$i] } else { 0L }
+        $cmp = $x.CompareTo([long]$y)
         if ($cmp -ne 0) { return $cmp }
     }
     return 0
 }
 
 function Test-EntryAffected($entry, [string]$v) {
+    $matched = $false
+    $hasReleaseEvidence = $false
     foreach ($aff in @($entry.affected)) {
         if ($null -eq $aff) { continue }
-        # 显式版本列表
-        if ($aff.versions -and (@($aff.versions) -contains $v)) { return $true }
-        # OSV 区间: introduced <= v < fixed（成对消费事件流，fixed 缺失=开放式）
+        if ($aff.PSObject.Properties['versions'] -and $null -ne $aff.versions) {
+            $hasReleaseEvidence = $true
+            if (@($aff.versions) -contains $v) { $matched = $true }
+        }
         foreach ($range in @($aff.ranges)) {
             if ($null -eq $range) { continue }
+            if ($range.type -eq 'GIT') { continue }
+            if ($range.type -ne 'SEMVER' -and $range.type -ne 'ECOSYSTEM') {
+                throw "Unsupported range type in $($entry.id): $($range.type)"
+            }
+            $hasReleaseEvidence = $true
             $introduced = $null
-            foreach ($ev in @($range.events)) {
-                if ($null -eq $ev) { continue }
-                if ($ev.PSObject.Properties['introduced']) {
-                    if ($introduced -ne $null -and (Compare-Semver $introduced $v) -le 0) { return $true } # 开放式上一段
-                    $introduced = [string]$ev.introduced
-                } elseif ($ev.PSObject.Properties['fixed']) {
-                    if ($introduced -ne $null -and (Compare-Semver $introduced $v) -le 0 -and (Compare-Semver $v ([string]$ev.fixed)) -lt 0) { return $true }
-                    $introduced = $null
-                } elseif ($ev.PSObject.Properties['last_affected']) {
-                    if ($introduced -ne $null -and (Compare-Semver $introduced $v) -le 0 -and (Compare-Semver $v ([string]$ev.last_affected)) -le 0) { return $true }
+            $events = @($range.events)
+            if (-not $range.events -or $events.Count -eq 0) { throw "Empty range in $($entry.id)" }
+            foreach ($ev in $events) {
+                $keys = @($ev.PSObject.Properties.Name)
+                if ($keys.Count -ne 1 -or $keys[0] -notin @('introduced','fixed','last_affected','limit')) {
+                    throw "Invalid event in $($entry.id)"
+                }
+                $key = $keys[0]
+                $value = [string]$ev.$key
+                [void](Compare-Release $value $value)
+                if ($key -eq 'introduced') {
+                    if ($null -ne $introduced) { throw "Unclosed range in $($entry.id)" }
+                    $introduced = $value
+                } else {
+                    if ($null -eq $introduced -or (Compare-Release $introduced $value) -gt 0) {
+                        throw "Invalid range boundary in $($entry.id)"
+                    }
+                    $upper = Compare-Release $v $value
+                    if ((Compare-Release $introduced $v) -le 0 -and
+                        ($upper -lt 0 -or ($key -eq 'last_affected' -and $upper -eq 0))) { $matched = $true }
                     $introduced = $null
                 }
             }
-            if ($introduced -ne $null -and (Compare-Semver $introduced $v) -le 0) { return $true } # 区间未闭合
+            if ($null -ne $introduced -and (Compare-Release $introduced $v) -le 0) { $matched = $true }
         }
     }
-    # database_specific.last_affected 兜底（无区间数据时）
-    if ($entry.database_specific -and $entry.database_specific.last_affected) {
-        if ((Compare-Semver $v ([string]$entry.database_specific.last_affected)) -le 0) { return $true }
-    }
-    return $false
+    # An upper bound alone cannot establish introduction. Do not invent an
+    # affected range from database_specific.last_affected.
+    if (-not $hasReleaseEvidence) { throw "No release-version evidence in $($entry.id)" }
+    return $matched
 }
 
-try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    $raw = (Invoke-WebRequest -Uri $VulnUrl -UseBasicParsing).Content
-    $vulns = ConvertFrom-Json $raw
-    if (-not $vulns -or @($vulns).Count -eq 0) { throw '漏洞库为空，不能作为扫描通过证据' }
-    $affected = @()
-    $mentioned = 0
-    foreach ($v in $vulns) {
-        if (Test-EntryAffected $v $Version) { $affected += $v }
-        elseif (($v | ConvertTo-Json -Depth 8 -Compress) -match [regex]::Escape($Version)) { $mentioned++ }
+function Assert-Affected($entry, [string]$version, [bool]$expected) {
+    if ((Test-EntryAffected $entry $version) -ne $expected) {
+        throw "Fixture mismatch: $($entry.id) $version expected=$expected"
     }
-    Write-Host "curl $Version 已知漏洞核查（OSV 区间精确判定）：受影响 $($affected.Count) 条"
-    foreach ($v in $affected) {
-        $sev = if ($v.database_specific -and $v.database_specific.severity) { $v.database_specific.severity } else { '?' }
-        $sum = if ($v.summary) { $v.summary } else { '' }
-        Write-Host ("  - {0} [{1}] {2}" -f $v.id, $sev, $sum)
-    }
-    if ($mentioned -gt 0) { Write-Host "另有 $mentioned 条记录提及该版本但按区间判定不受影响（多为其修复版本或无关区间）。" }
-    if ($affected.Count -gt 0) { Write-Host '请人工核对上述条目是否影响本项目的使用面（纯 HTTP、Schannel、静态链接、无代理/SSH/多协议）。' }
-    else { Write-Host '官方漏洞库中未发现影响该版本的记录。' }
-} catch {
-    throw "漏洞库获取或解析失败：$($_.Exception.Message)"
 }
+
+function Invoke-RangeTests {
+    # Reduced fixtures using the shape of curl's public advisory JSON:
+    # CVE-2023-38545: fixed at 8.4.0, alongside a nonnumeric Git range.
+    $mixed = ConvertFrom-Json '{"id":"mixed","affected":[{"ranges":[{"type":"SEMVER","events":[{"introduced":"7.69.0"},{"fixed":"8.4.0"}]},{"type":"GIT","events":[{"introduced":"4a4b63daaa"},{"fixed":"fb4415d8aa"}]}],"versions":["8.3.0"]}],"database_specific":{"last_affected":"8.3.0"}}'
+    Assert-Affected $mixed '8.23.0' $false
+    Assert-Affected $mixed '8.4.0' $false
+    Assert-Affected $mixed '8.3.0' $true
+    Assert-Affected $mixed '7.68.0' $false
+    # CVE-2026-107929: disjoint release intervals, fixed at 8.23.0.
+    $multi = ConvertFrom-Json '{"id":"multi","affected":[{"ranges":[{"type":"SEMVER","events":[{"introduced":"8.9.0"},{"fixed":"8.14.3"},{"introduced":"8.15.0"},{"fixed":"8.16.2"},{"introduced":"8.17.0"},{"fixed":"8.20.2"},{"introduced":"8.21.0"},{"fixed":"8.23.0"}]}]}],"database_specific":{"last_affected":"8.22.0"}}'
+    Assert-Affected $multi '8.23.0' $false
+    Assert-Affected $multi '8.22.0' $true
+    Assert-Affected $multi '8.14.3' $false
+    Assert-Affected $multi '8.16.2' $false
+    Assert-Affected $multi '8.17.0' $true
+    $inclusive = ConvertFrom-Json '{"id":"inclusive","affected":[{"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"last_affected":"8.2.0"}]}]}]}'
+    Assert-Affected $inclusive '8.2.0' $true
+    Assert-Affected $inclusive '8.2.1' $false
+    $limit = ConvertFrom-Json '{"id":"limit","affected":[{"ranges":[{"type":"SEMVER","events":[{"introduced":"8.1.0"},{"limit":"8.3.0"}]}]}]}'
+    Assert-Affected $limit '8.3.0' $false
+    Assert-Affected $limit '8.2.0' $true
+    $open = ConvertFrom-Json '{"id":"open","affected":[{"ranges":[{"type":"SEMVER","events":[{"introduced":"8.23.0"}]}]}]}'
+    Assert-Affected $open '8.23.0' $true
+    Assert-Affected $open '8.22.0' $false
+    $explicit = ConvertFrom-Json '{"id":"explicit","affected":[{"versions":["8.23.0"]}]}'
+    Assert-Affected $explicit '8.23.0' $true
+    Assert-Affected $explicit '8.24.0' $false
+    $invalid = ConvertFrom-Json '{"id":"invalid","affected":[{"ranges":[{"type":"GIT","events":[{"introduced":"abcd"}]}]}]}'
+    $rejected = $false
+    try { [void](Test-EntryAffected $invalid '8.23.0') } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Git-only record must not be accepted as release evidence' }
+    Console-WriteTestResult
+}
+function Console-WriteTestResult { Write-Host 'CURL_RANGE_TEST_PASS' }
+
+Invoke-RangeTests
+if ($SelfTest) { exit 0 }
+
+function Read-AdvisoryFeed([string]$url, [bool]$allowEmpty) {
+    $raw = (Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30).Content
+    if ($raw -is [byte[]]) { $raw = [Text.Encoding]::UTF8.GetString($raw) }
+    $trimmed = ([string]$raw).Trim()
+    if (-not $trimmed.StartsWith('[') -or -not $trimmed.EndsWith(']')) { throw "Expected JSON array: $url" }
+    $items = @(ConvertFrom-Json $trimmed | Where-Object { $null -ne $_ })
+    if (-not $allowEmpty -and $items.Count -eq 0) { throw "Empty advisory database: $url" }
+    $seen = @{}
+    foreach ($item in $items) {
+        if ([string]$item.id -notmatch '^CURL-CVE-\d{4}-\d+$' -or $seen.ContainsKey([string]$item.id)) {
+            throw "Invalid or duplicate advisory ID: $url"
+        }
+        $seen[[string]$item.id] = $true
+    }
+    return $items
+}
+
+[void](Compare-Release $Version $Version)
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+$vulns = @(Read-AdvisoryFeed $VulnUrl $false)
+$affected = @($vulns | Where-Object { Test-EntryAffected $_ $Version })
+$official = @(Read-AdvisoryFeed "https://curl.se/docs/vuln-$Version.json" $true)
+$computedIds = @($affected | ForEach-Object { $_.id } | Sort-Object)
+$officialIds = @($official | ForEach-Object { $_.id } | Sort-Object)
+if (($computedIds -join ',') -cne ($officialIds -join ',')) {
+    throw "Advisory mismatch: computed=$($computedIds -join ',') official=$($officialIds -join ',')"
+}
+Write-Host "curl $Version release advisory count: $($affected.Count)"
+Write-Host "CURL_FEED_CROSSCHECK_PASS"
+foreach ($v in $affected) {
+    Write-Host ("  - {0} [{1}] {2}" -f $v.id, $v.database_specific.severity, $v.summary)
+}
+if ($affected.Count -gt 0) { Write-Host 'Findings require release applicability review.' }
+else { Write-Host 'No published advisories for this release in both feeds at scan time.' }
 exit 0

@@ -78,3 +78,8 @@ JOURNAL_RETRY_PASS：实际独占文件共享阻止原子替换，验证内存�
 
 - CLEANUP_SCOPE_PASS：仅清理本次创建的核心文件，不删除未知文件或其他同名前缀目录；拒绝 reparse point，不再扫描并递归删除历史 Chezhi-* 目录。旧崩溃残留需要单独确认后人工处理。
 - CORE_RESOURCE_PASS：30 次离线核心启动/退出（20 check、10 probe STOP），每轮要求真实退出码 0、STOP ACK（probe）、输出读取任务完成；记录前后句柄数作为诊断，不把短周期测试当作无泄漏或 72 小时运行证明。失败启动和离线测试仅回收本次自有核心，不操作任何官方客户端或提权 helper。
+
+
+## curl 公告扫描语义回归
+
+CURL_RANGE_TEST_PASS：按数值版本范围（SEMVER/ECOSYSTEM）判断，不比较 GIT commit；覆盖固定边界、多段间隙、last_affected、limit、开放区间、显式版本及仅 Git 的未知记录。CURL_FEED_CROSSCHECK_PASS：全量公告计算结果与官方版本专属 JSON 的 ID 集合完全一致才通过。网络、结构、数据不一致均失败；非空发现保留发布人工评估，不代表没有未知漏洞。

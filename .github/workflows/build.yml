@@ -122,6 +122,10 @@ jobs:
         shell: pwsh
         run: ./scripts/scan-secrets.ps1
 
+      - name: Offline curl advisory range regression
+        shell: pwsh
+        run: ./scripts/Test-CurlVulns.ps1 -SelfTest
+
       - name: Dependency vulnerability check (curl; findings require release review)
         shell: pwsh
         run: ./scripts/Test-CurlVulns.ps1

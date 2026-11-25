@@ -302,3 +302,8 @@ Push 45434982617 / PR 45435005570 success，日志 CREDENTIAL_ORDER_PASS 等通�
 ### 主动审计第四批（基线 b2d4bc0）
 
 Push 45547153523 / PR 45547161298 success，实际 JOURNAL_RETRY_PASS、CORE_LIFECYCLE_PASS、SERVICE_RECOVERY_PASS 及既有自测通过。新增发现：通配符递归清理可能删除非本实例目录；启动早期异常不在统一回收范围；输出读取任务登记未主动释放；迟到退出回调可影响新任务；服务完成后重复观测与持久化证据不一致。整改清理范围、失败启动回收、读取任务排空、退出回调身份及单一服务观察；新增 CLEANUP_SCOPE_PASS/CORE_RESOURCE_PASS 强制自测。新 CI 待验证。短期句柄计数为诊断，不宣称无泄漏。旧残留不自动清理；依赖评估 C14 仍开放（扫描报告 42 条，尚未验证适用性）。未修改 main 或实际校园网环境。
+
+
+### 依赖扫描根因审计（基线 0887c79）
+
+Push 45547797875 / PR 45547803893 success；CLEANUP_SCOPE_PASS / CORE_RESOURCE_PASS，30 次，句柄 243→326，未证明泄漏或无泄漏。旧 curl 扫描报告 42 条，源码未按 ranges.type 区分 GIT/SEMVER，将 Git 哈希与数字版本混比，且 last_affected 兜底无条件使用。2026-11-25 核对 https://curl.se/docs/vuln-8.23.0.html 和 https://curl.se/docs/vuln-8.23.0.json，官方版本页为 0，JSON []；https://curl.se/docs/CVE-2023-38545.json 与 https://curl.se/docs/CVE-2026-107929.json 均具有 SEMVER 与 GIT 两类范围，已分别在 8.4.0/8.23.0 修复。此次修复语义并新增离线样例、官方双源 ID 一致门禁；尚待新 CI，不能把旧 42 条直接认定为真实漏洞或整体安全。依赖版本和哈希不变，协议明文等独立风险仍开放。
