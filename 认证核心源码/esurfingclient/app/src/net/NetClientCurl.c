@@ -306,12 +306,14 @@ static size_t write_body(const void* contents, const size_t size, const size_t n
         return 0;
     }
 
-    char* ptr = resize(resp->body_data, resp->body_size + real_size + 1);
-
+    /* Allocate separately so a moving realloc cannot leave old payload
+     * bytes in the allocator. On failure the original owner stays intact. */
+    char* ptr = resize(NULL, resp->body_size + real_size + 1);
     if (!ptr) return 0;
-
+    if (resp->body_size != 0) memcpy(ptr, resp->body_data, resp->body_size);
+    memcpy(ptr + resp->body_size, contents, real_size);
+    if (resp->body_data) s_secure_free(resp->body_data, resp->body_size + 1);
     resp->body_data = ptr;
-    memcpy(&resp->body_data[resp->body_size], contents, real_size);
     resp->body_size += real_size;
     resp->body_data[resp->body_size] = 0;
 
@@ -344,6 +346,8 @@ bool net_callback_self_test(void)
     ok = write_body(data, 1, 4, &resp, fail_resize) == 0 &&
         resp.body_data == previous && resp.body_size == 4 && memcmp(previous, "abcd", 5) == 0 &&
         write_cb(data, 1, MAX_BODY_BYTES, &resp) == 0 && resp.body_size == 4;
+    ok = ok && write_cb(data, 1, 4, &resp) == 4 &&
+        resp.body_size == 8 && memcmp(resp.body_data, "abcdabcd", 9) == 0;
     curl_resp_free(&resp);
     if (!ok) return false;
     char* body = malloc(MAX_BODY_BYTES);
@@ -465,7 +469,7 @@ void log_curl_error(CURL* curl, const CURLcode code, const char *errbuf, const c
 
     if (errbuf && errbuf[0] != '\0')
     {
-        LOG_DEBUG("[%s] 错误详情: %s", func_name, errbuf);
+        LOG_DEBUG("[%s] curl 返回附加错误详情 (内容不记录)", func_name);
     }
 
     if (curl)
