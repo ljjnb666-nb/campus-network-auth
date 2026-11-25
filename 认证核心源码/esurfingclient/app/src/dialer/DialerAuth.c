@@ -1,3 +1,4 @@
+#include "cipher/CipherUtils.h"
 #include "DialerInternal.h"
 
 #include "dialer/DialerClient.h"
@@ -121,9 +122,9 @@ AuthStatus auth(void)
             if (raw_ticket_url != NULL)
             {
                 portal_ticket_url = clean_cdata(raw_ticket_url);
-                free(raw_ticket_url);
+                s_secure_free_string(raw_ticket_url);
             }
-            free(portal_config);
+            s_secure_free_string(portal_config);
         }
     }
     else
@@ -146,11 +147,11 @@ AuthStatus auth(void)
     if (client_ip == NULL)
     {
         LOG_ERROR("提取 Client IP 失败");
-        free(portal_ticket_url);
+        s_secure_free_string(portal_ticket_url);
         return AUTH_FAILED;
     }
     snprintf(cfg->client_ip, IP_LEN, "%s", safe_str(client_ip));
-    free(client_ip);
+    s_secure_free_string(client_ip);
     LOG_DEBUG("Client IP: %s", cfg->client_ip);
 
     char* ac_ip = extract_url_param(g_prog_status[tl_thread_idx].last_location, "wlanacip");
@@ -161,21 +162,21 @@ AuthStatus auth(void)
     if (ac_ip == NULL)
     {
         LOG_ERROR("提取 AC IP 失败");
-        free(portal_ticket_url);
+        s_secure_free_string(portal_ticket_url);
         return AUTH_FAILED;
     }
     snprintf(cfg->ac_ip, IP_LEN, "%s", safe_str(ac_ip));
-    free(ac_ip);
+    s_secure_free_string(ac_ip);
     LOG_DEBUG("AC IP: %s", cfg->ac_ip);
 
-    free(portal_ticket_url);
+    s_secure_free_string(portal_ticket_url);
 
     /**
      * 4. ticket_url: 带 wlanuserip / wlanacip, 不带 portal_node
      */
     snprintf(cfg->ticket_url, TICKET_URL_LEN, "%s/ticket.cgi?wlanuserip=%s&wlanacip=%s",
              server, cfg->client_ip, cfg->ac_ip);
-    LOG_DEBUG("Ticket URL: %s", cfg->ticket_url);
+    LOG_DEBUG("Ticket URL 已构造 (查询参数不记录)");
 
     /**
      * 5. gwip: 报文里要填默认网关地址 (不是 AC 地址), 取不到就留空
