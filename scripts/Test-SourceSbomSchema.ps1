@@ -8,6 +8,28 @@ $pins = [ordered]@{
     'spdx.schema.json' = 'f04d013c74c48de35726e93e367f0f738f51135d'
     'jsf-0.82.schema.json' = 'f46bfb1e52731ad1280123ff3e2bd29bd18d4bc2'
 }
+function Get-GitBlobId([byte[]]$Bytes) {
+    $prefix = [Text.Encoding]::ASCII.GetBytes(('blob ' + $Bytes.Length.ToString([Globalization.CultureInfo]::InvariantCulture) + [char]0))
+    $sha1 = [Security.Cryptography.SHA1]::Create()
+    try {
+        [void]$sha1.TransformBlock($prefix, 0, $prefix.Length, $prefix, 0)
+        [void]$sha1.TransformFinalBlock($Bytes, 0, $Bytes.Length)
+        return [BitConverter]::ToString($sha1.Hash).Replace('-','').ToLowerInvariant()
+    } finally { $sha1.Dispose() }
+}
+function Assert-GitBlobId([byte[]]$Bytes, [string]$Expected) {
+    $actual = Get-GitBlobId $Bytes
+    if (-not [string]::Equals($actual, $Expected, [StringComparison]::Ordinal)) {
+        throw "Schema digest mismatch: expected=$Expected observed=$actual"
+    }
+}
+# Git's empty blob and a known nonempty blob exercise the header and bytes.
+Assert-GitBlobId ([byte[]]@()) 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391'
+Assert-GitBlobId ([Text.Encoding]::ASCII.GetBytes(('hello' + [char]10))) 'ce013625030ba8dba906f756967f9e9ca394464a'
+$rejected = $false
+try { Assert-GitBlobId ([byte[]]@(1)) 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391' } catch { $rejected = $true }
+if (-not $rejected) { throw 'Git blob hash negative control failed' }
+Write-Host 'SCHEMA_BLOB_HASH_SELFTEST_PASS'
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('ChezhiSchema-' + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $temp)
 try {
@@ -22,8 +44,8 @@ try {
         $bytes = [Convert]::FromBase64String([string]$blob.content)
         if ($bytes.Length -ne $blob.size) { throw "Schema blob size mismatch: $name" }
         [IO.File]::WriteAllBytes($file, $bytes)
-        $actual = (& git hash-object --no-filters -- $file | Select-Object -First 1)
-        if ($LASTEXITCODE -ne 0 -or $actual -cne $expected) { throw "Schema digest mismatch: $name expected=$expected observed=$actual" }
+        Assert-GitBlobId ([IO.File]::ReadAllBytes($file)) $expected
+        Write-Host "SCHEMA_BLOB_VERIFIED $name $expected"
         $schemas[$name] = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json -AsHashtable
     }
     function Rewrite-References($node, [bool]$jsf) {
