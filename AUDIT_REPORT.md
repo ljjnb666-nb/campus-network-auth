@@ -307,3 +307,8 @@ Push 45547153523 / PR 45547161298 success，实际 JOURNAL_RETRY_PASS、CORE_LIF
 ### 依赖扫描根因审计（基线 0887c79）
 
 Push 45547797875 / PR 45547803893 success；CLEANUP_SCOPE_PASS / CORE_RESOURCE_PASS，30 次，句柄 243→326，未证明泄漏或无泄漏。旧 curl 扫描报告 42 条，源码未按 ranges.type 区分 GIT/SEMVER，将 Git 哈希与数字版本混比，且 last_affected 兜底无条件使用。2026-11-25 核对 https://curl.se/docs/vuln-8.23.0.html 和 https://curl.se/docs/vuln-8.23.0.json，官方版本页为 0，JSON []；https://curl.se/docs/CVE-2023-38545.json 与 https://curl.se/docs/CVE-2026-107929.json 均具有 SEMVER 与 GIT 两类范围，已分别在 8.4.0/8.23.0 修复。此次修复语义并新增离线样例、官方双源 ID 一致门禁；尚待新 CI，不能把旧 42 条直接认定为真实漏洞或整体安全。依赖版本和哈希不变，协议明文等独立风险仍开放。
+
+
+### 主动审计第五批（基线 816a05f）
+
+Push 45550140241 / PR 45550145561 success；CURL_RANGE_TEST_PASS、CURL_FEED_CROSSCHECK_PASS，官方双源 8.23.0 公告数 0。30 次资源测试仍为 243→326。源码发现重定向流主动获取后未统一显式关闭、FormClosed 清理遗漏直接 Dispose。新增读者 using、退出后 stdin 释放、统一 Process 和窗口 Dispose 入口、10 次预热+100 次分段采样及 32 句柄预算、逐轮流关闭断言、5 次直接窗口释放回归。新 CI 待核实，不推定 83 个句柄均为泄漏，不推定无泄漏。真实环境、72h、跨进程服务事务和签名发布仍未验收。

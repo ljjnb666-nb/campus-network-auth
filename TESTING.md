@@ -83,3 +83,8 @@ JOURNAL_RETRY_PASS：实际独占文件共享阻止原子替换，验证内存�
 ## curl 公告扫描语义回归
 
 CURL_RANGE_TEST_PASS：按数值版本范围（SEMVER/ECOSYSTEM）判断，不比较 GIT commit；覆盖固定边界、多段间隙、last_affected、limit、开放区间、显式版本及仅 Git 的未知记录。CURL_FEED_CROSSCHECK_PASS：全量公告计算结果与官方版本专属 JSON 的 ID 集合完全一致才通过。网络、结构、数据不一致均失败；非空发现保留发布人工评估，不代表没有未知漏洞。
+
+
+## 资源回收分段压力测试
+
+CORE_RESOURCE_PASS：10 次预热 + 100 次离线核心循环，每次校验退出、STOP（probe）、读任务排空、登记移除、三个重定向流关闭；每 25 次采样句柄/私有内存/线程数，预热后采样最大句柄增长超过 32 则失败。32 是初始 CI 回归预算，不是 Windows 资源泄漏数学证明；内存/线程数为诊断。UI_DISPOSE_PASS：重复 5 次直接释放窗口（不依赖 FormClosed）并核对计时器与清理标记。未验证真实网络长跑或实际服务切换。

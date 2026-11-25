@@ -594,14 +594,18 @@ internal static class Program
         TextReader errors = p.StandardError;
         TextReader output = p.StandardOutput;
         Task stderrTask = Task.Run(delegate {
-            ReadBoundedEvents(errors, delegate(string line) {
-                string ev = ParseCoreEvent(line, pid);
-                if (ev != null && status != null) status(p, ev);
-            });
+            using (errors)
+                ReadBoundedEvents(errors, delegate(string line) {
+                    string ev = ParseCoreEvent(line, pid);
+                    if (ev != null && status != null) status(p, ev);
+                });
         });
         Task stdoutTask = Task.Run(delegate {
-            char[] buffer = new char[256];
-            while (output.Read(buffer, 0, buffer.Length) > 0) { }
+            using (output)
+            {
+                char[] buffer = new char[256];
+                while (output.Read(buffer, 0, buffer.Length) > 0) { }
+            }
         });
         CoreReaders.Add(p, Task.WhenAll(stderrTask, stdoutTask));
 
@@ -624,7 +628,14 @@ internal static class Program
         if (!CoreReaders.TryGetValue(p, out readers)) return false;
         try { return readers.Wait(timeoutMs); }
         catch (AggregateException) { return false; }
-        finally { if (readers.IsCompleted) CoreReaders.Remove(p); }
+        finally
+        {
+            if (readers.IsCompleted)
+            {
+                CoreReaders.Remove(p);
+                try { if (p.HasExited) p.StandardInput.Dispose(); } catch { }
+            }
+        }
     }
 
     // For a failed launch or an explicitly offline test only; never use this
@@ -645,7 +656,30 @@ internal static class Program
             DrainCoreReaders(p, 5000);
         }
         catch { }
-        finally { p.Dispose(); }
+        finally { DisposeCoreProcess(p); }
+    }
+
+    private static void DisposeCoreProcess(Process p)
+    {
+        if (p == null) return;
+        // The caller owns redirected streams once it obtains them. Closing
+        // stdin also signals EOF if Windows is shutting down.
+        try { p.StandardInput.Dispose(); } catch { }
+        try { if (p.HasExited) p.StandardOutput.Dispose(); } catch { }
+        try { if (p.HasExited) p.StandardError.Dispose(); } catch { }
+        p.Dispose();
+    }
+
+    private static int SampleHandles(int cycle)
+    {
+        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+        using (Process self = Process.GetCurrentProcess())
+        {
+            int count = self.HandleCount;
+            Console.WriteLine("RESOURCE_SAMPLE cycle=" + cycle + " handles=" + count +
+                " private_bytes=" + self.PrivateMemorySize64 + " threads=" + self.Threads.Count);
+            return count;
+        }
     }
 
     private static int ResourceTests()
@@ -653,10 +687,10 @@ internal static class Program
         try
         {
             ExtractCore();
-            int baseline;
-            using (Process self = Process.GetCurrentProcess()) baseline = self.HandleCount;
+            const int warmup = 10, measured = 100, budget = 32;
+            int baseline = SampleHandles(-warmup), warm = 0, high = 0, finalCount = 0;
             int completed = 0;
-            for (int cycle = 0; cycle < 30; cycle++)
+            for (int cycle = 0; cycle < warmup + measured; cycle++)
             {
                 Process child = null;
                 try
@@ -668,18 +702,38 @@ internal static class Program
                             "dummy-user", "dummy-pass", 1, delegate(Process sender, string value) {
                                 if (value == "stop_accepted") accepted.Set();
                             });
+                        // Get the underlying stream references before disposal.
+                        Stream input = child.StandardInput.BaseStream;
+                        Stream output = child.StandardOutput.BaseStream;
+                        Stream errors = child.StandardError.BaseStream;
                         if (probe && (!RequestStop(child) || !accepted.WaitOne(5000))) return 1;
                         if (!child.WaitForExit(10000) || child.ExitCode != 0 || !DrainCoreReaders(child, 5000)) return 1;
+                        Task leftover;
+                        if (CoreReaders.TryGetValue(child, out leftover) || input.CanWrite || output.CanRead || errors.CanRead)
+                        {
+                            Console.WriteLine("RESOURCE_STREAM_OPEN cycle=" + cycle);
+                            return 1;
+                        }
                     }
                     completed++;
                 }
                 finally { if (child != null) ReapOfflineOrFailedCore(child); }
+                int progress = cycle + 1 - warmup;
+                if (progress == 0) { warm = SampleHandles(0); high = warm; }
+                else if (progress > 0 && progress % 25 == 0)
+                {
+                    finalCount = SampleHandles(progress);
+                    high = Math.Max(high, finalCount);
+                }
             }
-            GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
-            int finalCount;
-            using (Process self = Process.GetCurrentProcess()) finalCount = self.HandleCount;
-            Console.WriteLine("RESOURCE_CYCLES=" + completed + " HANDLE_BASELINE=" + baseline + " HANDLE_FINAL=" + finalCount);
-            // Handles are diagnostic only: runner and CLR background activity vary.
+            Console.WriteLine("RESOURCE_CYCLES=" + completed + " HANDLE_BASELINE=" + baseline +
+                " HANDLE_WARM=" + warm + " HANDLE_FINAL=" + finalCount + " HANDLE_HIGH=" + high);
+            // Bound post-warmup handle growth, not initial CLR allocations.
+            if (high - warm > budget)
+            {
+                Console.WriteLine("CORE_RESOURCE_HANDLE_GROWTH_FAIL budget=" + budget);
+                return 1;
+            }
             Console.WriteLine("CORE_RESOURCE_PASS");
             return 0;
         }
@@ -1006,6 +1060,16 @@ internal static class Program
                 fifth.Show(); Application.DoEvents();
                 if (!fifth.CheckServiceRecoveryForTest(dir)) return 1;
             }
+            // Repeated direct Dispose must clean resources even without FormClosed.
+            for (int i = 0; i < 5; i++)
+            {
+                var window = new MainWindow(dir, true);
+                window.Show(); Application.DoEvents();
+                window.Dispose();
+                if (!window.CheckDisposedResourcesForTest()) return 1;
+                window.Dispose();
+            }
+            Console.WriteLine("UI_DISPOSE_PASS");
             Console.WriteLine("UI_TRAY_PASS");
             return 0;
         }
@@ -1052,7 +1116,7 @@ internal static class Program
         catch (Exception e) { Console.WriteLine("CORE_ERROR " + e.GetType().Name); return 1; }
         finally
         {
-            if (p != null) { try { if (!p.HasExited) { p.StandardInput.Close(); p.WaitForExit(10000); } } catch { } p.Dispose(); }
+            if (p != null) ReapOfflineOrFailedCore(p);
             CleanupCore();
         }
     }
@@ -1080,6 +1144,8 @@ internal static class Program
         private readonly CredentialStore credentials;
         private readonly ConnectionState state = new ConnectionState();
         private readonly bool isSelfTest;
+        private Icon appIcon;
+        private bool resourcesDisposed;
         // 核心结构化事件归档（EPHEMERAL_EVENT v1，协议见 docs/EphemeralExperimental.md）：
         // 环形上限 200 条，供诊断导出；畸形/超长行截断后原样保留，永不影响 UI 流程。
         private readonly List<string> coreEvents = new List<string>();
@@ -1132,7 +1198,6 @@ internal static class Program
         {
             isSelfTest = selfTest;
             Text = "澈知科技 - 校园网连接";
-            Icon appIcon = null;
             try { appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
             if (appIcon != null) Icon = appIcon;
             StartPosition = FormStartPosition.CenterScreen;
@@ -1496,16 +1561,27 @@ internal static class Program
                 }
             };
             FormClosing += OnClosing;
-            FormClosed += delegate {
-                userStopped = true; taskGeneration++; activeTask = null;
-                animTimer.Stop(); retryTimer.Stop();
-                password.Clear(); tray.Visible = false; tray.Dispose(); trayMenu.Dispose(); tips.Dispose();
-                timer.Dispose(); animTimer.Dispose(); retryTimer.Dispose(); evidenceTimer.Stop(); evidenceTimer.Dispose(); if (running != null) running.Dispose();
-                if (pendingServiceChild != null) pendingServiceChild.Dispose();
-                SystemEvents.PowerModeChanged -= OnPowerModeChanged;
-                SystemEvents.SessionSwitch -= OnSessionSwitch;
-                if (appIcon != null) appIcon.Dispose(); // ExtractAssociatedIcon 的实例由本窗口统一释放
-            };
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            try
+            {
+                if (disposing && !resourcesDisposed)
+                {
+                    resourcesDisposed = true;
+                    userStopped = true; taskGeneration++; activeTask = null;
+                    SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+                    SystemEvents.SessionSwitch -= OnSessionSwitch;
+                    timer.Stop(); animTimer.Stop(); retryTimer.Stop(); evidenceTimer.Stop();
+                    timer.Dispose(); animTimer.Dispose(); retryTimer.Dispose(); evidenceTimer.Dispose();
+                    password.Clear(); tray.Visible = false; tray.Dispose(); trayMenu.Dispose(); tips.Dispose();
+                    if (running != null) DisposeCoreProcess(running);
+                    if (pendingServiceChild != null) pendingServiceChild.Dispose();
+                    if (appIcon != null) { appIcon.Dispose(); appIcon = null; }
+                }
+            }
+            finally { base.Dispose(disposing); }
         }
 
         private static Size MeasureLine(Graphics graphics, string value, Font font)
@@ -1781,6 +1857,12 @@ internal static class Program
                 readServiceState = CurrentServiceState;
                 try { File.Delete(path); } catch { }
             }
+        }
+
+        internal bool CheckDisposedResourcesForTest()
+        {
+            return IsDisposed && resourcesDisposed && !timer.Enabled && !animTimer.Enabled &&
+                !retryTimer.Enabled && !evidenceTimer.Enabled;
         }
 
         internal bool CheckTrayAndSaveForTest()
@@ -2542,7 +2624,7 @@ internal static class Program
             connect.Enabled = false;
             try
             {
-                if (running != null) { running.Dispose(); running = null; }
+                if (running != null) { DisposeCoreProcess(running); running = null; }
                 completedProcess = null;
                 stopping = false; closingAfterStop = false; savedAfterAuth = false;
                 runSawProgress = false; authFailureSeen = false; retryEligible = false;
