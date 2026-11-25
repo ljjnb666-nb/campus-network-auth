@@ -1,3 +1,4 @@
+#include "cipher/CipherUtils.h"
 #include "DialerInternal.h"
 
 #include "net/NetClient.h"
@@ -88,7 +89,7 @@ bool get_ticket(void)
     if (decrypt == NULL) return false;
 
     char* parsed_ticket = xml_parser(decrypt, "ticket"); // 获取 ticket
-    free(decrypt);
+    s_secure_free_string(decrypt);
     if (parsed_ticket == NULL)
     {
         LOG_ERROR("解析 Ticket 失败");
@@ -97,7 +98,7 @@ bool get_ticket(void)
     snprintf(g_prog_status[tl_thread_idx].auth_cfg.ticket, TICKET_LEN, "%s", safe_str(parsed_ticket)); // 将 ticket 填入认证配置中
     // ticket 是会话凭据, 日志只记长度不记内容
     LOG_DEBUG("Ticket 已更新 (长度: %zu)", strlen(g_prog_status[tl_thread_idx].auth_cfg.ticket));
-    free(parsed_ticket);
+    s_secure_free_string(parsed_ticket);
     return true;
 }
 
