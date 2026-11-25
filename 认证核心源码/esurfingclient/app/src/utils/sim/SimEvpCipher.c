@@ -224,7 +224,9 @@ int EVP_EncryptFinal_ex(EVP_CIPHER_CTX* ctx, unsigned char* out, int* outl)
     if (!ctx->padding)
     {
         /* 关闭 padding 时，残留不足一块的数据视为错误（与 OpenSSL 一致） */
-        return ctx->buflen == 0 ? 1 : 0;
+        if (ctx->buflen == 0) return 1;
+        clear_cipher_context(ctx);
+        return 0;
     }
 
     {
@@ -247,18 +249,20 @@ int EVP_DecryptFinal_ex(EVP_CIPHER_CTX* ctx, unsigned char* out, int* outl)
 
     if (!ctx->padding)
     {
-        return ctx->buflen == 0 ? 1 : 0;
+        if (ctx->buflen == 0) return 1;
+        clear_cipher_context(ctx);
+        return 0;
     }
 
-    if (ctx->buflen != 0 || !ctx->have_hold) return 0;
+    if (ctx->buflen != 0 || !ctx->have_hold) { clear_cipher_context(ctx); return 0; }
 
     {
         uint8_t pad = ctx->hold[bs - 1];
         int i;
-        if (pad == 0 || pad > bs) return 0;
+        if (pad == 0 || pad > bs) { clear_cipher_context(ctx); return 0; }
         for (i = bs - pad; i < bs; i++)
         {
-            if (ctx->hold[i] != pad) return 0;
+            if (ctx->hold[i] != pad) { clear_cipher_context(ctx); return 0; }
         }
         memcpy(out, ctx->hold, (size_t)(bs - pad));
         *outl = bs - pad;
@@ -310,6 +314,16 @@ bool simssl_cipher_cleanup_self_test(void)
         clear_cipher_context(&ctx);
         if (!bytes_are_zero(&ctx, sizeof(ctx))) { ok = false; break; }
     }
+    /* Failed finalization invalidates the context and wipes all owned bytes. */
+    if (EVP_DecryptInit_ex(&ctx, EVP_aes_128_ecb(), NULL, key, iv))
+    {
+        memset(ctx.hold, 0xa5, sizeof(ctx.hold));
+        ctx.hold[15] = 0;
+        ctx.have_hold = 1;
+        ok = ok && !EVP_DecryptFinal_ex(&ctx, output, &tail) &&
+             bytes_are_zero(&ctx, sizeof(ctx));
+    }
+    else ok = false;
     clear_cipher_context(&ctx);
     simssl_secure_zero(key, sizeof(key));
     simssl_secure_zero(iv, sizeof(iv));
