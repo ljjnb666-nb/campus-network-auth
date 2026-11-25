@@ -107,6 +107,14 @@ jobs:
           Write-Host "Application lifecycle test exit: $($p.ExitCode)"
           if ($p.ExitCode -ne 0) { throw "Application lifecycle self-test failed: $($p.ExitCode)" }
 
+      - name: Offline UI scroll and resource stress (100 measured cycles)
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath 'build-core\澈知科技-源码重建.exe' -ArgumentList '--self-test-ui-stress' -Wait -PassThru -NoNewWindow
+          Write-Host "UI stress test exit: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "UI stress self-test failed: $($p.ExitCode)" }
+
       - name: Authenticode regression (signed and tampered fixture)
         shell: pwsh
         run: |

@@ -58,6 +58,7 @@ internal static class Program
         if (args.Length == 1 && args[0] == "--self-test-credentials") return CredentialTests();
         if (args.Length == 1 && args[0] == "--self-test-ui") return UiTests();
         if (args.Length == 1 && args[0] == "--self-test-app-lifecycle") return ApplicationLifecycleTests();
+        if (args.Length == 1 && args[0] == "--self-test-ui-stress") return ApplicationLifecycleTests(true);
         if (args.Length == 1 && args[0] == "--self-test-stub") return StubTestChild();
         if (args.Length == 2 && args[0] == "--self-test-credential-read") return CredentialReadTest(args[1]);
         if (args.Length != 0) return 2;
@@ -1183,9 +1184,9 @@ internal static class Program
         }
     }
 
-    private static int ApplicationLifecycleTests()
+    private static int ApplicationLifecycleTests(bool uiStress = false)
     {
-        string dir = Path.Combine(Path.GetFullPath(Path.GetTempPath()), "ChezhiAppLifecycle-" + Guid.NewGuid().ToString("N"));
+        string dir = Path.Combine(Path.GetFullPath(Path.GetTempPath()), (uiStress ? "ChezhiUiStress-" : "ChezhiAppLifecycle-") + Guid.NewGuid().ToString("N"));
         int result = 1;
         try
         {
@@ -1199,7 +1200,8 @@ internal static class Program
                         // A dedicated, real WinForms message loop owns all UI continuations.
                         if (!(System.Threading.SynchronizationContext.Current is WindowsFormsSynchronizationContext))
                             throw new InvalidOperationException("Missing WinForms synchronization context.");
-                        result = await window.CheckRepeatedApplicationLifecycleForTestAsync() ? 0 : 1;
+                        bool ok = uiStress ? await window.CheckUiStressForTestAsync() : await window.CheckRepeatedApplicationLifecycleForTestAsync();
+                        result = ok ? 0 : 1;
                     }
                     catch (Exception ex)
                     {
@@ -1900,6 +1902,150 @@ internal static class Program
                 foreach (Font font in enlarged) font.Dispose();
                 status.Text = oldStatus; connect.Text = oldConnect; stop.Text = oldStop; Size = original;
                 RefreshAdaptiveLayout(); Application.DoEvents();
+            }
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern uint GetGuiResources(IntPtr process, uint flags);
+
+        private static int[] SampleUiResources(int cycle)
+        {
+            GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+            using (Process self = Process.GetCurrentProcess())
+            {
+                int gdi = checked((int)GetGuiResources(self.Handle, 0));
+                int user = checked((int)GetGuiResources(self.Handle, 1));
+                int handles = self.HandleCount;
+                Console.WriteLine("UI_RESOURCE_SAMPLE cycle=" + cycle + " gdi=" + gdi +
+                    " user=" + user + " handles=" + handles + " private_bytes=" + self.PrivateMemorySize64);
+                return new[] { gdi, user, handles };
+            }
+        }
+
+        private async Task<bool> CheckScrollReachabilityForTestAsync(string stage)
+        {
+            // Scroll only through the existing native WinForms scroll container.
+            // No control is clicked and no real network or service action is executed.
+            var targets = new List<Control> { account, password, reveal, channel, remember, connect, stop, save, prepare, restore, hotspot };
+            targets.AddRange(Descendants(mainLayout).Where(c => c is LinkLabel));
+            scrollRoot.AutoScrollPosition = Point.Empty;
+            foreach (Control target in targets)
+            {
+                scrollRoot.ScrollControlIntoView(target);
+                await FlushUiEventsForTest();
+                Rectangle actual = scrollRoot.RectangleToClient(target.RectangleToScreen(target.ClientRectangle));
+                Rectangle visible = scrollRoot.ClientRectangle;
+                visible.Inflate(2, 2); // same rounding allowance as the existing layout checks
+                if (!target.Visible || !visible.Contains(actual))
+                {
+                    Console.WriteLine("UI_SCROLL_UNREACHABLE " + stage + " control=" + target.GetType().Name +
+                        " bounds=" + actual + " viewport=" + scrollRoot.ClientRectangle +
+                        " scroll=" + scrollRoot.AutoScrollPosition);
+                    return false;
+                }
+            }
+            scrollRoot.AutoScrollPosition = Point.Empty;
+            return targets.Count == 13;
+        }
+
+        internal async Task<bool> CheckUiStressForTestAsync()
+        {
+            if (!isSelfTest || InvokeRequired) return false;
+            int thread = System.Threading.Thread.CurrentThread.ManagedThreadId;
+            const int warmup = 10, measured = 100;
+            // Sample the same live window after warm-up; these budgets allow
+            // bounded framework caching without accepting unbounded growth.
+            int[] limits = { 32, 32, 64 };
+            int[] warm = null, high = null, final = null;
+            var original = new Dictionary<Control, Font>();
+            var large = new Dictionary<Control, Font>();
+            Size originalSize = Size;
+            string originalStatus = status.Text;
+            int originalChannel = channel.SelectedIndex;
+            int scrollChecks = 0, trayCycles = 0;
+            try
+            {
+                foreach (Control c in Descendants(mainLayout))
+                {
+                    if (!(c is Label || c is Button || c is CheckBox || c is TextBox || c is ComboBox || c is StatusPill)) continue;
+                    original[c] = c.Font;
+                    large[c] = new Font(c.Font.FontFamily, c.Font.Size * 2F, c.Font.Style);
+                }
+                account.Text = "offline-user"; password.Text = "offline-pass";
+                remember.Checked = false;
+                for (int cycle = 0; cycle < warmup + measured; cycle++)
+                {
+                    bool compact = cycle % 2 == 0;
+                    foreach (var entry in original) entry.Key.Font = compact ? large[entry.Key] : entry.Value;
+                    Size = compact ? MinimumSize : new Size(Math.Max(MinimumSize.Width, 820), Math.Max(MinimumSize.Height, 720));
+                    channel.SelectedIndex = cycle % channel.Items.Count;
+                    int selected = channel.SelectedIndex;
+                    status.Text = compact ? "系统服务正在切换。请不要关闭程序或重复连接，等待服务实际状态确认及事务记录保存完成后再重新选择操作。" :
+                        "输入校园网账号和密码，点击“立即连接”即可。";
+                    if (cycle % 5 == 0)
+                    {
+                        password.UseSystemPasswordChar = false;
+                        HideToTray();
+                        await FlushUiEventsForTest();
+                        if (Visible || !password.UseSystemPasswordChar) return false;
+                        ShowFromTray();
+                        trayCycles++;
+                    }
+                    RefreshAdaptiveLayout();
+                    await FlushUiEventsForTest();
+                    if (InvokeRequired || thread != System.Threading.Thread.CurrentThread.ManagedThreadId) return false;
+                    string stage = "stress_cycle=" + cycle + " compact=" + compact;
+                    if (!CheckLayoutBounds(mainLayout, stage) || !CheckTableOverlap(mainLayout, stage) ||
+                        !Visible || channel.SelectedIndex != selected || channel.Items.Count != 5 ||
+                        account.Text != "offline-user" || password.Text != "offline-pass" ||
+                        state.Auth != ConnectionStates.AuthState.Idle || running != null || activeTask != null ||
+                        !connect.Enabled || stop.Enabled || !prepare.Enabled || !restore.Enabled)
+                    { Console.WriteLine("UI_STRESS_INVARIANT_FAIL " + stage); return false; }
+                    if (compact)
+                    {
+                        if (!await CheckScrollReachabilityForTestAsync(stage)) return false;
+                        scrollChecks += 13;
+                    }
+                    // Exercise actual drawing, not only geometry. The bitmap is owned
+                    // by this iteration and disposed before sampling.
+                    using (var bitmap = new Bitmap(Math.Max(1, ClientSize.Width), Math.Max(1, ClientSize.Height)))
+                        DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+                    int progress = cycle + 1 - warmup;
+                    if (progress == 0)
+                    {
+                        warm = SampleUiResources(0);
+                        if (warm[0] <= 0 || warm[1] <= 0 || warm[2] <= 0) return false;
+                        high = (int[])warm.Clone();
+                    }
+                    else if (progress > 0 && progress % 10 == 0)
+                    {
+                        final = SampleUiResources(progress);
+                        for (int i = 0; i < high.Length; i++)
+                        {
+                            if (final[i] <= 0) return false;
+                            high[i] = Math.Max(high[i], final[i]);
+                            if (high[i] - warm[i] > limits[i])
+                            { Console.WriteLine("UI_RESOURCE_GROWTH_FAIL metric=" + i + " warm=" + warm[i] + " high=" + high[i] + " budget=" + limits[i]); return false; }
+                        }
+                    }
+                }
+                if (final == null || scrollChecks != 715 || trayCycles != 22) return false;
+                Console.WriteLine("UI_SCROLL_PASS checks=" + scrollChecks + " compact_cycles=55");
+                Console.WriteLine("UI_STRESS_PASS warmup=10 measured=100 tray_cycles=" + trayCycles +
+                    " gdi_warm=" + warm[0] + " gdi_final=" + final[0] + " gdi_high=" + high[0] +
+                    " user_warm=" + warm[1] + " user_final=" + final[1] + " user_high=" + high[1] +
+                    " handles_warm=" + warm[2] + " handles_final=" + final[2] + " handles_high=" + high[2]);
+                return true;
+            }
+            finally
+            {
+                foreach (var entry in original) entry.Key.Font = entry.Value;
+                foreach (Font font in large.Values) font.Dispose();
+                channel.SelectedIndex = originalChannel;
+                account.Clear(); password.Clear();
+                status.Text = originalStatus; Size = originalSize;
+                scrollRoot.AutoScrollPosition = Point.Empty;
+                RefreshAdaptiveLayout();
             }
         }
 

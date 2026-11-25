@@ -372,3 +372,8 @@ Push 45556478832 / PR 45556488266 failure，构建、基础离线、110次核心
 ### 第十二批第二次 UI 回归修正（3ea40cd）
 
 Push 45557447103 / PR 45557455447 failure；构建与基础离线通过；两次均 UI_LAYOUT_COMBO_CLIPPED scale=2 size=500×430 variant=0 actual=40 preferred=43 itemHeight=32 textHeight=35 font=19 formatting=True dpi=96。其余UI后续门禁跳过。FormattingEnabled 不能单独修复原生高度差；采用 OwnerDrawFixed 及实际文本度量设置选项高度与下拉高度，CB_GETITEMHEIGHT 验证实际原生列表与选择区，保留原断言、选择不变量及36组合。新增绘制仍待 CI 与实机视觉/键盘验证；滚动和GDI压力未实施，main 未修改。
+
+
+### 主动审计第十三批（4969476）
+
+Push 45573821415 / PR 45573829051 success，UI_LAYOUT_MATRIX_PASS 36，100次应用/110次核心（326→326）/256种权限/电源/网络/签名/curl双源通过，artifact 15003048447。新增独立实际 WinForms 消息循环 UI压力回归，10预热+100测量，715次滚动可达性、22次托盘隐藏恢复、实际绘制、GDI/USER/进程句柄采样峰值预算32/32/64，UI_SCROLL_PASS/UI_STRESS_PASS 强制验收。新CI待验证；采样有限、非实际72小时、真实多DPI和真实校园网/UAC/正式签名未验证。main 未修改。

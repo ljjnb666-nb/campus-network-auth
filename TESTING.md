@@ -148,3 +148,8 @@ UI_LAYOUT_MATRIX_PASS cases=36：4档字体指标（100/125/150/200%）×3种窗
 ### 200% 字体原生下拉框实测回归修正
 
 3ea40cd Push 45557447103 / PR 45557455447 均在 scale=2、500×430、variant=0 失败，实际40/首选43、选项32/文本35、font19、DPI96、FormattingEnabled=True。说明启用修正路径不足。设备下拉框改为原生 ComboBox 的 OwnerDrawFixed 模式，使用同一文本测量与绘制规则设置 ItemHeight 及下拉高度，保留键盘/选择控件语义；使用 CB_GETITEMHEIGHT 查询原生选中区(-1)与列表(0)，在原全部断言基础上检查实际原生高度。新增对可访问名称及系统禁用颜色的设置。36组合不减，新 CI 待验证；未实际目视或键盘验收，不宣称多DPI/完整可访问性通过。
+
+
+## UI 滚动可达与资源压力
+
+4969476 Push 45573821415 / PR 45573829051 success，UI_LAYOUT_MATRIX_PASS cases=36 font_scales=4 window_sizes=3 status_variants=3；既有离线门禁全部通过。新增独立 --self-test-ui-stress（真实 WinForms 消息循环），10次预热+100次测量，交替100/200%字体及最小/宽窗口、状态文本及五种设备选择；每5次隐藏恢复并验证密码遮挡；每个窄窗口逐个 ScrollControlIntoView 13项（含输入、操作按钮、底部链接），共715次（含预热），验证客户端矩形；每轮 DrawToBitmap 并释放。每10次采样 GetGuiResources GDI/USER 与进程句柄，预热后采样峰值增量预算32/32/64，私人内存仅诊断。UI_SCROLL_PASS / UI_STRESS_PASS 为强制步骤，5分钟超时。预算为本轮保守工程设定，不证明无泄漏，非真实用户鼠标/键盘/多DPI或72h测试；新CI待验证。
