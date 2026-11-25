@@ -4,6 +4,8 @@
 
 #ifndef _WIN32
 #include <unistd.h>
+#include <pthread.h>
+#include <time.h>
 #endif
 
 #include "utils/sim/SimThread.h"
@@ -12,6 +14,7 @@
 #include "utils/log/Logger.h"
 
 #include <stdatomic.h>
+#include <stdlib.h>
 
 #ifdef _WIN32
 #include <stdlib.h>
@@ -36,13 +39,64 @@
 
 #define WATCHDOG_MS_PER_MIN 60000ULL
 
-// 多个认证线程会并发打卡, 序号自增/读取必须是原子操作 (否则可能丢一次自增)
-static _Atomic uint32_t s_pet_seq = 0;
-static volatile uint32_t s_budget_ms = 0;
-static volatile bool s_running = false;
+/* A single snapshot makes pet, stop and timeout claim mutually exclusive.
+ * Bits 63..62: mode; bits 61..32: generation; bits 31..0: budget. */
+#define WD_MODE_MASK (UINT64_C(3) << 62)
+#define WD_RUNNING (UINT64_C(1) << 62)
+#define WD_FIRING (UINT64_C(2) << 62)
+#define WD_SEQ_MASK (UINT64_C(0x3fffffff) << 32)
+static _Atomic uint64_t s_snapshot = 0;
 static sim_thread_t* s_thread = NULL;
-
 static _Thread_local bool tl_in_watchdog = false;
+
+/* Only lifecycle callers acquire this lock. The watchdog and pet callers
+ * never acquire it, so holding it across join cannot block worker exit. */
+#ifdef _WIN32
+static SRWLOCK s_lifecycle = SRWLOCK_INIT;
+static void lifecycle_lock(void) { AcquireSRWLockExclusive(&s_lifecycle); }
+static void lifecycle_unlock(void) { ReleaseSRWLockExclusive(&s_lifecycle); }
+#else
+static pthread_mutex_t s_lifecycle = PTHREAD_MUTEX_INITIALIZER;
+static void lifecycle_lock(void) { pthread_mutex_lock(&s_lifecycle); }
+static void lifecycle_unlock(void) { pthread_mutex_unlock(&s_lifecycle); }
+#endif
+
+static bool snapshot_running(uint64_t value)
+{
+    return (value & WD_MODE_MASK) == WD_RUNNING;
+}
+
+static uint64_t next_pet(uint64_t old, uint32_t budget)
+{
+    return WD_RUNNING | (((old & WD_SEQ_MASK) + (UINT64_C(1) << 32)) & WD_SEQ_MASK) | budget;
+}
+
+static bool claim_timeout(_Atomic uint64_t* state, uint64_t observed)
+{
+    if (!snapshot_running(observed)) return false;
+    const uint64_t firing = (observed & ~WD_MODE_MASK) | WD_FIRING;
+    return atomic_compare_exchange_strong(state, &observed, firing);
+}
+
+static void publish_pet(_Atomic uint64_t* state, uint32_t budget)
+{
+    uint64_t old = atomic_load(state);
+    while (snapshot_running(old))
+    {
+        const uint64_t next = next_pet(old, budget);
+        if (atomic_compare_exchange_weak(state, &old, next)) return;
+    }
+}
+
+static void request_watchdog_stop(_Atomic uint64_t* state)
+{
+    uint64_t old = atomic_load(state);
+    while (snapshot_running(old))
+    {
+        const uint64_t stopped = old & ~WD_MODE_MASK;
+        if (atomic_compare_exchange_weak(state, &old, stopped)) return;
+    }
+}
 
 /* 把毫秒折成可读时长: 墙钟一跳几十小时时, 原始毫秒数根本看不出量级 */
 static void format_duration(const uint64_t ms, char* buf, const size_t buf_size)
@@ -97,8 +151,8 @@ static int watchdog_app(void* arg)
     tl_thread_idx = -1;
     tl_thread_name = "watchdog";
 
-    uint32_t last_seq = s_pet_seq;
-    uint32_t budget_ms = s_budget_ms;
+    uint64_t last_snapshot = atomic_load(&s_snapshot);
+    uint32_t budget_ms = (uint32_t)last_snapshot;
 
     /**
      * 计时必须用单调钟: OpenWrt 没有 RTC, NTP 一同步墙钟就会前跳几十小时,
@@ -119,7 +173,7 @@ static int watchdog_app(void* arg)
      */
     bool first_tick = true;
 
-    while (s_running)
+    while (snapshot_running(atomic_load(&s_snapshot)))
     {
         sleep_ms(WATCHDOG_TICK_MS, true);
 
@@ -132,11 +186,12 @@ static int watchdog_app(void* arg)
         // 打卡分支也要走单调钟: 这里算出来的 expected_by 直接参与后面的判定
         const uint64_t pet_now = get_steady_tm_ms();
 
-        const uint32_t seq = s_pet_seq;
-        if (first_tick || seq != last_seq)
+        const uint64_t observed = atomic_load(&s_snapshot);
+        if (!snapshot_running(observed)) return 0;
+        if (first_tick || observed != last_snapshot)
         {
-            budget_ms = s_budget_ms;
-            last_seq = seq;
+            budget_ms = (uint32_t)observed;
+            last_snapshot = observed;
             expected_by = pet_now + (uint64_t)budget_ms;
             deadline = expected_by + WATCHDOG_MARGIN_MS;
             first_tick = false;
@@ -172,84 +227,154 @@ static int watchdog_app(void* arg)
 
         if (now > deadline)
         {
-            /**
-             * 动手前再确认一次。
-             *
-             * 从上面那次检查到现在, 另一线程可能已经进了 shut() —— 它会
-             * watchdog_stop() 把 s_running 置假, 但【取消不了已经越过检查的这一次】。
-             * 不复查的话, 一次正常关闭会被写成"看门狗判定卡死", 而且跳过 clean_logger()
-             * (日志就不改名了)。
-             */
-            if (s_running == false || g_need_exit || stop_requested()) return 0;
-
-            watchdog_fire(budget_ms, now - expected_by);
+            /* An intervening pet or stop invalidates this exact snapshot.
+             * Once the CAS wins, timeout owns the terminal decision. */
+            if (g_need_exit || stop_requested()) return 0;
+            if (claim_timeout(&s_snapshot, observed))
+            {
+                if (g_need_exit || stop_requested())
+                {
+                    atomic_store(&s_snapshot, 0);
+                    return 0;
+                }
+                watchdog_fire(budget_ms, now - expected_by);
+            }
         }
     }
 
     return 0;
 }
 
-bool watchdog_start(void)
+static bool start_worker(sim_thread_func worker)
 {
-    if (s_running) return true;
-
-    /**
-     * 初始预算取启动宽限而不是 0: 主循环还没打第一次卡之前, 按这个等。
-     * 取 0 的话第一轮就会按"声明 0 毫秒"计时, 立刻误判
-     */
-    s_budget_ms = WATCHDOG_START_GRACE_MS;
-    s_pet_seq = 0;
-    s_running = true;
-
-    s_thread = sim_thread_create(watchdog_app, NULL);
-    if (s_thread == NULL)
+    lifecycle_lock();
+    if (s_thread != NULL)
     {
-        s_running = false;
-        LOG_ERROR("看门狗线程创建失败, 本进程将无法发现自己卡死");
-        return false;
+        const bool running = snapshot_running(atomic_load(&s_snapshot));
+        lifecycle_unlock();
+        return running;
     }
 
-    LOG_DEBUG("看门狗已启动 (检查间隔 %d 毫秒, 宽限 %d 毫秒)", WATCHDOG_TICK_MS, WATCHDOG_MARGIN_MS);
+    atomic_store(&s_snapshot, WD_RUNNING | WATCHDOG_START_GRACE_MS);
+    s_thread = sim_thread_create(worker, NULL);
+    const bool started = s_thread != NULL;
+    if (!started) atomic_store(&s_snapshot, 0);
+    lifecycle_unlock();
+    return started;
+}
+
+bool watchdog_start(void)
+{
+    if (!start_worker(watchdog_app))
+    {
+        LOG_ERROR("看门狗线程创建失败或上一线程尚未回收");
+        return false;
+    }
+    return true;
+}
+
+static bool stop_worker(void)
+{
+    if (tl_in_watchdog) return false;
+    lifecycle_lock();
+    request_watchdog_stop(&s_snapshot);
+    if (s_thread != NULL)
+    {
+        if (sim_thread_join(s_thread, NULL) != 0)
+        {
+            lifecycle_unlock();
+            return false; // retain ownership; never start a second worker
+        }
+        sim_thread_destroy(s_thread);
+        s_thread = NULL;
+    }
+    atomic_store(&s_snapshot, 0);
+    lifecycle_unlock();
     return true;
 }
 
 void watchdog_stop(void)
 {
-    /**
-     * ⚠️ 非线程安全: 先判 s_running 再置假, 并发进来会重复 join。
-     * 目前靠"看门狗只在认证进程启动、dialer_app 与 shut() 都在主线程顺序执行"成立;
-     * 若将来出现"从 SCM 线程调 shut() 且启用了看门狗", 这里得补真锁。
-     */
-    if (s_running == false) return;
-
-    s_running = false;
-
-    if (s_thread != NULL)
-    {
-        int result_code = 0;
-        sim_thread_join(s_thread, &result_code);
-        s_thread = NULL;
-    }
+    if (!stop_worker()) LOG_ERROR("看门狗线程等待失败, 保留线程对象");
 }
 
 void watchdog_pet(uint32_t budget_ms)
 {
-    if (s_running == false) return;
-
-    // 看门狗自己不算数 (它一打卡, 判定就永远走"有新打卡"这一边)
     if (tl_in_watchdog) return;
-
     if (budget_ms < WATCHDOG_MIN_BUDGET_MS) budget_ms = WATCHDOG_MIN_BUDGET_MS;
+    publish_pet(&s_snapshot, budget_ms);
+}
 
-    // 先写预算再自增序号, 顺序不能反 (见 s_pet_seq 的说明)
-    s_budget_ms = budget_ms;
-    s_pet_seq++;
+/* Offline worker: same ownership paths, no clock, network or fatal exit. */
+static int watchdog_test_worker(void* arg)
+{
+    (void)arg;
+    while (snapshot_running(atomic_load(&s_snapshot)))
+    {
+#ifdef _WIN32
+        Sleep(1);
+#else
+        const struct timespec delay = {0, 1000000L};
+        nanosleep(&delay, NULL);
+#endif
+    }
+    return 0;
+}
+
+static int watchdog_test_stop(void* arg)
+{
+    (void)arg;
+    return stop_worker() ? 0 : 1;
+}
+
+bool watchdog_resource_self_test(void)
+{
+    _Atomic uint64_t local = WD_RUNNING | 1000;
+    uint64_t stale = atomic_load(&local);
+    publish_pet(&local, 2000);
+    if (claim_timeout(&local, stale) || (uint32_t)atomic_load(&local) != 2000) return false;
+    stale = atomic_load(&local);
+    request_watchdog_stop(&local);
+    if (claim_timeout(&local, stale)) return false;
+    publish_pet(&local, 3000);
+    if (snapshot_running(atomic_load(&local))) return false;
+    atomic_store(&local, WD_RUNNING | 1000);
+    if (!claim_timeout(&local, atomic_load(&local))) return false;
+    publish_pet(&local, 3000);
+    request_watchdog_stop(&local);
+    if ((atomic_load(&local) & WD_MODE_MASK) != WD_FIRING) return false;
+
+    for (int i = 0; i < 16; ++i)
+    {
+        if (!start_worker(watchdog_test_worker) || !start_worker(watchdog_test_worker))
+        {
+            stop_worker();
+            return false;
+        }
+        watchdog_pet(2500);
+        if ((uint32_t)atomic_load(&s_snapshot) != 2500) { stop_worker(); return false; }
+        sim_thread_t* one = sim_thread_create(watchdog_test_stop, NULL);
+        sim_thread_t* two = sim_thread_create(watchdog_test_stop, NULL);
+        int rc1 = -1, rc2 = -1;
+        if (one != NULL)
+        {
+            if (sim_thread_join(one, &rc1) != 0) abort();
+            sim_thread_destroy(one);
+        }
+        if (two != NULL)
+        {
+            if (sim_thread_join(two, &rc2) != 0) abort();
+            sim_thread_destroy(two);
+        }
+        if (!stop_worker() || rc1 != 0 || rc2 != 0 || s_thread != NULL ||
+            atomic_load(&s_snapshot) != 0) return false;
+    }
+    return true;
 }
 
 void watchdog_pet_network(void)
 {
-    if (s_running == false) return;
-    if (tl_in_watchdog) return;
+    if (!snapshot_running(atomic_load(&s_snapshot)) || tl_in_watchdog) return;
 
     /**
      * 一次网络请求最长 = 连接超时 + 操作超时 + 余量。逐个请求覆盖, 不去估
