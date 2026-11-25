@@ -10,15 +10,21 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Build/test jobs do not need repository write permissions.
+permissions:
+  contents: read
+
 jobs:
   windows-build:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Cache curl source package
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: third-party
           key: curl-8.23.0-E3DE77CFA6367083C776A26647FC9F633B538C06C3BAA73D931A252AC8F72B49
@@ -29,7 +35,7 @@ jobs:
 
       - name: Set up MinGW-w64 (UCRT64)
         id: msys2
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c # v2
         with:
           msystem: UCRT64
           update: false
@@ -149,7 +155,7 @@ jobs:
         run: ./scripts/Test-CurlVulns.ps1
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: chezhi-windows-build
           path: |
@@ -164,7 +170,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Optimized and sanitized offline cipher regression
         shell: bash
         run: |
