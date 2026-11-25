@@ -149,7 +149,7 @@ static uint32_t feistel(const uint32_t r, const uint64_t subkey)
     return p;
 }
 
-static des_key_t des_schedule(const uint8_t key_bytes[8])
+static void des_schedule(const uint8_t key_bytes[8], des_key_t* sched)
 {
     uint64_t key64 = 0;
     for (int i = 0; i < 8; i++) key64 = key64 << 8 | key_bytes[i];
@@ -162,7 +162,6 @@ static des_key_t des_schedule(const uint8_t key_bytes[8])
     }
     uint32_t c = (uint32_t)(kp >> 28 & 0x0FFFFFFF);
     uint32_t d = (uint32_t)(kp & 0x0FFFFFFF);
-    des_key_t sched;
     for (int round = 0; round < 16; round++)
     {
         c = (uint32_t)left_rotate28(c, SHIFTS[round]);
@@ -174,9 +173,12 @@ static des_key_t des_schedule(const uint8_t key_bytes[8])
             sk <<= 1;
             sk |= cd >> (56 - 1 - src) & 1ULL;
         }
-        sched.subkeys[round] = sk;
+        sched->subkeys[round] = sk;
     }
-    return sched;
+    cipher_secure_zero(&key64, sizeof(key64));
+    cipher_secure_zero(&kp, sizeof(kp));
+    cipher_secure_zero(&c, sizeof(c));
+    cipher_secure_zero(&d, sizeof(d));
 }
 
 static uint64_t des_block_core(const uint64_t block, const des_key_t* sched, const int decrypt)
@@ -286,15 +288,29 @@ cipher_interface_t* create_des_ecb_six_keys_cipher(
     if (!key0 || !key1 || !key2 || !key3 || !key4 || !key5) return NULL;
     cipher_interface_t* ci = s_calloc(1, sizeof(cipher_interface_t));
     des_ecb_six_pc_ctx_t* ctx = s_calloc(1, sizeof(des_ecb_six_pc_ctx_t));
-    ctx->ks[0] = des_schedule(key0);
-    ctx->ks[1] = des_schedule(key1);
-    ctx->ks[2] = des_schedule(key2);
-    ctx->ks[3] = des_schedule(key3);
-    ctx->ks[4] = des_schedule(key4);
-    ctx->ks[5] = des_schedule(key5);
+    des_schedule(key0, &ctx->ks[0]);
+    des_schedule(key1, &ctx->ks[1]);
+    des_schedule(key2, &ctx->ks[2]);
+    des_schedule(key3, &ctx->ks[3]);
+    des_schedule(key4, &ctx->ks[4]);
+    des_schedule(key5, &ctx->ks[5]);
     ci->encrypt = des_ecb_six_encrypt;
     ci->decrypt = des_ecb_six_decrypt;
     ci->destroy = des_ecb_six_destroy;
     ci->private_data = ctx;
     return ci;
+}
+
+/* Public, synthetic DES known-answer vector (not an account key). */
+bool des_known_answer_self_test(void)
+{
+    const uint8_t key[8] = {0x13,0x34,0x57,0x79,0x9b,0xbc,0xdf,0xf1};
+    const uint64_t plain = UINT64_C(0x0123456789abcdef);
+    const uint64_t expected = UINT64_C(0x85e813540f0ab405);
+    des_key_t sched;
+    des_schedule(key, &sched);
+    const bool ok = des_block_core(plain, &sched, 0) == expected &&
+                    des_block_core(expected, &sched, 1) == plain;
+    cipher_secure_zero(&sched, sizeof(sched));
+    return ok;
 }
