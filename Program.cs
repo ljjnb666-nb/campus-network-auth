@@ -613,7 +613,7 @@ internal static class Program
             switch (ev)
             {
                 case "auth_ok": case "wait_network": case "online": case "stop_accepted": case "stop_channel_failed":
-                case "network_online": case "network_required": case "network_unknown": case "auth_start":
+                case "network_online": case "network_required": case "network_unknown": case "auth_start": case "probe_ready":
                     return code == 0 ? ev : null;
                 case "auth_failed": case "core_failed": return code != 0 ? ev : null;
                 case "network_retry_exhausted": return code == 1 || code == 2 ? ev : null;
@@ -1277,6 +1277,7 @@ internal static class Program
         private bool connectCheckPending, retryEligible, rememberRevoked;
         private Func<HandoffObservation> observeHandoff = ObserveHandoff;
         private bool offlineLifecycleProbe;
+        private bool offlineProbeReady, offlineProbeStopAccepted, lastCoreReadersDrained;
         private long lastNetworkEvidence;
         private readonly Stopwatch evidenceClock = Stopwatch.StartNew();
         private int taskGeneration;
@@ -1982,15 +1983,29 @@ internal static class Program
                     // Invoke the real UI command; injected observation never requests elevation.
                     ConnectClicked(connect, EventArgs.Empty);
                     var clock = Stopwatch.StartNew();
-                    while (connectCheckPending && clock.ElapsedMilliseconds < 5000)
-                    { Application.DoEvents(); System.Threading.Thread.Sleep(5); }
+                    while ((connectCheckPending || !offlineProbeReady) && clock.ElapsedMilliseconds < 5000)
+                    {
+                        Application.DoEvents();
+                        if (!connectCheckPending && (running == null || Object.ReferenceEquals(running, completedProcess) || running.HasExited)) break;
+                        System.Threading.Thread.Sleep(5);
+                    }
                     Application.DoEvents();
                     Process child = running;
-                    if (connectCheckPending || child == null || Object.ReferenceEquals(child, completedProcess) ||
+                    if (connectCheckPending || !offlineProbeReady || child == null || Object.ReferenceEquals(child, completedProcess) ||
                         Object.ReferenceEquals(child, previous) || child.HasExited ||
                         state.Auth != ConnectionStates.AuthState.Authenticating || connect.Enabled || !stop.Enabled ||
                         prepare.Enabled || restore.Enabled || trayRecover.Enabled)
-                    { Console.WriteLine("APP_CYCLE_START_FAIL cycle=" + cycle + " scenario=" + scenario); return false; }
+                    {
+                        Console.WriteLine("APP_CYCLE_START_FAIL cycle=" + cycle + " scenario=" + scenario +
+                            " pending=" + connectCheckPending + " ready=" + offlineProbeReady +
+                            " missing=" + (child == null) + " completed=" + Object.ReferenceEquals(child, completedProcess) +
+                            " previous=" + Object.ReferenceEquals(child, previous) + " exited=" + (child != null && child.HasExited) +
+                            " code=" + (child != null && child.HasExited ? child.ExitCode : -999) +
+                            " auth=" + state.Auth + " core=" + state.Core + " phase=" + CurrentPermissions().Phase +
+                            " connect=" + connect.Enabled + " stop=" + stop.Enabled + " prepare=" + prepare.Enabled +
+                            " restore=" + restore.Enabled + " recover=" + trayRecover.Enabled);
+                        return false;
+                    }
                     // The real probe never authenticates. The events below simulate the UI's
                     // validated protocol messages, not a successful network connection.
                     if (previous != null)
@@ -2048,15 +2063,22 @@ internal static class Program
                     { Application.DoEvents(); System.Threading.Thread.Sleep(5); }
                     Application.DoEvents();
                     if (!Object.ReferenceEquals(completedProcess, child) || !child.HasExited || child.ExitCode != 0 ||
+                        !lastCoreReadersDrained || !offlineProbeStopAccepted ||
                         state.Auth != ConnectionStates.AuthState.Idle || state.Network != ConnectionStates.NetworkState.Unknown ||
                         activeTask != null || retryTimer.Enabled || stopping || !connect.Enabled || !prepare.Enabled ||
                         !restore.Enabled || stop.Enabled || trayStop.Enabled || !trayRecover.Enabled)
-                    { Console.WriteLine("APP_CYCLE_STOP_FAIL cycle=" + cycle + " scenario=" + scenario); return false; }
+                    {
+                        Console.WriteLine("APP_CYCLE_STOP_FAIL cycle=" + cycle + " scenario=" + scenario +
+                            " drain=" + lastCoreReadersDrained + " ack=" + offlineProbeStopAccepted +
+                            " exited=" + child.HasExited + " auth=" + state.Auth + " network=" + state.Network +
+                            " phase=" + CurrentPermissions().Phase + " retry=" + retryTimer.Enabled);
+                        return false;
+                    }
                     previous = child;
                     completed++;
                     if (completed % 20 == 0) Console.WriteLine("APP_LIFECYCLE_PROGRESS=" + completed);
                 }
-                Console.WriteLine("APP_LIFECYCLE_PASS cycles=" + completed + " seed=" + seed);
+                Console.WriteLine("APP_LIFECYCLE_PASS cycles=" + completed + " seed=" + seed + " ready_ack_drain=100");
                 return true;
             }
             finally
@@ -2971,6 +2993,7 @@ internal static class Program
                 completedProcess = null;
                 stopping = false; closingAfterStop = false; savedAfterAuth = false;
                 runSawProgress = false; authFailureSeen = false; runtimeFailureSeen = false; retryEligible = false;
+                offlineProbeReady = false; offlineProbeStopAccepted = false; lastCoreReadersDrained = false;
                 stop.Text = "停止认证"; StyleStopArmed(false); timer.Stop();
                 running = LaunchCore(mode, activeTask.Username, activeTask.Password, activeTask.Channel, OnCoreStatus);
                 password.UseSystemPasswordChar = true; reveal.Text = "显示";
@@ -2988,7 +3011,7 @@ internal static class Program
                         bool drained = false;
                         try { started.WaitForExit(); drained = DrainCoreReaders(started, 5000); } catch { }
                         if (!IsDisposed && IsHandleCreated) try {
-                            BeginInvoke((Action)delegate { if (!Object.ReferenceEquals(running, started) || Object.ReferenceEquals(completedProcess, started)) return; if (!drained) retryEligible = false; OnCoreExit(started); });
+                            BeginInvoke((Action)delegate { if (!Object.ReferenceEquals(running, started) || Object.ReferenceEquals(completedProcess, started)) return; lastCoreReadersDrained = drained; if (!drained) retryEligible = false; OnCoreExit(started); });
                         } catch (InvalidOperationException) { }
                     });
                 };
@@ -3125,6 +3148,12 @@ internal static class Program
                 if (!Object.ReferenceEquals(running, sender) || Object.ReferenceEquals(completedProcess, sender)) return;
                 // ParseCoreEvent already validated the PID, schema, event and code; token is allowlisted.
                 ArchiveCoreEvent(token);
+                if (token == "probe_ready")
+                {
+                    if (isSelfTest && offlineLifecycleProbe) offlineProbeReady = true;
+                    return;
+                }
+                if (isSelfTest && offlineLifecycleProbe && stopping && token == "stop_accepted") offlineProbeStopAccepted = true;
                 bool stopEvent = token == "stop_accepted" || token == "stop_channel_failed";
                 if (stopEvent && !stopping) return;
                 if ((stopping || userStopped || authFailureSeen || runtimeFailureSeen || retryEligible) && !stopEvent) return;

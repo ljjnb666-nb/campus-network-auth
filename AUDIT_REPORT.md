@@ -332,3 +332,8 @@ Push 45551781061 / PR 45551787864 success，JOURNAL_RESTART_PASS，110 次资源
 ### 主动审计第九批（基线 b287c4e）
 
 Push 45552326254 / PR 45552334588 success；OPERATION_MATRIX_PASS cases=256、UI_OPERATION_PASS、110 次资源通过（326→331）、curl 双源 0。发现 core_failed 未锁存，后续网络事件可污染失败状态；网络耗尽等待退出时仍可能展示旧可达性；成功前置检查结束短暂刷新空闲权限。修复终态锁存、立即撤销网络证据、权限刷新时序；新增 APP_LIFECYCLE_PASS 100 次真实离线 probe UI 连接/停止，固定种子五类注入、真实进程退出回调。新 CI 待验证。未真实认证、未实际服务切换，未宣称100次全系统交接，真实 DPI/UAC/校园网、72h、签名、旧事务恢复仍开放，main 未修改。
+
+
+### 第九批回归修复（74e9f5b）
+
+Push 45552962416 / PR 45552969825 failure，APP_CYCLE_START_FAIL cycle=0/1。原日志无法区分失败条件，不宣称已确定唯一根因。离线 probe 的 sleep_ms(...,true) 依赖生产状态标志，改为显式 probe_ready 与有界 STOP/EOF 等待，超时非零。测试增加握手、真实 STOP ACK、实际排空证据及脱敏细粒度失败输出，不取消任何门禁。新 CI 待验证；未执行真实服务/校园网，main 未修改。

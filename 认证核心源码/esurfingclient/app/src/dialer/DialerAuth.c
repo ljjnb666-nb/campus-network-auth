@@ -322,8 +322,12 @@ int work_auth(void)
     if (g_ephemeral_probe)
     {
         g_prog_status[0].runtime_status.is_running = true;
-        sleep_ms(8000, true);
-        shut(0);
+        // The offline probe is independent of production reauth/keep-alive flags.
+        // Explicit readiness and a bounded STOP/EOF wait, never network activity.
+        ephemeral_emit_event("probe_ready", 0);
+        for (unsigned int i = 0; i < 300 && !stop_requested(); ++i)
+            sleep_ms(100, false);
+        shut(stop_requested() ? 0 : 4);
     }
 
     /**
