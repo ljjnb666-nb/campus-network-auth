@@ -9,7 +9,7 @@
 枚举采用手动递归+剪枝，避免 PowerShell 5.1 对深目录全量递归的稳定性问题，
 也避免无谓地遍历 .git 等目录。
 #>
-param()
+param([switch]$SelfTest)
 $ErrorActionPreference = 'Stop'
 $root = (Get-Item -LiteralPath (Join-Path $PSScriptRoot '..')).FullName
 
@@ -41,26 +41,57 @@ $patterns = @(
 # Report locations and rule names only. A real secret must never be copied
 # into CI logs by the scanner intended to detect it.
 $ruleNames = @('credential-literal', 'secret-key-literal', 'private-key-header')
-$findings = @()
-foreach ($f in (Get-TextFiles $root)) {
-    $text = $null
-    try { $text = [IO.File]::ReadAllText($f) } catch { continue }
-    for ($ruleIndex = 0; $ruleIndex -lt $patterns.Count; $ruleIndex++) {
-        foreach ($m in [regex]::Matches($text, $patterns[$ruleIndex])) {
-            $v = $m.Groups['v'].Value
-            $hit = $true
-            foreach ($a in $allow) { if ($v -and $v.IndexOf($a, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hit = $false; break } }
-            if ($hit) {
-                $rel = $f.Substring($root.Length + 1)
+function Get-ScanFindings([string]$scanRoot, [scriptblock]$Reader) {
+    foreach ($f in (Get-TextFiles $scanRoot)) {
+        $rel = $f.Substring($scanRoot.Length + 1)
+        try { $text = & $Reader $f } catch {
+            # Do not print exception messages or file contents.
+            [pscustomobject]@{ File = $rel; Line = 0; Rule = 'read-failure' }
+            continue
+        }
+        for ($ruleIndex = 0; $ruleIndex -lt $patterns.Count; $ruleIndex++) {
+            foreach ($m in [regex]::Matches([string]$text, $patterns[$ruleIndex])) {
+                $v = $m.Groups['v'].Value
+                # Exact fixture/structural literal only; a permitted substring
+                # must not exempt a different credential.
+                if ($v -and $allow -contains $v) { continue }
                 $line = ([regex]::Matches($text.Substring(0, $m.Index), "`n")).Count + 1
-                $findings += [pscustomobject]@{ File = $rel; Line = $line; Rule = $ruleNames[$ruleIndex] }
+                [pscustomobject]@{ File = $rel; Line = $line; Rule = $ruleNames[$ruleIndex] }
             }
         }
     }
 }
 
+if ($SelfTest) {
+    $fixture = Join-Path ([IO.Path]::GetTempPath()) ('scan-audit-' + [Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $fixture)
+    try {
+        # Assemble inert fixture text so the repository scan does not
+        # detect its own test source. Nothing here is a real credential.
+        $key = 'pass' + 'word'
+        $allowed = 'dummy-' + 'pass'
+        $other = $allowed + '-fixture'
+        $file = Join-Path $fixture 'fixture.txt'
+        $read = { param($p) [IO.File]::ReadAllText($p) }
+        [IO.File]::WriteAllText($file, ($key + ' = "' + $allowed + '"'))
+        if (@(Get-ScanFindings $fixture $read).Count -ne 0) { throw 'Scanner exact allow regression' }
+        [IO.File]::WriteAllText($file, ('first' + "`n" + $key + ' = "' + $other + '"'))
+        $hits = @(Get-ScanFindings $fixture $read)
+        if ($hits.Count -ne 1 -or $hits[0].Rule -cne 'credential-literal' -or
+            $hits[0].Line -ne 2 -or $hits[0].File -cne 'fixture.txt') { throw 'Scanner substring regression' }
+        if (($hits | ConvertTo-Json -Compress).Contains($other)) { throw 'Scanner redaction regression' }
+        $hits = @(Get-ScanFindings $fixture { param($p) throw 'synthetic read failure' })
+        if ($hits.Count -ne 1 -or $hits[0].Rule -cne 'read-failure') { throw 'Scanner unreadable file regression' }
+        Write-Host 'SECRET_SCAN_SELFTEST_PASS cases=4'
+        exit 0
+    } finally {
+        Remove-Item -LiteralPath $fixture -Recurse -Force
+    }
+}
+
+$findings = @(Get-ScanFindings $root { param($p) [IO.File]::ReadAllText($p) })
 if ($findings.Count -gt 0) {
-    Write-Host '发现疑似敏感信息：'
+    Write-Host '发现疑似敏感信息或无法完成的文件读取：'
     $findings | Format-Table -AutoSize | Out-String | Write-Host
     exit 1
 }
