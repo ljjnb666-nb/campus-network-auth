@@ -9,6 +9,7 @@
 #include <inttypes.h>
 #include <setjmp.h>
 #include <signal.h>
+#include <stdatomic.h>
 
 #define SCHOOL_NETWORK_SYMBOL 8
 
@@ -305,13 +306,13 @@ extern bool g_list_only;
 /* 监管进程拉起的子进程数 (子进程表本身在 SupervisorState.c) */
 extern int g_child_count;
 
-extern bool g_thread_keep_alive;
+extern atomic_bool g_thread_keep_alive;
 
-extern bool g_need_exit;
+extern atomic_bool g_need_exit;
 
 extern bool g_prog_enabled;
 
-extern bool g_need_restart;
+extern atomic_bool g_need_restart;
 
 extern bool g_cfg_loaded;
 
