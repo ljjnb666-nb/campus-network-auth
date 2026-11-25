@@ -1,3 +1,4 @@
+#include "cipher/CipherUtils.h"
 #include "config/Config.h"
 
 #include "ConfigInternal.h"
@@ -88,17 +89,15 @@ static void clear_json_values(cJSON* item)
 {
     for (; item != NULL; item = item->next)
     {
+        /* cJSON reference nodes borrow their payload and children. */
+        if (item->type & cJSON_IsReference) continue;
         if (item->child) clear_json_values(item->child);
-        if (item->valuestring)
-        {
-            volatile char* p = item->valuestring;
-            while (*p) *p++ = 0;
-        }
+        if (item->valuestring) cipher_secure_zero(item->valuestring, strlen(item->valuestring) + 1);
     }
 }
 static void delete_cfg_json(cJSON* item)
 {
-    if (g_ephemeral_auth) clear_json_values(item);
+    clear_json_values(item);
     cJSON_Delete(item);
 }
 static void clear_ephemeral_input(void)
@@ -189,7 +188,8 @@ static bool write_cfg_json(const cJSON* cfg_json)
     if (!cfg_file)
     {
         LOG_ERROR("无法生成文件: %s", tmp_path);
-        free(cfg_text);
+        cipher_secure_zero(cfg_text, strlen(cfg_text) + 1);
+        cJSON_free(cfg_text);
         return false;
     }
     /**
@@ -204,7 +204,8 @@ static bool write_cfg_json(const cJSON* cfg_json)
     const bool written = (fprintf(cfg_file, "%s", cfg_text) > 0);
     fflush(cfg_file);
     fclose(cfg_file);
-    free(cfg_text);
+    cipher_secure_zero(cfg_text, strlen(cfg_text) + 1);
+    cJSON_free(cfg_text);
 
     if (written == false)
     {
@@ -302,7 +303,7 @@ static bool save_cfg_from_cfg(const cJSON* cfg_json)
     }
 
     const bool ok = write_cfg_json(root);
-    cJSON_Delete(root);
+    delete_cfg_json(root);
     return ok;
 }
 
@@ -330,7 +331,7 @@ bool save_cfg(const char* configs_str)
     {
         char* old_text = read_cfg_file();
         cJSON* old = (old_text != NULL) ? cJSON_Parse(old_text) : NULL;
-        free(old_text);
+        s_secure_free_string(old_text);
         cJSON* old_accounts = (old != NULL) ? cJSON_GetObjectItem(old, "accounts") : NULL;
         if (cJSON_IsArray(old_accounts))
         {
@@ -361,14 +362,14 @@ bool save_cfg(const char* configs_str)
                 }
             }
         }
-        cJSON_Delete(old);
+        delete_cfg_json(old);
     }
 
     // 落盘前补全缺失键, 免得手写/旧版配置缺字段
     complete_cfg(configs);
 
     const bool saved = write_cfg_json(configs);
-    cJSON_Delete(configs);
+    delete_cfg_json(configs);
 
     return saved;
 }
@@ -721,7 +722,7 @@ bool load_cfg(void)
     fclose(cfg_file);
 
     cfg_json = cJSON_Parse(cfg_data);
-    free(cfg_data);
+    s_secure_free(cfg_data, (size_t)len + 1);
     }
     if (!cfg_json)
     {
