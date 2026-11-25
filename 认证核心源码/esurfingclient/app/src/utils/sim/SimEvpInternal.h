@@ -4,6 +4,15 @@
 #include "utils/sim/SimEvp.h"
 
 #include <stdint.h>
+#include <stddef.h>
+
+/* Volatile byte writes remain observable even when the buffer is dead.
+ * This covers addressable buffers, not copies in registers or OS dumps. */
+static inline void simssl_secure_zero(void* ptr, size_t len)
+{
+    volatile unsigned char* p = (volatile unsigned char*)ptr;
+    while (len != 0) { *p++ = 0; --len; }
+}
 
 enum
 {
