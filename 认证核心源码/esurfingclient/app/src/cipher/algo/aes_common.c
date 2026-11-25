@@ -78,6 +78,7 @@ void aes128_key_expansion(const uint8_t* key, uint8_t* round_keys)
         i += 4;
     }
     cipher_secure_zero(t, sizeof(t));
+}
 
 static void add_round_key(uint8_t* state, const uint8_t* rk)
 {
