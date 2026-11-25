@@ -43,5 +43,38 @@
       }
     },
     "localPatchCommit": "8e839689a65eaf6ca643a3a1bb2a3204472a024a"
+  },
+  "peDirectImports": {
+    "baseline": {
+      "commit": "93cd805e1d98c2d9ef8a5ceae4c8c33d50d67886",
+      "ciRun": 45621437723,
+      "job": 139230351705,
+      "scope": "direct PE import names from successful inspection step; not transitive or dynamic imports"
+    },
+    "core": [
+      "advapi32.dll",
+      "api-ms-win-crt-convert-l1-1-0.dll",
+      "api-ms-win-crt-environment-l1-1-0.dll",
+      "api-ms-win-crt-filesystem-l1-1-0.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "api-ms-win-crt-locale-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-private-l1-1-0.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-time-l1-1-0.dll",
+      "api-ms-win-crt-utility-l1-1-0.dll",
+      "bcrypt.dll",
+      "crypt32.dll",
+      "iphlpapi.dll",
+      "kernel32.dll",
+      "secur32.dll",
+      "wldap32.dll",
+      "ws2_32.dll"
+    ],
+    "gui": [
+      "mscoree.dll"
+    ]
   }
 }
