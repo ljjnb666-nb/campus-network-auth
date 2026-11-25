@@ -571,7 +571,8 @@ internal static class Program
         catch (EncoderFallbackException) { return "账号或密码含无效字符。"; }
     }
 
-    private static Process LaunchCore(string mode, string username, string password, int channel, Action<Process, string> status)
+    private static Process LaunchCore(string mode, string username, string password, int channel, Action<Process, string> status,
+        Action<Stream, Stream, Stream> captureStreams = null)
     {
         string invalid = ValidateAuthInput(username, password, channel);
         if (invalid != null) throw new ArgumentException(invalid);
@@ -591,8 +592,9 @@ internal static class Program
         if (!p.Start()) throw new InvalidOperationException("Core failed to start.");
         started = true;
         int pid = p.Id;
-        TextReader errors = p.StandardError;
-        TextReader output = p.StandardOutput;
+        StreamReader errors = p.StandardError;
+        StreamReader output = p.StandardOutput;
+        if (captureStreams != null) captureStreams(p.StandardInput.BaseStream, output.BaseStream, errors.BaseStream);
         Task stderrTask = Task.Run(delegate {
             using (errors)
                 ReadBoundedEvents(errors, delegate(string line) {
@@ -698,14 +700,12 @@ internal static class Program
                     bool probe = cycle % 3 == 0;
                     using (var accepted = new System.Threading.ManualResetEvent(false))
                     {
+                        Stream input = null, output = null, errors = null;
                         child = LaunchCore(probe ? "--ephemeral-probe" : "--ephemeral-check",
                             "dummy-user", "dummy-pass", 1, delegate(Process sender, string value) {
                                 if (value == "stop_accepted") accepted.Set();
-                            });
-                        // Get the underlying stream references before disposal.
-                        Stream input = child.StandardInput.BaseStream;
-                        Stream output = child.StandardOutput.BaseStream;
-                        Stream errors = child.StandardError.BaseStream;
+                            }, delegate(Stream i, Stream o, Stream e) { input = i; output = o; errors = e; });
+                        // Capture before readers start: fast check mode can exit before LaunchCore returns.
                         if (probe && (!RequestStop(child) || !accepted.WaitOne(5000))) return 1;
                         if (!child.WaitForExit(10000) || child.ExitCode != 0 || !DrainCoreReaders(child, 5000)) return 1;
                         Task leftover;
