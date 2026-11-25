@@ -31,4 +31,39 @@ try {
         if ($LASTEXITCODE -ne 0 -or $actual -cne $f.Value.gitBlob) { throw "Vendored cJSON source drift: $path" }
     }
 } finally { Pop-Location }
+# Record observed package archive hashes, without inventing hashes when the
+# setup action or runner has removed its package cache.
+$evidence = [ordered]@{
+    schemaVersion = 1
+    scope = 'observed build toolchain; archive digests are evidence, not an independently verified archive lock'
+    cmake = $cmakeVersion
+    packages = @()
+    tools = @()
+}
+$cache = Join-Path $MsysRoot 'var/cache/pacman/pkg'
+foreach ($pkg in $lock.msys2Packages.PSObject.Properties) {
+    $stem = $pkg.Name + '-' + $pkg.Value + '-'
+    $archives = @()
+    if (Test-Path -LiteralPath $cache -PathType Container) {
+        $archives = @(Get-ChildItem -LiteralPath $cache -File | Where-Object {
+            $_.Name.StartsWith($stem,[StringComparison]::Ordinal) -and $_.Name -match '\.pkg\.tar\.(zst|xz|gz)$'
+        } | ForEach-Object {
+            [ordered]@{file=$_.Name;sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash;bytes=$_.Length}
+        })
+    }
+    $evidence.packages += [ordered]@{name=$pkg.Name;version=$installed[$pkg.Name];archives=$archives}
+}
+foreach ($tool in @('gcc.exe','g++.exe','ninja.exe','objdump.exe','ld.exe','strip.exe')) {
+    $file = Join-Path $MsysRoot ('ucrt64/bin/' + $tool)
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing build tool: $tool" }
+    $evidence.tools += [ordered]@{name=$tool;sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash}
+}
+foreach ($file in @((Get-Command cmake.exe).Source,(Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'))) {
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'Missing build tool executable' }
+    $evidence.tools += [ordered]@{name=[IO.Path]::GetFileName($file);sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash}
+}
+if (-not $env:RUNNER_TEMP) { throw 'Missing CI evidence directory' }
+$evidence | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'build-toolchain-evidence.json') -Encoding utf8
+$observed = @($evidence.packages | Where-Object { @($_.archives).Count -gt 0 }).Count
+Write-Host "BUILD_TOOLCHAIN_EVIDENCE packagesWithArchives=$observed tools=$($evidence.tools.Count)"
 Write-Host "BUILD_DEPENDENCY_LOCK_PASS packages=$($lock.msys2Packages.PSObject.Properties.Name.Count)"
