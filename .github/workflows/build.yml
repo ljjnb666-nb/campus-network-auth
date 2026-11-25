@@ -70,6 +70,10 @@ jobs:
           & "$env:MSYS2_ROOT\ucrt64\bin\gcc.exe" --version | Select-Object -First 1
           Test-Path "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 
+      - name: Verify reviewed build dependencies
+        shell: pwsh
+        run: ./scripts/Test-BuildDependencies.ps1 -MsysRoot $env:MSYS2_ROOT
+
       - name: Build core and GUI from source
         shell: pwsh
         run: |
@@ -179,6 +183,10 @@ jobs:
           }
           Write-Host 'BUILD_MANIFEST_VERIFY_PASS'
 
+      - name: Generate source-level CycloneDX SBOM
+        shell: pwsh
+        run: ./scripts/New-SourceSbom.ps1
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -187,6 +195,7 @@ jobs:
             build-core/澈知科技-源码重建.exe
             build-core/认证核心-源码重建.exe
             build-core/build-manifest.json
+            build-core/sbom.cdx.json
             build-core/澈知科技-源码重建.exe.config
           if-no-files-found: error
 
