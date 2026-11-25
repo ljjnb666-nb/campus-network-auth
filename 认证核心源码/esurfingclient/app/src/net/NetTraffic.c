@@ -3,10 +3,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include "utils/log/Logger.h"
 #include "utils/platform/PlatformUtils.h"
 #include "utils/sim/SimThread.h"
+#include "utils/time/TimeUtils.h"
 
 #include <cJSON/cJSON.h>
 
@@ -14,11 +16,13 @@
 #include <windows.h>
 /** 1601-01-01 到 1970-01-01 的 100 纳秒数 (FILETIME 转 Unix 时间用) */
 #define NET_TRAFFIC_EPOCH_DIFF 116444736000000000ULL
-typedef CRITICAL_SECTION traffic_lock_t;
+typedef SRWLOCK traffic_lock_t;
+#define TRAFFIC_LOCK_INIT SRWLOCK_INIT
 #else
 #include <pthread.h>
 #include <time.h>
 typedef pthread_mutex_t traffic_lock_t;
+#define TRAFFIC_LOCK_INIT PTHREAD_MUTEX_INITIALIZER
 #endif
 
 /** 最多同时跟踪多少块网卡 (家用/办公/路由都远到不了这个数) */
@@ -47,9 +51,9 @@ typedef struct
     double up;
 } traffic_row_t;
 
-static traffic_lock_t s_lock;
-static bool s_lock_ready;
-static volatile bool s_running;
+static traffic_lock_t s_lock = TRAFFIC_LOCK_INIT;
+static traffic_lock_t s_lifecycle = TRAFFIC_LOCK_INIT;
+static atomic_bool s_running = false;
 static sim_thread_t* s_thread;
 
 static traffic_row_t s_rows[NET_TRAFFIC_MAX];
@@ -64,32 +68,49 @@ static uint64_t s_prev_at_ms;
 /**
  * 平台相关的锁 / 时钟 / 睡眠收在这几个小函数里, 上面的采样逻辑就与平台无关
  */
-static void traffic_lock_init(void)
+static void acquire(traffic_lock_t* lock)
 {
 #ifdef _WIN32
-    InitializeCriticalSection(&s_lock);
+    AcquireSRWLockExclusive(lock);
 #else
-    pthread_mutex_init(&s_lock, NULL);
-#endif
-    s_lock_ready = true;
-}
-
-static void traffic_lock(void)
-{
-#ifdef _WIN32
-    EnterCriticalSection(&s_lock);
-#else
-    pthread_mutex_lock(&s_lock);
+    pthread_mutex_lock(lock);
 #endif
 }
 
-static void traffic_unlock(void)
+static void release(traffic_lock_t* lock)
 {
 #ifdef _WIN32
-    LeaveCriticalSection(&s_lock);
+    ReleaseSRWLockExclusive(lock);
 #else
-    pthread_mutex_unlock(&s_lock);
+    pthread_mutex_unlock(lock);
 #endif
+}
+
+static void traffic_lock(void) { acquire(&s_lock); }
+static void traffic_unlock(void) { release(&s_lock); }
+
+/* Called only by the lifecycle owner, with no active sampling worker. */
+static void clear_samples(void)
+{
+    traffic_lock();
+    s_row_count = 0;
+    s_prev_count = 0;
+    s_prev_at_ms = 0;
+    s_timestamp_ms = 0;
+    s_default_id[0] = '\0';
+    traffic_unlock();
+}
+
+static bool calculate_rate(uint64_t previous_at, uint64_t now,
+    uint64_t previous_rx, uint64_t previous_tx, uint64_t rx, uint64_t tx,
+    double* down, double* up)
+{
+    if (previous_at == 0 || now <= previous_at || rx < previous_rx || tx < previous_tx)
+        return false;
+    const uint64_t elapsed = now - previous_at;
+    *down = (double)(rx - previous_rx) * 1000.0 / (double)elapsed;
+    *up = (double)(tx - previous_tx) * 1000.0 / (double)elapsed;
+    return true;
 }
 
 /**
@@ -135,8 +156,10 @@ static void traffic_sample(void)
 {
     adapter_stats_t frames[NET_TRAFFIC_MAX];
     char default_id[ADAPTER_ID_LEN] = {0};
-    const uint8_t count = get_adapters_stats(frames, NET_TRAFFIC_MAX, default_id, sizeof(default_id));
-    const uint64_t now = traffic_now_ms();
+    const uint8_t reported = get_adapters_stats(frames, NET_TRAFFIC_MAX, default_id, sizeof(default_id));
+    const uint8_t count = reported > NET_TRAFFIC_MAX ? NET_TRAFFIC_MAX : reported;
+    const uint64_t now = get_steady_tm_ms();
+    const uint64_t wall_now = traffic_now_ms();
 
     traffic_row_t rows[NET_TRAFFIC_MAX];
     traffic_prev_t prev[NET_TRAFFIC_MAX];
@@ -156,14 +179,10 @@ static void traffic_sample(void)
 
         for (uint8_t j = 0; j < s_prev_count; j++)
         {
-            if (strcmp(s_prev[j].id, frames[i].id) != 0) continue;
-            const uint64_t elapsed = (s_prev_at_ms != 0 && now > s_prev_at_ms) ? (now - s_prev_at_ms) : 0;
-            if (elapsed > 0 && frames[i].rx_bytes >= s_prev[j].rx_bytes && frames[i].tx_bytes >= s_prev[j].tx_bytes)
-            {
-                rows[i].has_rate = true;
-                rows[i].down = (double)(frames[i].rx_bytes - s_prev[j].rx_bytes) * 1000.0 / (double)elapsed;
-                rows[i].up = (double)(frames[i].tx_bytes - s_prev[j].tx_bytes) * 1000.0 / (double)elapsed;
-            }
+            if (strcmp(s_prev[j].id, rows[i].id) != 0) continue;
+            rows[i].has_rate = calculate_rate(s_prev_at_ms, now,
+                s_prev[j].rx_bytes, s_prev[j].tx_bytes, frames[i].rx_bytes,
+                frames[i].tx_bytes, &rows[i].down, &rows[i].up);
             break;
         }
     }
@@ -172,7 +191,7 @@ static void traffic_sample(void)
     memcpy(s_rows, rows, sizeof(traffic_row_t) * count);
     s_row_count = count;
     snprintf(s_default_id, sizeof(s_default_id), "%s", default_id);
-    s_timestamp_ms = now;
+    s_timestamp_ms = wall_now;
     memcpy(s_prev, prev, sizeof(traffic_prev_t) * count);
     s_prev_count = count;
     s_prev_at_ms = now;
@@ -182,56 +201,137 @@ static void traffic_sample(void)
 static int traffic_thread(void* arg)
 {
     (void)arg;
-    while (s_running)
+    while (atomic_load(&s_running))
     {
         traffic_sample();
         for (int i = 0; i < NET_TRAFFIC_INTERVAL_MS / NET_TRAFFIC_SLICE_MS; i++)
         {
-            if (s_running == false) return 0;
+            if (!atomic_load(&s_running)) return 0;
             traffic_sleep_ms(NET_TRAFFIC_SLICE_MS);
         }
     }
     return 0;
 }
 
+static bool start_worker(sim_thread_func worker)
+{
+    acquire(&s_lifecycle);
+    if (s_thread != NULL)
+    {
+        const bool running = atomic_load(&s_running);
+        release(&s_lifecycle);
+        return running;
+    }
+    clear_samples();
+    atomic_store(&s_running, true);
+    s_thread = sim_thread_create(worker, NULL);
+    const bool started = s_thread != NULL;
+    if (!started) atomic_store(&s_running, false);
+    release(&s_lifecycle);
+    return started;
+}
+
 bool net_traffic_start(void)
 {
-    if (s_thread != NULL) return true;
-    if (s_lock_ready == false) traffic_lock_init();
-
-    traffic_sample(); // 先采一帧: 只建立基线, 还没有速率
-    s_running = true;
-    s_thread = sim_thread_create(traffic_thread, NULL);
-    if (s_thread == NULL)
+    if (!start_worker(traffic_thread))
     {
-        s_running = false;
-        LOG_WARN("网速采样线程创建失败");
+        LOG_WARN("网速采样线程创建失败或旧线程尚未回收");
         return false;
     }
-    LOG_DEBUG("网速采样已启动 (每秒一帧)");
+    return true;
+}
+
+static bool stop_worker(void)
+{
+    acquire(&s_lifecycle);
+    atomic_store(&s_running, false);
+    if (s_thread != NULL)
+    {
+        if (sim_thread_join(s_thread, NULL) != 0)
+        {
+            release(&s_lifecycle);
+            return false;
+        }
+        sim_thread_destroy(s_thread);
+        s_thread = NULL;
+    }
+    clear_samples();
+    release(&s_lifecycle);
     return true;
 }
 
 void net_traffic_stop(void)
 {
-    if (s_thread == NULL) return;
-    s_running = false;
-    int code = 0;
-    sim_thread_join(s_thread, &code);
-    s_thread = NULL;
-    LOG_DEBUG("网速采样已停止");
+    if (!stop_worker()) LOG_ERROR("网速采样线程等待失败, 保留线程对象");
+}
+
+static int test_worker(void* arg)
+{
+    (void)arg;
+    while (atomic_load(&s_running)) traffic_sleep_ms(1);
+    return 0;
+}
+
+static int test_stop(void* arg)
+{
+    (void)arg;
+    return stop_worker() ? 0 : 1;
+}
+
+bool traffic_resource_self_test(void)
+{
+    double down = 0, up = 0;
+    if (!calculate_rate(1000, 2000, 10, 20, 1010, 2020, &down, &up) ||
+        down != 1000 || up != 2000 ||
+        calculate_rate(0, 1000, 0, 0, 10, 10, &down, &up) ||
+        calculate_rate(1000, 1000, 0, 0, 10, 10, &down, &up) ||
+        calculate_rate(2000, 1000, 0, 0, 10, 10, &down, &up) ||
+        calculate_rate(1000, 2000, 10, 10, 9, 20, &down, &up) ||
+        calculate_rate(1000, 2000, 10, 10, 20, 9, &down, &up))
+        return false;
+
+    for (int i = 0; i < 16; ++i)
+    {
+        if (!start_worker(test_worker) || !start_worker(test_worker))
+        {
+            stop_worker();
+            return false;
+        }
+        traffic_lock();
+        s_row_count = 1;
+        s_prev_count = 1;
+        s_prev_at_ms = 1000;
+        traffic_unlock();
+        sim_thread_t* one = sim_thread_create(test_stop, NULL);
+        sim_thread_t* two = sim_thread_create(test_stop, NULL);
+        int rc1 = -1, rc2 = -1;
+        if (one != NULL)
+        {
+            if (sim_thread_join(one, &rc1) != 0) abort();
+            sim_thread_destroy(one);
+        }
+        if (two != NULL)
+        {
+            if (sim_thread_join(two, &rc2) != 0) abort();
+            sim_thread_destroy(two);
+        }
+        if (!stop_worker() || rc1 != 0 || rc2 != 0 || s_thread != NULL ||
+            atomic_load(&s_running) || s_row_count != 0 || s_prev_count != 0 ||
+            s_prev_at_ms != 0) return false;
+    }
+    return true;
 }
 
 char* net_traffic_json(void)
 {
     // s_row_count 的读取也放进锁内, 与采样线程的写保持一致
-    if (s_lock_ready == false) return NULL;
+    if (!atomic_load(&s_running)) return NULL;
 
     cJSON* root = cJSON_CreateObject();
     if (root == NULL) return NULL;
 
     traffic_lock();
-    if (s_row_count == 0)
+    if (!atomic_load(&s_running) || s_row_count == 0)
     {
         traffic_unlock();
         cJSON_Delete(root);
