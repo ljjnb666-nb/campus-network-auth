@@ -1,6 +1,13 @@
 #include "utils/sim/SimThread.h"
 
 #include "utils/log/Logger.h"
+#include <stdlib.h>
+
+typedef struct
+{
+    sim_thread_func func;
+    void* arg;
+} thread_start_t;
 
 #ifdef _WIN32
 
@@ -14,31 +21,32 @@ struct SimThread
 
 static DWORD WINAPI win32_thread_func(LPVOID arg)
 {
-    sim_thread_func* func_info = (sim_thread_func*)arg;
-    sim_thread_func func = func_info[0];
-    void* func_arg = func_info[1];
-    free(func_info);
+    thread_start_t* start = arg;
+    sim_thread_func func = start->func;
+    void* func_arg = start->arg;
+    free(start);
     return (DWORD)func(func_arg);
 }
 
 sim_thread_t* sim_thread_create(sim_thread_func func, void* arg)
 {
-    sim_thread_t* thread = (sim_thread_t*)malloc(sizeof(sim_thread_t));
+    if (func == NULL) return NULL;
+    sim_thread_t* thread = malloc(sizeof(*thread));
     if (!thread) return NULL;
 
-    sim_thread_func* func_info = (sim_thread_func*)malloc(2 * sizeof(sim_thread_func));
-    if (!func_info)
+    thread_start_t* start = malloc(sizeof(*start));
+    if (start == NULL)
     {
         free(thread);
         return NULL;
     }
-    func_info[0] = func;
-    func_info[1] = arg;
+    start->func = func;
+    start->arg = arg;
 
-    thread->handle = CreateThread(NULL, 0, win32_thread_func, func_info, 0, &thread->id);
+    thread->handle = CreateThread(NULL, 0, win32_thread_func, start, 0, &thread->id);
     if (!thread->handle)
     {
-        free(func_info);
+        free(start);
         free(thread);
         return NULL;
     }
@@ -47,26 +55,23 @@ sim_thread_t* sim_thread_create(sim_thread_func func, void* arg)
 
 int sim_thread_join(sim_thread_t* thread, int* exit_code)
 {
-    if (!thread) return -1;
+    if (!thread || !thread->handle || thread->id == GetCurrentThreadId()) return -1;
     if (WaitForSingleObject(thread->handle, INFINITE) != WAIT_OBJECT_0)
     {
         return -1;
     }
-    if (exit_code)
-    {
-        DWORD code;
-        GetExitCodeThread(thread->handle, &code);
-        *exit_code = (int)code;
-    }
-    CloseHandle(thread->handle);
+    DWORD code = 0;
+    if (exit_code && !GetExitCodeThread(thread->handle, &code)) return -1;
+    if (!CloseHandle(thread->handle)) return -1;
+    if (exit_code) *exit_code = (int)code;
     thread->handle = NULL;
     return 0;
 }
 
 int sim_thread_detach(sim_thread_t* thread)
 {
-    if (!thread) return -1;
-    CloseHandle(thread->handle);
+    if (!thread || !thread->handle) return -1;
+    if (!CloseHandle(thread->handle)) return -1;
     thread->handle = NULL;
     return 0;
 }
@@ -92,36 +97,37 @@ void sim_thread_destroy(sim_thread_t* thread)
 struct SimThread
 {
     pthread_t thread;
-    int detached;
+    int consumed;
 };
 
 static void* pthread_thread_func(void* arg)
 {
-    sim_thread_func* func_info = (sim_thread_func*)arg;
-    sim_thread_func func = func_info[0];
-    void* func_arg = func_info[1];
-    free(func_info);
+    thread_start_t* start = arg;
+    sim_thread_func func = start->func;
+    void* func_arg = start->arg;
+    free(start);
     return (void*)(intptr_t)func(func_arg);
 }
 
 sim_thread_t* sim_thread_create(sim_thread_func func, void* arg)
 {
-    sim_thread_t* thread = (sim_thread_t*)malloc(sizeof(sim_thread_t));
+    if (func == NULL) return NULL;
+    sim_thread_t* thread = malloc(sizeof(*thread));
     if (!thread) return NULL;
 
-    sim_thread_func* func_info = (sim_thread_func*)malloc(2 * sizeof(sim_thread_func));
-    if (!func_info)
+    thread_start_t* start = malloc(sizeof(*start));
+    if (start == NULL)
     {
         free(thread);
         return NULL;
     }
-    func_info[0] = func;
-    func_info[1] = arg;
+    start->func = func;
+    start->arg = arg;
 
-    thread->detached = 0;
-    if (pthread_create(&thread->thread, NULL, pthread_thread_func, func_info) != 0)
+    thread->consumed = 0;
+    if (pthread_create(&thread->thread, NULL, pthread_thread_func, start) != 0)
     {
-        free(func_info);
+        free(start);
         free(thread);
         return NULL;
     }
@@ -131,10 +137,11 @@ sim_thread_t* sim_thread_create(sim_thread_func func, void* arg)
 int sim_thread_join(sim_thread_t* thread, int* exit_code)
 {
     if (!thread) return -1;
-    if (thread->detached) return -1;
+    if (thread->consumed || pthread_equal(thread->thread, pthread_self())) return -1;
 
     void* ret;
     if (pthread_join(thread->thread, &ret) != 0) return -1;
+    thread->consumed = 1;
     if (exit_code) *exit_code = (int)(intptr_t)ret;
     return 0;
 }
@@ -142,10 +149,10 @@ int sim_thread_join(sim_thread_t* thread, int* exit_code)
 int sim_thread_detach(sim_thread_t* thread)
 {
     if (!thread) return -1;
-    if (thread->detached) return -1;
+    if (thread->consumed) return -1;
 
     if (pthread_detach(thread->thread) != 0) return -1;
-    thread->detached = 1;
+    thread->consumed = 1;
     return 0;
 }
 
