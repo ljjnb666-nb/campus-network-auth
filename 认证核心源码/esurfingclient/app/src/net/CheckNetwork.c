@@ -390,6 +390,37 @@ static network_status_t probe_drain(CURLM* multi, probe_t* probes, size_t count)
     return result;
 }
 
+/* Cancellation is opt-in: the background worker owns its running flag;
+ * synchronous callers retain the existing check_network_status contract. */
+static bool probe_cancelled(const atomic_bool* running)
+{
+    return running != NULL && !atomic_load(running);
+}
+
+static network_status_t probe_drive(CURLM* multi, probe_t* probes, size_t count,
+                                    const atomic_bool* keep_running)
+{
+    const uint64_t start = get_steady_tm_ms();
+    if (start == 0) return STATUS_ERROR;
+    int running = 0;
+    while (!probe_cancelled(keep_running))
+    {
+        if (curl_multi_perform(multi, &running) != CURLM_OK) break;
+        const network_status_t result = probe_drain(multi, probes, count);
+        if (probe_cancelled(keep_running)) break;
+        if (result != STATUS_ERROR || running == 0) return result;
+        const uint64_t now = get_steady_tm_ms();
+        if (now < start || now - start >= PROBE_TOTAL_TIMEOUT_MS + 1000) break;
+        const uint64_t left = PROBE_TOTAL_TIMEOUT_MS + 1000 - (now - start);
+        const int slice = keep_running != NULL ? 100 : 200;
+        int wait_fds = 0;
+        /* poll waits even when libcurl has no descriptors, unlike multi_wait. */
+        if (curl_multi_poll(multi, NULL, 0, left < (uint64_t)slice ? (int)left : slice,
+                            &wait_fds) != CURLM_OK) break;
+    }
+    return STATUS_ERROR;
+}
+
 /* No external requests. Exercise immediate completion with an invalid URL,
  * plus the exact classification boundary used in production. */
 static int probe_test_thread(void* arg)
@@ -448,10 +479,12 @@ bool probe_resource_self_test(void)
         curl_multi_add_handle(multi, handle) == CURLM_OK)
     {
         added = true;
-        int running = 0;
         probe_t probe = { .handle = handle, .code = CURLE_AGAIN };
-        ok = curl_multi_perform(multi, &running) == CURLM_OK && running == 0 &&
-            probe_drain(multi, &probe, 1) == STATUS_ERROR &&
+        atomic_bool keep_running = false;
+        ok = probe_drive(multi, &probe, 1, &keep_running) == STATUS_ERROR &&
+            probe.code == CURLE_AGAIN; // no perform after cancellation
+        atomic_store(&keep_running, true);
+        ok = ok && probe_drive(multi, &probe, 1, &keep_running) == STATUS_ERROR &&
             probe.code == CURLE_URL_MALFORMAT;
     }
     if (added) curl_multi_remove_handle(multi, handle);
@@ -503,9 +536,10 @@ static void probe_report_failure(const probe_t* probes, const size_t count)
  *
  * @return STATUS_OK 拿到 204/301, STATUS_NEED_AUTH 拿到 302, 其余 STATUS_ERROR
  */
-static network_status_t probe_group(const probe_target_t* targets, const size_t count)
+static network_status_t probe_group(const probe_target_t* targets, const size_t count,
+                                    const atomic_bool* keep_running)
 {
-    if (targets == NULL || count == 0) return STATUS_ERROR;
+    if (targets == NULL || count == 0 || probe_cancelled(keep_running)) return STATUS_ERROR;
 
     CURLM* multi = curl_multi_init();
     if (multi == NULL) return STATUS_ERROR;
@@ -515,7 +549,7 @@ static network_status_t probe_group(const probe_target_t* targets, const size_t 
     size_t probe_count = 0;
     network_status_t result = STATUS_ERROR;
 
-    for (size_t i = 0; i < count && probe_count < PROBE_MAX; i++)
+    for (size_t i = 0; i < count && probe_count < PROBE_MAX && !probe_cancelled(keep_running); i++)
     {
         char host[128] = "";
         const bool has_host = url_host(targets[i].url, host, sizeof(host));
@@ -524,7 +558,7 @@ static network_status_t probe_group(const probe_target_t* targets, const size_t 
         if (known != NULL && known->ip_count > 0)
         {
             // 域名: 只发固定 IP 的各路, 不走系统 DNS
-            for (uint8_t k = 0; k < known->ip_count && probe_count < PROBE_MAX; k++)
+            for (uint8_t k = 0; k < known->ip_count && k < PROBE_IP_MAX && probe_count < PROBE_MAX && !probe_cancelled(keep_running); k++)
             {
                 snprintf(labels[probe_count], sizeof(labels[0]), "%s/ip%" PRIu8, targets[i].label, (uint8_t)(k + 1));
                 probe_add(multi, targets[i].url, host, known->ips[k], labels[probe_count], probes, &probe_count);
@@ -538,22 +572,11 @@ static network_status_t probe_group(const probe_target_t* targets, const size_t 
         }
     }
 
-    if (probe_count > 0)
+    if (probe_count > 0 && !probe_cancelled(keep_running))
     {
-        const uint64_t deadline = get_steady_tm_ms() + PROBE_TOTAL_TIMEOUT_MS + 1000;
-        int running = 0;
-
-        for (;;)
-        {
-            if (curl_multi_perform(multi, &running) != CURLM_OK) break;
-            result = probe_drain(multi, probes, probe_count);
-            if (result != STATUS_ERROR || running == 0 || get_steady_tm_ms() >= deadline) break;
-
-            int wait_fds = 0;
-            if (curl_multi_wait(multi, NULL, 0, 200, &wait_fds) != CURLM_OK) break;
-        }
-
-        if (result == STATUS_ERROR) probe_report_failure(probes, probe_count);
+        result = probe_drive(multi, probes, probe_count, keep_running);
+        if (result == STATUS_ERROR && !probe_cancelled(keep_running))
+            probe_report_failure(probes, probe_count);
     }
 
     for (size_t i = 0; i < probe_count; i++)
@@ -564,16 +587,18 @@ static network_status_t probe_group(const probe_target_t* targets, const size_t 
     }
     curl_multi_cleanup(multi);
 
-    return result;
+    return probe_cancelled(keep_running) ? STATUS_ERROR : result;
 }
 
-network_status_t check_network_status(const bool connect_only)
+static network_status_t check_network_status_impl(const bool connect_only, const atomic_bool* keep_running)
 {
     /**
      * connect_only 只为兼容调用点保留: 探测统一发完整 GET 再看状态码 ——
      * 只建连接不请求的话拿不到 204/302, 也就分不清"能上网"和"需要认证"。
      */
     (void)connect_only;
+    if (probe_cancelled(keep_running) || g_prog_status == NULL || g_prog_cnt <= 0)
+        return STATUS_ERROR;
 
     /**
      * 联网探测目标来自配置 (probe_hosts), 没配就用内置的 hicloud / miui 两组。
@@ -597,14 +622,20 @@ network_status_t check_network_status(const bool connect_only)
     };
 
     const network_status_t status =
-        (internet_count > 0) ? probe_group(internet_targets, internet_count) : STATUS_ERROR;
+        (internet_count > 0) ? probe_group(internet_targets, internet_count, keep_running) : STATUS_ERROR;
+    if (probe_cancelled(keep_running)) return STATUS_ERROR;
     if (status != STATUS_ERROR) return status;
 
     /**
      * 外网都不通: 再并发试认证服务器 —— 能连上 (返回 302 或其它状态码) 说明
      * 人还在校园网里, 只是没过认证。
      */
-    return probe_group(auth_targets, sizeof(auth_targets) / sizeof(auth_targets[0]));
+    return probe_group(auth_targets, sizeof(auth_targets) / sizeof(auth_targets[0]), keep_running);
+}
+
+network_status_t check_network_status(const bool connect_only)
+{
+    return check_network_status_impl(connect_only, NULL);
 }
 
 /**
@@ -675,7 +706,7 @@ static int probe_thread(void* arg)
     while (atomic_load(&s_probe_running))
     {
         const uint64_t started = get_steady_tm_ms();
-        const network_status_t observed = check_network_status(true);
+        const network_status_t observed = check_network_status_impl(true, &s_probe_running);
         if (!atomic_load(&s_probe_running)) return 0;
         atomic_store(&s_probe_cached, observed);
         const uint64_t elapsed = get_steady_tm_ms() - started;
@@ -773,6 +804,10 @@ static int probe_lifecycle_test_stop(void* arg)
 
 bool probe_lifecycle_self_test(void)
 {
+    atomic_bool cancelled_worker = false;
+    /* Must return before consulting account configuration or opening sockets. */
+    if (check_network_status_impl(true, &cancelled_worker) != STATUS_ERROR)
+        return false;
     for (int i = 0; i < 16; ++i)
     {
         if (!start_probe_worker(probe_lifecycle_test_worker) ||
