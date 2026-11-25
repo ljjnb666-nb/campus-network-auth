@@ -779,6 +779,7 @@ static cipher_interface_t* create_cipher_factory(const char* algo_id)
 
 void destroy_cipher_factory(void)
 {
+    if (g_prog_status == NULL || tl_thread_idx < 0 || tl_thread_idx >= g_prog_cnt) return;
     cipher_interface_t* cipher = g_prog_status[tl_thread_idx].auth_cfg.cipher;
     if (cipher == NULL)
     {
@@ -791,8 +792,8 @@ void destroy_cipher_factory(void)
         return;
     }
     LOG_DEBUG("销毁加解密工厂");
-    cipher->destroy(cipher);
     g_prog_status[tl_thread_idx].auth_cfg.cipher = NULL;
+    cipher->destroy(cipher);
     cipher = NULL;
     LOG_DEBUG("销毁完成");
 }
@@ -810,6 +811,7 @@ bool cipher_supported(const char* algo_id)
 
 bool init_cipher(const char* algo_id)
 {
+    if (!algo_id || !g_prog_status || tl_thread_idx < 0 || tl_thread_idx >= g_prog_cnt) return false;
     LOG_DEBUG("开始初始化加解密工厂");
     // ZSM 算法更新流程会带着旧 cipher 再次进入: 先销毁旧的再换新的, 否则每次更新泄漏一份
     destroy_cipher_factory();
