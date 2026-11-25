@@ -1,3 +1,7 @@
+#ifdef _WIN32
+#include <winsock2.h>
+#endif
+
 #include "net/NetClient.h"
 
 #include "NetClientInternal.h"
@@ -454,9 +458,65 @@ static bool probe_thread_resource_self_test(void)
     return true;
 }
 
+#ifdef _WIN32
+/* A loopback listener with no response producer keeps the HTTP request
+ * pending. Cancel only after a real curl_multi_perform has started it. */
+static bool probe_pending_cancel_self_test(void)
+{
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return false;
+    SOCKET listener = INVALID_SOCKET;
+    CURLM* multi = NULL;
+    CURL* easy = NULL;
+    bool added = false, ok = false;
+    struct sockaddr_in addr = {0};
+    int addr_len = sizeof(addr);
+    char url[96];
+    int running = 0;
+    atomic_bool keep_running = true;
+
+    listener = socket(AF_INET, SOCK_STREAM, 0);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (listener == INVALID_SOCKET ||
+        bind(listener, (struct sockaddr*)&addr, sizeof(addr)) != 0 ||
+        listen(listener, 1) != 0 ||
+        getsockname(listener, (struct sockaddr*)&addr, &addr_len) != 0) goto done;
+
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", (unsigned)ntohs(addr.sin_port));
+    multi = curl_multi_init();
+    easy = curl_easy_init();
+    if (multi == NULL || easy == NULL ||
+        curl_easy_setopt(easy, CURLOPT_URL, url) != CURLE_OK ||
+        curl_easy_setopt(easy, CURLOPT_PROXY, "") != CURLE_OK ||
+        curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT_MS, 2000L) != CURLE_OK ||
+        curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, 3000L) != CURLE_OK ||
+        curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, probe_sink) != CURLE_OK ||
+        curl_multi_add_handle(multi, easy) != CURLM_OK) goto done;
+
+    added = true;
+    if (curl_multi_perform(multi, &running) != CURLM_OK || running != 1) goto done;
+    probe_t probe = { .handle = easy, .code = CURLE_AGAIN };
+    atomic_store(&keep_running, false);
+    ok = probe_drive(multi, &probe, 1, &keep_running) == STATUS_ERROR &&
+         probe.code == CURLE_AGAIN;
+
+done:
+    if (added && curl_multi_remove_handle(multi, easy) != CURLM_OK) ok = false;
+    if (easy != NULL) curl_easy_cleanup(easy);
+    if (multi != NULL && curl_multi_cleanup(multi) != CURLM_OK) ok = false;
+    if (listener != INVALID_SOCKET && closesocket(listener) != 0) ok = false;
+    WSACleanup();
+    return ok;
+}
+#endif
+
 bool probe_resource_self_test(void)
 {
     if (!probe_thread_resource_self_test()) return false;
+#ifdef _WIN32
+    if (!probe_pending_cancel_self_test()) return false;
+#endif
     if (probe_sink(NULL, SIZE_MAX, 2, NULL) != 0 ||
         probe_sink(NULL, 4, 8, NULL) != 32 ||
         probe_classify(CURLE_OK, CURLE_OK, 204) != STATUS_OK ||
