@@ -10,12 +10,38 @@
 #include <cJSON/cJSON.h>
 
 #include "ControlInternal.h"
+#include "utils/time/TimeUtils.h"
+#include <stdatomic.h>
+#include <stdlib.h>
+#ifndef _WIN32
+#include <pthread.h>
+#endif
 
 #define TL_IDX_CONTROL (-3)
 
 #define CTL_TIMEOUT_MS 1000
 
-static volatile bool s_server_running = false;
+static atomic_bool s_server_running = false;
+
+#ifdef _WIN32
+static SRWLOCK s_lifecycle = SRWLOCK_INIT;
+static SRWLOCK s_wsa_lock = SRWLOCK_INIT;
+static void lifecycle_lock(void) { AcquireSRWLockExclusive(&s_lifecycle); }
+static void lifecycle_unlock(void) { ReleaseSRWLockExclusive(&s_lifecycle); }
+#else
+static pthread_mutex_t s_lifecycle = PTHREAD_MUTEX_INITIALIZER;
+static void lifecycle_lock(void) { pthread_mutex_lock(&s_lifecycle); }
+static void lifecycle_unlock(void) { pthread_mutex_unlock(&s_lifecycle); }
+#endif
+
+/* An absolute deadline must not be extended by a peer sending more bytes.
+ * A failed/backwards clock observation conservatively ends the wait. */
+static long remaining_ms(uint64_t start, uint64_t now, long timeout_ms)
+{
+    if (timeout_ms <= 0 || start == 0 || now < start) return 0;
+    const uint64_t elapsed = now - start;
+    return elapsed >= (uint64_t)timeout_ms ? 0 : timeout_ms - (long)elapsed;
+}
 
 static ctl_sock_t s_listen_sock = CTL_INVALID_SOCK;
 
@@ -38,13 +64,15 @@ bool ctl_net_init(void)
      * 属于记账式泄漏。初始化一次就够, 进程退出时由系统统一回收。
      */
     static bool s_wsa_ready = false;
-    if (s_wsa_ready) return true;
-
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return false;
-
-    s_wsa_ready = true;
-    return true;
+    AcquireSRWLockExclusive(&s_wsa_lock);
+    if (!s_wsa_ready)
+    {
+        WSADATA wsa;
+        s_wsa_ready = WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+    }
+    const bool ready = s_wsa_ready;
+    ReleaseSRWLockExclusive(&s_wsa_lock);
+    return ready;
 }
 #else
 bool ctl_net_init(void)
@@ -61,6 +89,10 @@ bool ctl_net_init(void)
  */
 static int ctl_wait_readable(const ctl_sock_t sock, const long timeout_ms)
 {
+    if (sock == CTL_INVALID_SOCK || timeout_ms < 0) return -1;
+#ifndef _WIN32
+    if (sock < 0 || sock >= FD_SETSIZE) return -1;
+#endif
     fd_set read_set;
     FD_ZERO(&read_set);
     FD_SET(sock, &read_set);
@@ -77,6 +109,10 @@ static int ctl_wait_readable(const ctl_sock_t sock, const long timeout_ms)
 
 int ctl_wait_writable(const ctl_sock_t sock, const long timeout_ms)
 {
+    if (sock == CTL_INVALID_SOCK || timeout_ms < 0) return -1;
+#ifndef _WIN32
+    if (sock < 0 || sock >= FD_SETSIZE) return -1;
+#endif
     fd_set write_set;
     FD_ZERO(&write_set);
     FD_SET(sock, &write_set);
@@ -124,21 +160,29 @@ bool control_port_available(const uint16_t port)
  */
 size_t ctl_read_line(const ctl_sock_t sock, char* buf, const size_t buf_len)
 {
+    if (buf == NULL || buf_len == 0) return 0;
     size_t used = 0;
+    const uint64_t start = get_steady_tm_ms();
 
     while (used + 1 < buf_len)
     {
-        if (ctl_wait_readable(sock, CTL_TIMEOUT_MS) != 1) break;
+        const long left = remaining_ms(start, get_steady_tm_ms(), CTL_TIMEOUT_MS);
+        if (left == 0 || ctl_wait_readable(sock, left) != 1) break;
 
         const int n = recv(sock, buf + used, (int)(buf_len - 1 - used), 0);
         if (n <= 0) break;
 
         used += (size_t)n;
-        if (memchr(buf, '\n', used) != NULL) break;
+        if (memchr(buf, '\n', used) != NULL)
+        {
+            buf[used] = '\0';
+            return used;
+        }
     }
 
-    buf[used] = '\0';
-    return used;
+    /* Do not dispatch or parse a truncated frame. */
+    buf[0] = '\0';
+    return 0;
 }
 
 /**
@@ -150,17 +194,15 @@ size_t ctl_read_line(const ctl_sock_t sock, char* buf, const size_t buf_len)
 void ctl_wait_close(const ctl_sock_t sock, const long timeout_ms)
 {
     char sink[64];
-    long waited = 0;
+    const uint64_t start = get_steady_tm_ms();
 
-    while (waited < timeout_ms)
+    while (true)
     {
-        const int ready = ctl_wait_readable(sock, 100);
+        const long left = remaining_ms(start, get_steady_tm_ms(), timeout_ms);
+        if (left == 0) return;
+        const int ready = ctl_wait_readable(sock, left > 100 ? 100 : left);
         if (ready < 0) return;
-        if (ready == 0)
-        {
-            waited += 100;
-            continue;
-        }
+        if (ready == 0) continue;
 
         const int n = recv(sock, sink, (int)sizeof(sink), 0);
         if (n <= 0) return; // 0 = FIN, -1 = RST / 错误
@@ -373,9 +415,10 @@ static int ctl_server_app(void* arg)
 
     LOG_DEBUG("控制通道服务线程已启动");
 
-    while (s_server_running)
+    while (atomic_load(&s_server_running))
     {
         if (ctl_wait_readable(s_listen_sock, 1000) != 1) continue;
+        if (!atomic_load(&s_server_running)) break;
 
         const ctl_sock_t client = accept(s_listen_sock, NULL, NULL);
         if (client == CTL_INVALID_SOCK) continue;
@@ -388,8 +431,10 @@ static int ctl_server_app(void* arg)
     return 0;
 }
 
-bool control_server_start(const uint16_t port)
+static bool start_locked(const uint16_t port)
 {
+    if (s_server_thread != NULL)
+        return atomic_load(&s_server_running) && s_server_port == port;
     if (ctl_net_init() == false)
     {
         LOG_ERROR("网络库初始化失败, 控制通道无法启动");
@@ -416,7 +461,10 @@ bool control_server_start(const uint16_t port)
     int exclusive = 1;
     if (setsockopt(s_listen_sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&exclusive, sizeof(exclusive)) != 0)
     {
-        LOG_WARN("控制通道设置 SO_EXCLUSIVEADDRUSE 失败");
+        LOG_ERROR("控制通道设置 SO_EXCLUSIVEADDRUSE 失败, 拒绝监听");
+        ctl_close(s_listen_sock);
+        s_listen_sock = CTL_INVALID_SOCK;
+        return false;
     }
 #else
     int reuse = 1;
@@ -449,13 +497,13 @@ bool control_server_start(const uint16_t port)
         return false;
     }
 
-    s_server_running = true;
+    atomic_store(&s_server_running, true);
     s_server_port = port;
     s_server_thread = sim_thread_create(ctl_server_app, NULL);
     if (s_server_thread == NULL)
     {
         LOG_ERROR("控制通道线程创建失败");
-        s_server_running = false;
+        atomic_store(&s_server_running, false);
         ctl_close(s_listen_sock);
         s_listen_sock = CTL_INVALID_SOCK;
         return false;
@@ -466,21 +514,55 @@ bool control_server_start(const uint16_t port)
     return true;
 }
 
-void control_server_stop(void)
+bool control_server_start(const uint16_t port)
 {
-    if (s_server_thread == NULL) return;
+    lifecycle_lock();
+    const bool ok = start_locked(port);
+    lifecycle_unlock();
+    return ok;
+}
 
-    s_server_running = false;
-
-    int result_code = 0;
-    sim_thread_join(s_server_thread, &result_code);
-    s_server_thread = NULL;
+static bool stop_locked(void)
+{
+    atomic_store(&s_server_running, false);
+    if (s_server_thread != NULL)
+    {
+        if (sim_thread_join(s_server_thread, NULL) != 0) return false;
+        sim_thread_destroy(s_server_thread);
+        s_server_thread = NULL;
+    }
 
     if (s_listen_sock != CTL_INVALID_SOCK)
     {
         ctl_close(s_listen_sock);
         s_listen_sock = CTL_INVALID_SOCK;
     }
+    return true;
+}
+
+void control_server_stop(void)
+{
+    lifecycle_lock();
+    const bool ok = stop_locked();
+    lifecycle_unlock();
+    if (!ok) LOG_ERROR("控制通道线程等待失败, 保留线程与套接字");
+}
+
+/* Offline checks exercise production deadline logic and invalid-buffer
+ * handling without sending a command or touching an authentication session. */
+bool control_resource_self_test(void)
+{
+    char byte = 'x';
+    return remaining_ms(100, 100, 1000) == 1000 &&
+        remaining_ms(100, 1099, 1000) == 1 &&
+        remaining_ms(100, 1100, 1000) == 0 &&
+        remaining_ms(100, 1101, 1000) == 0 &&
+        remaining_ms(100, 99, 1000) == 0 &&
+        remaining_ms(0, 100, 1000) == 0 &&
+        remaining_ms(100, 100, 0) == 0 &&
+        ctl_read_line(CTL_INVALID_SOCK, NULL, 0) == 0 &&
+        ctl_read_line(CTL_INVALID_SOCK, &byte, 0) == 0 && byte == 'x' &&
+        ctl_read_line(CTL_INVALID_SOCK, &byte, 1) == 0 && byte == '\0';
 }
 
 void control_set_port(const uint16_t port)
