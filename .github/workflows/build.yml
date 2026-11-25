@@ -264,12 +264,19 @@ jobs:
               $am = @($first.outputs | Where-Object { $_.file -ceq $name })
               $bm = @($second.outputs | Where-Object { $_.file -ceq $name })
               if ($am.Count -ne 1 -or $bm.Count -ne 1 -or $a -cne $am[0].sha256 -or $b -cne $bm[0].sha256) { throw "Rebuild manifest mismatch: $name" }
-              $results += [ordered]@{file=$name;firstSha256=$a;secondSha256=$b;byteIdentical=($a -ceq $b)}
+              $entry = [ordered]@{file=$name;firstSha256=$a;secondSha256=$b;byteIdentical=($a -ceq $b)}
+              if ($name.EndsWith('.exe',[StringComparison]::OrdinalIgnoreCase)) {
+                $pe = ./scripts/Compare-PeBuild.ps1 -First (Join-Path $baseline $name) -Second (Join-Path $repeat $name)
+                $entry['peComparison'] = $pe
+                $changed = @($pe.changedSections | ForEach-Object { if ($_.first) { $_.first.name } else { $_.second.name } })
+                Write-Host "REBUILD_PE $name timestamps=$($pe.firstCoffTimestamp),$($pe.secondCoffTimestamp) changedSections=$($changed -join ',')"
+              }
+              $results += $entry
               Write-Host "REBUILD_FILE $name first=$a second=$b identical=$($a -ceq $b)"
             }
             $identical = @($results | Where-Object { -not $_.byteIdentical }).Count -eq 0
             [ordered]@{schemaVersion=1;scope='two builds on one runner, distinct temporary directories; not independent reproducibility';gitCommit=$first.gitCommit;allByteIdentical=$identical;outputs=$results} |
-              ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $baseline 'repeatability.json') -Encoding utf8
+              ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $baseline 'repeatability.json') -Encoding utf8
             if ($identical) { Write-Host 'SAME_RUNNER_REBUILD_BYTE_IDENTICAL' }
             else { Write-Host '::warning::Same-runner rebuild differs; release reproducibility remains blocked' }
             Write-Host 'REBUILD_MEASUREMENT_COMPLETE'
