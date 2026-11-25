@@ -53,6 +53,7 @@ static void ab6c8_block_decrypt(uint32_t* v0_le, uint32_t* v1_le, const uint32_t
     }
     *v0_le = uint32_bswap(v9);
     *v1_le = uint32_bswap(v10);
+    cipher_secure_zero(v17, sizeof(v17));
 }
 
 static void ab6c8_block_encrypt(uint32_t* v0_le, uint32_t* v1_le, const uint32_t* k_le)
@@ -80,6 +81,7 @@ static void ab6c8_block_encrypt(uint32_t* v0_le, uint32_t* v1_le, const uint32_t
     }
     *v0_le = uint32_bswap(v9);
     *v1_le = uint32_bswap(v10);
+    cipher_secure_zero(v17, sizeof(v17));
 }
 
 static char* ab6c8_encrypt(cipher_interface_t* self, const char* text)
@@ -93,7 +95,7 @@ static char* ab6c8_encrypt(cipher_interface_t* self, const char* text)
     if (!padded) return NULL;
     uint8_t* out = s_malloc(padded_len);
     memcpy(out, padded, padded_len);
-    s_free(padded);
+    s_secure_free(padded, padded_len);
     uint32_t chain0 = ctx->iv[0];
     uint32_t chain1 = ctx->iv[1];
     for (size_t i = 0; i < padded_len; i += 8)
@@ -109,7 +111,7 @@ static char* ab6c8_encrypt(cipher_interface_t* self, const char* text)
         chain0 = v0; chain1 = v1;
     }
     char* hex = bytes_2_hex(out, padded_len);
-    s_free(out);
+    s_secure_free(out, padded_len);
     return hex;
 }
 
@@ -122,7 +124,7 @@ static char* ab6c8_decrypt(cipher_interface_t* self, const char* hex)
     uint8_t* ct = hex_2_bytes(hex, &ct_len);
     if (!ct || (ct_len % 8) != 0)
     {
-        s_free(ct);
+        s_secure_free(ct, ct_len);
         return NULL;
     }
     uint8_t* out = s_malloc(ct_len);
@@ -143,19 +145,20 @@ static char* ab6c8_decrypt(cipher_interface_t* self, const char* hex)
         prev0 = c0; prev1 = c1;
     }
 
-    s_free(ct);
+    s_secure_free(ct, ct_len);
+    const size_t allocation_len = ct_len;
     while (ct_len > 0 && out[ct_len - 1] == 0) ct_len--;
     char* text = s_malloc(ct_len + 1);
     memcpy(text, out, ct_len);
     text[ct_len] = '\0';
-    s_free(out);
+    s_secure_free(out, allocation_len);
     return text;
 }
 
 static void ab6c8_destroy(cipher_interface_t* self)
 {
     if (!self) return;
-    if (self->private_data) s_free(self->private_data);
+    if (self->private_data) s_secure_free(self->private_data, sizeof(ab6c8_linux_ctx_t));
     s_free(self);
 }
 
