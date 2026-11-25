@@ -224,11 +224,15 @@ bool des_buffer_lifecycle_self_test(void)
 /* Remaining algorithm families: exercise only public synthetic keys and text. */
 bool remaining_cipher_lifecycle_self_test(void)
 {
-    uint8_t key[48], iv[16];
+    /* Deliberately offset byte keys from aligned storage. Public byte-array
+     * interfaces must not require uint32_t alignment. */
+    _Alignas(uint32_t) uint8_t key_storage[49], iv_storage[17];
+    uint8_t* key = key_storage + 1;
+    uint8_t* iv = iv_storage + 1;
     uint32_t words[12], iv_words[2] = {UINT32_C(0x12345678), UINT32_C(0x89abcdef)};
-    for (size_t i = 0; i < sizeof(key); ++i) key[i] = (uint8_t)(i + 1);
+    for (size_t i = 0; i < 48; ++i) key[i] = (uint8_t)(i + 1);
     for (size_t i = 0; i < 12; ++i) words[i] = (uint32_t)(i + 1);
-    memset(iv, 0x5a, sizeof(iv));
+    memset(iv, 0x5a, 16);
     const char* messages[] = {"a","1234567","12345678","123456789","123456789012345","1234567890123456","12345678901234567","1234567890123456789012345678901"};
     bool ok = true;
     for (unsigned mode = 0; mode < 16 && ok; ++mode)
@@ -267,8 +271,8 @@ bool remaining_cipher_lifecycle_self_test(void)
         if (invalid) { s_secure_free_string(invalid); ok = false; }
         ci->destroy(ci);
     }
-    cipher_secure_zero(key, sizeof(key));
-    cipher_secure_zero(iv, sizeof(iv));
+    cipher_secure_zero(key_storage, sizeof(key_storage));
+    cipher_secure_zero(iv_storage, sizeof(iv_storage));
     cipher_secure_zero(words, sizeof(words));
     cipher_secure_zero(iv_words, sizeof(iv_words));
     return ok;
