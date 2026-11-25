@@ -162,3 +162,46 @@ void xor_bytes(const uint8_t* a, const uint8_t* b, uint8_t* result, const size_t
     if (!a || !b || !result) return;
     for (size_t i = 0; i < len; i++) result[i] = a[i] ^ b[i];
 }
+
+/* Exercise public cipher ownership with synthetic data only. No network. */
+bool des_buffer_lifecycle_self_test(void)
+{
+    uint8_t key[48], iv[8];
+    for (size_t i = 0; i < sizeof(key); ++i) key[i] = (uint8_t)(i + 1);
+    memset(iv, 0x5a, sizeof(iv));
+    const char* messages[] = {"a", "1234567", "12345678", "123456789",
+        "1234567890123456", "1234567890123456789012345678901"};
+    bool ok = true;
+    for (unsigned mode = 0; mode < 5; ++mode)
+    {
+        cipher_interface_t* ci = NULL;
+        switch (mode)
+        {
+        case 0: ci = create_desede_ecb_cipher(key, key + 24); break;
+        case 1: ci = create_desede_cbc_cipher(key, key + 24, iv, iv); break;
+        case 2: ci = create_desede_double_cbc_cipher(key, iv); break;
+        case 3: ci = create_des_ecb_six_cipher(key); break;
+        case 4: ci = create_des_ecb_six_keys_cipher(key, key + 8, key + 16,
+                    key + 24, key + 32, key + 40); break;
+        }
+        if (!ci) { ok = false; break; }
+        for (size_t i = 0; i < sizeof(messages) / sizeof(messages[0]); ++i)
+        {
+            char* encoded = ci->encrypt(ci, messages[i]);
+            char* decoded = encoded ? ci->decrypt(ci, encoded) : NULL;
+            const size_t expected = ((strlen(messages[i]) + 7) / 8) * 16;
+            if (!encoded || strlen(encoded) != expected ||
+                !decoded || strcmp(decoded, messages[i]) != 0) ok = false;
+            if (encoded) s_secure_free(encoded, strlen(encoded) + 1);
+            if (decoded) s_secure_free(decoded, strlen(decoded) + 1);
+            if (!ok) break;
+        }
+        char* invalid = ci->decrypt(ci, "00");
+        if (invalid) { s_secure_free(invalid, strlen(invalid) + 1); ok = false; }
+        ci->destroy(ci);
+        if (!ok) break;
+    }
+    cipher_secure_zero(key, sizeof(key));
+    cipher_secure_zero(iv, sizeof(iv));
+    return ok;
+}
