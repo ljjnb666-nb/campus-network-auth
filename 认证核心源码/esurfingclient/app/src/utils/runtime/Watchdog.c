@@ -293,9 +293,14 @@ static bool stop_worker(void)
     return true;
 }
 
+bool watchdog_stop_checked(void)
+{
+    return stop_worker();
+}
+
 void watchdog_stop(void)
 {
-    if (!stop_worker()) LOG_ERROR("看门狗线程等待失败, 保留线程对象");
+    if (!watchdog_stop_checked()) LOG_ERROR("看门狗线程等待失败, 保留线程对象");
 }
 
 void watchdog_pet(uint32_t budget_ms)
