@@ -2,6 +2,7 @@
 #include "cipher/CipherUtils.h"
 
 #include <stdint.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -66,6 +67,8 @@ static void desede_double_rotate_cd(uint8_t *cd56, const int shift)
         cd56[i] = C[(i + shift) % 28];
         cd56[28 + i] = D[(i + shift) % 28];
     }
+    cipher_secure_zero(C, sizeof(C));
+    cipher_secure_zero(D, sizeof(D));
 }
 static void desede_double_round_f(const uint8_t R[32], const uint8_t subkey48[48], uint8_t out32[32])
 {
@@ -85,6 +88,8 @@ static void desede_double_round_f(const uint8_t R[32], const uint8_t subkey48[48
         p += 6;
     }
     desede_double_apply_perm(out32, s_out, DESEDE_DOUBLE_P, 32);
+    cipher_secure_zero(expanded, sizeof(expanded));
+    cipher_secure_zero(s_out, sizeof(s_out));
 }
 static void desede_double_key_schedule(const uint8_t key8[8], uint8_t subkeys[16][48])
 {
@@ -97,6 +102,9 @@ static void desede_double_key_schedule(const uint8_t key8[8], uint8_t subkeys[16
         desede_double_apply_perm(tmp48, cd, DESEDE_DOUBLE_PC2, 48);
         memcpy(subkeys[round], tmp48, 48);
     }
+    cipher_secure_zero(key_bits, sizeof(key_bits));
+    cipher_secure_zero(cd, sizeof(cd));
+    cipher_secure_zero(tmp48, sizeof(tmp48));
 }
 static void desede_double_block_process(const uint8_t in[8], uint8_t out[8],
                                         const uint8_t subkeys[16][48], const int encrypt)
@@ -115,31 +123,42 @@ static void desede_double_block_process(const uint8_t in[8], uint8_t out[8],
         for (int i = 0; i < 32; ++i) newR[i] = L[i] ^ f[i];
         memcpy(L, R, 32);
         memcpy(R, newR, 32);
+        cipher_secure_zero(f, sizeof(f));
+        cipher_secure_zero(newR, sizeof(newR));
     }
     uint8_t preout[64], out_bits[64];
     memcpy(preout, R, 32);
     memcpy(preout + 32, L, 32);
     desede_double_apply_perm(out_bits, preout, DESEDE_DOUBLE_FP, 64);
     desede_double_bits_to_bytes(out_bits, out);
+    cipher_secure_zero(in_bits, sizeof(in_bits));
+    cipher_secure_zero(ip, sizeof(ip));
+    cipher_secure_zero(L, sizeof(L));
+    cipher_secure_zero(R, sizeof(R));
+    cipher_secure_zero(preout, sizeof(preout));
+    cipher_secure_zero(out_bits, sizeof(out_bits));
 }
 static void desede_double_encrypt_block(const uint8_t in[8], uint8_t out[8], const uint8_t key[8])
 {
     uint8_t subkeys[16][48];
     desede_double_key_schedule(key, subkeys);
     desede_double_block_process(in, out, subkeys, 1);
+    cipher_secure_zero(subkeys, sizeof(subkeys));
 }
 static void desede_double_decrypt_block(const uint8_t in[8], uint8_t out[8], const uint8_t key[8])
 {
     uint8_t subkeys[16][48];
     desede_double_key_schedule(key, subkeys);
     desede_double_block_process(in, out, subkeys, 0);
+    cipher_secure_zero(subkeys, sizeof(subkeys));
 }
 
 /* sub_2DCC: double 3DES-CBC encrypt (pass1 key[24..47], pass2 key[0..23]) */
 static uint8_t* desede_double_encrypt_raw(const uint8_t* key, const uint8_t* iv, const uint8_t* data,
                                           const size_t data_len, size_t* output_len)
 {
-    const int total = (int)((data_len + 7) & ~7);
+    if (data_len > (size_t)INT_MAX - 7) return NULL;
+    const int total = (int)((data_len + 7) & ~(size_t)7);
     uint8_t *out = s_calloc(1, total ? (size_t)total : DESEDE_DOUBLE_BLOCK_SIZE);
     if (!out) return NULL;
     memcpy(out, data, data_len);
@@ -153,6 +172,9 @@ static uint8_t* desede_double_encrypt_raw(const uint8_t* key, const uint8_t* iv,
         desede_double_decrypt_block(t2, t3, key + 32);
         desede_double_encrypt_block(t3, out + off, key + 40);
         memcpy(prev, out + off, 8);
+        cipher_secure_zero(t, sizeof(t));
+        cipher_secure_zero(t2, sizeof(t2));
+        cipher_secure_zero(t3, sizeof(t3));
     }
     memcpy(prev, iv, 8);
     for (int off = 0; off < total; off += 8)
@@ -163,7 +185,11 @@ static uint8_t* desede_double_encrypt_raw(const uint8_t* key, const uint8_t* iv,
         desede_double_decrypt_block(t2, t3, key + 8);
         desede_double_encrypt_block(t3, out + off, key + 16);
         memcpy(prev, out + off, 8);
+        cipher_secure_zero(t, sizeof(t));
+        cipher_secure_zero(t2, sizeof(t2));
+        cipher_secure_zero(t3, sizeof(t3));
     }
+    cipher_secure_zero(prev, sizeof(prev));
     *output_len = (size_t)total;
     return out;
 }
@@ -172,7 +198,7 @@ static uint8_t* desede_double_encrypt_raw(const uint8_t* key, const uint8_t* iv,
 static uint8_t* desede_double_decrypt_raw(const uint8_t* key, const uint8_t* iv, const uint8_t* data,
                                           const size_t data_len, size_t* output_len)
 {
-    if ((data_len & 7) != 0 || data_len < 8) return NULL;
+    if ((data_len & 7) != 0 || data_len < 8 || data_len > INT_MAX) return NULL;
     uint8_t *buf = s_malloc(data_len);
     if (!buf) return NULL;
     memcpy(buf, data, data_len);
@@ -185,6 +211,9 @@ static uint8_t* desede_double_decrypt_raw(const uint8_t* key, const uint8_t* iv,
         desede_double_decrypt_block(t2, t3, key + 0);
         const uint8_t *prev = (off == 0) ? iv : buf + off - 8;
         for (int i = 0; i < 8; ++i) buf[off + i] = t3[i] ^ prev[i];
+        cipher_secure_zero(t, sizeof(t));
+        cipher_secure_zero(t2, sizeof(t2));
+        cipher_secure_zero(t3, sizeof(t3));
     }
     /* inverse pass1: D(key40) E(key32) D(key24) + CBC chain */
     for (int off = (int)data_len - 8; off >= 0; off -= 8)
@@ -195,6 +224,9 @@ static uint8_t* desede_double_decrypt_raw(const uint8_t* key, const uint8_t* iv,
         desede_double_decrypt_block(t2, t3, key + 24);
         const uint8_t *prev = (off == 0) ? iv : buf + off - 8;
         for (int i = 0; i < 8; ++i) buf[off + i] = t3[i] ^ prev[i];
+        cipher_secure_zero(t, sizeof(t));
+        cipher_secure_zero(t2, sizeof(t2));
+        cipher_secure_zero(t3, sizeof(t3));
     }
     *output_len = data_len;
     return buf;
@@ -208,7 +240,7 @@ static char* desede_double_cbc_encrypt(cipher_interface_t* self, const char* tex
     size_t out_len=0; uint8_t* out = desede_double_encrypt_raw(d->key, d->iv, (const uint8_t*)text, text_len, &out_len);
     if(!out) return NULL;
     char* hex = bytes_2_hex(out, out_len);
-    s_free(out);
+    s_secure_free(out, out_len ? out_len : DESEDE_DOUBLE_BLOCK_SIZE);
     return hex;
 }
 
@@ -219,13 +251,14 @@ static char* desede_double_cbc_decrypt(cipher_interface_t* self, const char* hex
     size_t bytes_len=0; uint8_t* bytes = hex_2_bytes(hex, &bytes_len);
     if(!bytes) return NULL;
     size_t out_len=0; uint8_t* out = desede_double_decrypt_raw(d->key, d->iv, bytes, bytes_len, &out_len);
-    s_free(bytes);
+    s_secure_free(bytes, bytes_len);
     if(!out) return NULL;
+    const size_t allocation_len = out_len;
     while(out_len > 0 && out[out_len - 1] == 0) out_len--;
     char* result = s_malloc(out_len + 1);
     memcpy(result, out, out_len);
     result[out_len] = '\0';
-    s_free(out);
+    s_secure_free(out, allocation_len);
     return result;
 }
 
@@ -233,7 +266,7 @@ static void desede_double_cbc_destroy(cipher_interface_t* self)
 {
     if(self)
     {
-        s_free(self->private_data);
+        s_secure_free(self->private_data, sizeof(desede_double_cbc_android_data_t));
         s_free(self);
     }
 }
