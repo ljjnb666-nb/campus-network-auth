@@ -85,6 +85,8 @@ static void rotate_cd(uint8_t *cd56, const int shift)
     cd56[i]      = C[(i + shift) % 28];
     cd56[28 + i] = D[(i + shift) % 28];
   }
+  cipher_secure_zero(C, sizeof(C));
+  cipher_secure_zero(D, sizeof(D));
 }
 
 static void des_round_f(const uint8_t R[32], const uint8_t subkey48[48], uint8_t out32[32])
@@ -105,6 +107,8 @@ static void des_round_f(const uint8_t R[32], const uint8_t subkey48[48], uint8_t
     p += 6;
   }
   apply_perm(out32, s_out, P_, 32);
+  cipher_secure_zero(expanded, sizeof(expanded));
+  cipher_secure_zero(s_out, sizeof(s_out));
 }
 
 static void des_key_schedule(const uint8_t key8[8], uint8_t subkeys[16][48])
@@ -120,6 +124,9 @@ static void des_key_schedule(const uint8_t key8[8], uint8_t subkeys[16][48])
     apply_perm(tmp48, cd, PC2_SELECT, 48);
     memcpy(subkeys[round], tmp48, 48);
   }
+  cipher_secure_zero(key_bits, sizeof(key_bits));
+  cipher_secure_zero(cd, sizeof(cd));
+  cipher_secure_zero(tmp48, sizeof(tmp48));
 }
 
 static void des_block_process(const uint8_t in[8], uint8_t out[8], const uint8_t subkeys[16][48], const int encrypt)
@@ -140,6 +147,8 @@ static void des_block_process(const uint8_t in[8], uint8_t out[8], const uint8_t
     for (int i = 0; i < 32; ++i) newR[i] = L[i] ^ f[i];
     memcpy(L, R, 32);
     memcpy(R, newR, 32);
+    cipher_secure_zero(f, sizeof(f));
+    cipher_secure_zero(newR, sizeof(newR));
   }
   uint8_t preout[64];
   memcpy(preout, R, 32);
@@ -147,6 +156,12 @@ static void des_block_process(const uint8_t in[8], uint8_t out[8], const uint8_t
   uint8_t out_bits[64];
   apply_perm(out_bits, preout, FP_, 64);
   bits_to_bytes(out_bits, out);
+  cipher_secure_zero(in_bits, sizeof(in_bits));
+  cipher_secure_zero(ip, sizeof(ip));
+  cipher_secure_zero(L, sizeof(L));
+  cipher_secure_zero(R, sizeof(R));
+  cipher_secure_zero(preout, sizeof(preout));
+  cipher_secure_zero(out_bits, sizeof(out_bits));
 }
 
 static void des_encrypt_block(const uint8_t in[8], uint8_t out[8], const uint8_t key[8])
@@ -154,6 +169,7 @@ static void des_encrypt_block(const uint8_t in[8], uint8_t out[8], const uint8_t
   uint8_t subkeys[16][48];
   des_key_schedule(key, subkeys);
   des_block_process(in, out, subkeys, 1);
+  cipher_secure_zero(subkeys, sizeof(subkeys));
 }
 
 static void des_decrypt_block(const uint8_t in[8], uint8_t out[8], const uint8_t key[8])
@@ -161,6 +177,7 @@ static void des_decrypt_block(const uint8_t in[8], uint8_t out[8], const uint8_t
   uint8_t subkeys[16][48];
   des_key_schedule(key, subkeys);
   des_block_process(in, out, subkeys, 0);
+  cipher_secure_zero(subkeys, sizeof(subkeys));
 }
 
 static void xor8(uint8_t *dst, const uint8_t *src)
@@ -183,7 +200,11 @@ static void stage_encrypt(uint8_t *buf, const size_t len,
     des_decrypt_block(t1, t2, Kx2);
     des_encrypt_block(t2, buf + off, Kx3);
     memcpy(prev, buf + off, 8);
+    cipher_secure_zero(blk, sizeof(blk));
+    cipher_secure_zero(t1, sizeof(t1));
+    cipher_secure_zero(t2, sizeof(t2));
   }
+  cipher_secure_zero(prev, sizeof(prev));
 }
 
 static void stage_decrypt(uint8_t *buf, const size_t len,
@@ -202,7 +223,12 @@ static void stage_decrypt(uint8_t *buf, const size_t len,
     xor8(pblk, prev);
     memcpy(buf + off, pblk, 8);
     memcpy(prev, cblk, 8);
+    cipher_secure_zero(cblk, sizeof(cblk));
+    cipher_secure_zero(t1, sizeof(t1));
+    cipher_secure_zero(t2, sizeof(t2));
+    cipher_secure_zero(pblk, sizeof(pblk));
   }
+  cipher_secure_zero(prev, sizeof(prev));
 }
 
 static char* desede_cbc_encrypt(cipher_interface_t* self, const char* text)
@@ -217,7 +243,7 @@ static char* desede_cbc_encrypt(cipher_interface_t* self, const char* text)
   stage_encrypt(padded, padded_len, data->key2 + 0, data->key2 + 8, data->key2 + 16, data->iv2);
   stage_encrypt(padded, padded_len, data->key1 + 0, data->key1 + 8, data->key1 + 16, data->iv1);
   char* hex = bytes_2_hex(padded, padded_len);
-  s_free(padded);
+  s_secure_free(padded, padded_len);
   return hex;
 }
 
@@ -226,15 +252,16 @@ static char* desede_cbc_decrypt(cipher_interface_t* self, const char* hex)
   if (!self || !hex) return NULL;
   desede_cbc_linux_data_t* data = self->private_data;
   if (!data) return NULL;
-  size_t bytes_len;
+  size_t bytes_len = 0;
   uint8_t* bytes = hex_2_bytes(hex, &bytes_len);
   if (!bytes || (bytes_len % 8) != 0)
   {
-    s_free(bytes);
+    s_secure_free(bytes, bytes_len);
     return NULL;
   }
   stage_decrypt(bytes, bytes_len, data->key1 + 0, data->key1 + 8, data->key1 + 16, data->iv1);
   stage_decrypt(bytes, bytes_len, data->key2 + 0, data->key2 + 8, data->key2 + 16, data->iv2);
+  const size_t allocation_len = bytes_len;
   while (bytes_len > 0 && bytes[bytes_len - 1] == 0)
   {
     bytes_len--;
@@ -242,7 +269,7 @@ static char* desede_cbc_decrypt(cipher_interface_t* self, const char* hex)
   char* result = s_malloc(bytes_len + 1);
   memcpy(result, bytes, bytes_len);
   result[bytes_len] = '\0';
-  s_free(bytes);
+  s_secure_free(bytes, allocation_len);
   return result;
 }
 
@@ -250,7 +277,7 @@ static void desede_cbc_destroy(cipher_interface_t* self)
 {
   if (self)
   {
-    s_free(self->private_data);
+    s_secure_free(self->private_data, sizeof(desede_cbc_linux_data_t));
     s_free(self);
   }
 }
