@@ -239,6 +239,7 @@ int EVP_DigestFinal_ex(EVP_MD_CTX* ctx, unsigned char* md, unsigned int* size)
         md[i * 4 + 3] = (uint8_t)((ctx->state[i] >> 24) & 0xFF);
     }
     if (size) *size = 16;
+    simssl_secure_zero(ctx->buffer, sizeof(ctx->buffer));
     return 1;
 }
 
