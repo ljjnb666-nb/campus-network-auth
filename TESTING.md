@@ -163,3 +163,8 @@ CREDENTIAL_BOUNDED_READ_PASS / JOURNAL_BOUNDED_READ_PASS：凭据和事务记录
 ### 敏感信息扫描回归修正
 
 3806033 Push 45575904810 / PR 45575919612：编译、CREDENTIAL_BOUNDED_READ_PASS、JOURNAL_BOUNDED_READ_PASS、CORE_INTEGRITY_HANDLE_PASS、所有原有离线UI/应用/资源及签名回归通过；Secret scan 失败，后续curl/上传跳过。唯一命中为 Program.cs:1160 新增的 NUL 拒绝测试虚构字面量，并非真实凭据。改为从 DummyCredential() 派生含 NUL 的测试输入，保留原拒绝断言；扫描报告仅保留文件、行号、规则，不输出命中值。原正则、既有允许列表和失败退出码均未放宽。扫描仍为启发式，既有子串允许列表及读取失败覆盖需进一步复审。新CI待验证。
+
+
+## 服务事务双重启动证据
+
+JOURNAL_BOOT_SEQUENCE_PASS：事务 v4 保存 WMI 启动时间及内核 KUSER_SHARED_DATA.BootId，必须同时严格递增且服务实际状态稳定才允许用户确认中断；同序号/回退/超界/缺失、仅时间变化、仅序号变化、过渡服务及 v3 旧 pending 均拒绝。原 CAS/中断不确定及恢复责任测试保留。BOOT_SEQUENCE_PASS 使用 ReadProcessMemory 读取 Windows 10+ 只读共享页的 0x2c4 字段，跨进程同启动稳定性及 WMI 双证据测试；不是 BCD GUID。不支持/读取失败保守阻断服务变更与遗留核对，不影响无服务变更的正常连接。实际重启/休眠/快速启动、不同 Windows build 尚未现场验证；共享页布局虽有公开定义但固定偏移依赖系统版本，不能保证未来兼容。新CI待验证。

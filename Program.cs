@@ -44,6 +44,11 @@ internal static class Program
         if (args.Length == 1 && args[0] == "--admin-prepare") return ChangeService(true);
         if (args.Length == 1 && args[0] == "--admin-restore") return ChangeService(false);
         if (args.Length == 1 && args[0] == "--self-test-logic") return LogicTests();
+        if (args.Length == 2 && args[0] == "--self-test-boot-sequence")
+        {
+            long expected;
+            return Int64.TryParse(args[1], out expected) && expected > 0 && ReadBootSequence() == expected ? 0 : 1;
+        }
         if (args.Length == 2 && args[0] == "--self-test-service-gate")
         {
             Guid id;
@@ -457,6 +462,65 @@ internal static class Program
 
     // Only invoked in an explicitly elevated child after the user clicks a service action.
     // Fail closed if the original service identity, other client processes, or Wi-Fi Direct state cannot be checked.
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool ReadProcessMemory(IntPtr process, IntPtr address, byte[] buffer, UIntPtr size, out UIntPtr bytesRead);
+
+    // KUSER_SHARED_DATA.BootId is a loader-incremented sequence, NOT the
+    // BCD BootIdentifier GUID. The Windows 10+ user-mode mapping is read-only.
+    // ReadProcessMemory avoids an unsafe pointer dereference if the layout is unavailable.
+    // https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/ns-ntddk-kuser_shared_data
+    // https://geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/ntexapi_x/kuser_shared_data/index.htm
+    private static long ReadBootSequence()
+    {
+        try
+        {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT || Environment.OSVersion.Version.Major != 10) return 0;
+            using (Process self = Process.GetCurrentProcess())
+            {
+                byte[] buffer = new byte[4];
+                UIntPtr read;
+                if (!ReadProcessMemory(self.Handle, new IntPtr(0x7ffe02c4), buffer, new UIntPtr(4U), out read) ||
+                    read.ToUInt64() != 4) return 0;
+                return BitConverter.ToUInt32(buffer, 0);
+            }
+        }
+        catch { return 0; }
+    }
+
+    private sealed class BootEvidence
+    {
+        internal readonly long Ticks, Sequence;
+        internal BootEvidence(long ticks, long sequence) { Ticks = ticks; Sequence = sequence; }
+    }
+
+    private static BootEvidence ReadBootEvidence()
+    {
+        long sequence = ReadBootSequence();
+        long ticks = ReadBootTicks();
+        return sequence > 0 && ticks > 0 && sequence == ReadBootSequence() ? new BootEvidence(ticks, sequence) : null;
+    }
+
+    private static bool BootSequenceInvariants()
+    {
+        long sequence = ReadBootSequence();
+        if (sequence <= 0 || sequence != ReadBootSequence())
+        { Console.WriteLine("BOOT_SEQUENCE_UNAVAILABLE"); return false; }
+        var start = new ProcessStartInfo {
+            FileName = Application.ExecutablePath,
+            Arguments = "--self-test-boot-sequence " + sequence.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            UseShellExecute = false, CreateNoWindow = true
+        };
+        using (var child = Process.Start(start))
+        {
+            if (child == null || !child.WaitForExit(10000) || child.ExitCode != 0)
+            { Console.WriteLine("BOOT_SEQUENCE_CROSS_PROCESS_FAIL"); return false; }
+        }
+        var evidence = ReadBootEvidence();
+        bool ok = evidence != null && evidence.Sequence == sequence && evidence.Ticks > 0;
+        Console.WriteLine(ok ? "BOOT_SEQUENCE_PASS" : "BOOT_SEQUENCE_EVIDENCE_FAIL");
+        return ok;
+    }
+
     private static long ReadBootTicks()
     {
         try
@@ -911,7 +975,7 @@ internal static class Program
             && ValidateAuthInput("a", new string('b', 128), 1) != null
             && ValidateAuthInput("a", "b", 0) != null
             && ValidateAuthInput("a", "b\0", 1) != null
-            && OperationPermissionInvariants() && ServiceGateInvariants() && CleanupScopeInvariants() && ServicePathInvariants() && HandoffInvariants() && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && ServiceIdentity.NativeLayoutIsValid() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
+            && OperationPermissionInvariants() && ServiceGateInvariants() && CleanupScopeInvariants() && ServicePathInvariants() && HandoffInvariants() && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && BootSequenceInvariants() && ServiceIdentity.NativeLayoutIsValid() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
             && !ServiceIdentity.IsKnownPublisher("fake telecom", "CN=fake telecom");
         Console.WriteLine(ok ? "LOGIC_PASS" : "LOGIC_FAIL");
         return ok ? 0 : 1;
@@ -3477,12 +3541,12 @@ internal static class Program
                     SetStatus(journal.Invalid ? "事务记录损坏，不能自动修复；请导出诊断。" : "没有未完成的服务事务。", ToneInfo);
                     return;
                 }
-                long boot = await Task.Run((Func<long>)ReadBootTicks);
+                BootEvidence boot = await Task.Run((Func<BootEvidence>)ReadBootEvidence);
                 string actual = await Task.Run(readServiceState);
                 if (HandoffCancelled(generation, false)) return;
-                if (!journal.CanResolveAfterRestart(boot, actual))
+                if (boot == null || !journal.CanResolveAfterRestart(boot.Ticks, boot.Sequence, actual))
                 {
-                    SetHandoff(ConnectionStates.HandoffState.Blocked, journal.BootTicks == 0 ?
+                    SetHandoff(ConnectionStates.HandoffState.Blocked, journal.BootTicks == 0 || journal.BootSequence == 0 ?
                         "旧事务缺少启动代次证据，请导出诊断并人工核对；不能自动解除。" :
                         "尚未确认完整重启或服务仍未稳定。请先保存工作，通过 Windows 的重启功能重启后再核对。", ToneWarn);
                     return;
@@ -3490,12 +3554,12 @@ internal static class Program
                 if (MessageBox.Show(this, "已检测到新的 Windows 启动代次，当前天翼服务状态为 " + actual +
                     "。是否将上次事务记录为结果未知的中断？不会启动/停止服务或自动连接；若服务原本运行，将保留恢复责任。",
                     "核对遗留事务", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-                long latestBoot = await Task.Run((Func<long>)ReadBootTicks);
+                BootEvidence latestBoot = await Task.Run((Func<BootEvidence>)ReadBootEvidence);
                 string latestState = await Task.Run(readServiceState);
                 if (HandoffCancelled(generation, false)) return;
-                if (latestBoot != boot || latestState != actual)
+                if (latestBoot == null || latestBoot.Ticks != boot.Ticks || latestBoot.Sequence != boot.Sequence || latestState != actual)
                 { SetHandoff(ConnectionStates.HandoffState.Blocked, "核对期间状态变化，未修改记录。", ToneWarn); return; }
-                journal.ResolveAfterRestart(latestBoot, latestState);
+                journal.ResolveAfterRestart(latestBoot.Ticks, latestBoot.Sequence, latestState);
                 state.SetService(MapServiceState(latestState));
                 SetHandoff(ConnectionStates.HandoffState.None, "遗留事务已记录为中断；请重新选择连接或恢复，未自动执行任何网络操作。", ToneInfo);
             }
@@ -4188,11 +4252,11 @@ internal static class Program
                 journal = ServiceJournal.Load(ServiceJournal.DefaultPath());
                 if (journal.Invalid)
                 { SetHandoff(ConnectionStates.HandoffState.Blocked, "服务事务记录损坏，需先人工核对，未执行切换。", ToneWarn); return false; }
-                long boot = await Task.Run((Func<long>)ReadBootTicks);
+                BootEvidence boot = await Task.Run((Func<BootEvidence>)ReadBootEvidence);
                 if (HandoffCancelled(generation, fromConnect)) return false;
-                if (boot == 0)
+                if (boot == null)
                 { SetHandoff(ConnectionStates.HandoffState.Blocked, "无法读取 Windows 启动代次，未执行服务切换。", ToneWarn); return false; }
-                journal.Begin(forPrepare ? "prepare" : "restore", before, boot);
+                journal.Begin(forPrepare ? "prepare" : "restore", before, boot.Ticks, boot.Sequence);
                 state.SetService(ConnectionStates.ServiceState.Transitioning);
                 SetHandoff(forPrepare ? ConnectionStates.HandoffState.Preparing : ConnectionStates.HandoffState.Restoring, "请在弹出的管理员确认窗口中操作……", ToneBusy, true);
                 var info = new ProcessStartInfo { FileName = Application.ExecutablePath, Arguments = forPrepare ? "--admin-prepare" : "--admin-restore", UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };

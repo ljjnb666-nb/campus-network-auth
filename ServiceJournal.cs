@@ -18,6 +18,7 @@ internal sealed class ServiceJournal
     internal string TimeUtc { get; private set; }
     internal string OperationId { get; private set; }
     internal long BootTicks { get; private set; }
+    internal long BootSequence { get; private set; }
     internal bool NeedsRecovery { get; private set; }
     internal bool Uncertain { get; private set; }
     internal bool Invalid { get; private set; }
@@ -78,12 +79,19 @@ internal sealed class ServiceJournal
                 j.Result == "cancelled" || ValidFailure(j.Result))) throw new InvalidDataException();
             if (obj.ContainsKey("v"))
             {
-                if (!(obj["v"] is int) || ((int)obj["v"] != 2 && (int)obj["v"] != 3)) throw new InvalidDataException();
-                if ((int)obj["v"] == 3)
+                if (!(obj["v"] is int) || ((int)obj["v"] != 2 && (int)obj["v"] != 3 && (int)obj["v"] != 4)) throw new InvalidDataException();
+                if ((int)obj["v"] >= 3)
                 {
                     long boot;
                     if (!Int64.TryParse(StringField(obj, "bootTicks"), out boot) || boot < 0 || boot > DateTime.MaxValue.Ticks) throw new InvalidDataException();
                     j.BootTicks = boot;
+                }
+                if ((int)obj["v"] == 4)
+                {
+                    long sequence;
+                    if (!Int64.TryParse(StringField(obj, "bootSequence"), out sequence) ||
+                        sequence < 0 || sequence > UInt32.MaxValue) throw new InvalidDataException();
+                    j.BootSequence = sequence;
                 }
                 j.OperationId = StringField(obj, "operationId");
                 Guid id;
@@ -112,7 +120,7 @@ internal sealed class ServiceJournal
 
     private string Snapshot()
     {
-        return new JavaScriptSerializer().Serialize(new { Action, StateBefore, Result, TimeUtc, OperationId, BootTicks, NeedsRecovery, Uncertain, PriorUncertain });
+        return new JavaScriptSerializer().Serialize(new { Action, StateBefore, Result, TimeUtc, OperationId, BootTicks, BootSequence, NeedsRecovery, Uncertain, PriorUncertain });
     }
 
     private void Write()
@@ -134,8 +142,9 @@ internal sealed class ServiceJournal
         TimeUtc = DateTime.UtcNow.ToString("o");
         var json = new JavaScriptSerializer().Serialize(new
         {
-            v = 3, action = Action, state = StateBefore, result = Result, time = TimeUtc,
+            v = 4, action = Action, state = StateBefore, result = Result, time = TimeUtc,
             bootTicks = BootTicks.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            bootSequence = BootSequence.ToString(System.Globalization.CultureInfo.InvariantCulture),
             operationId = OperationId, needsRecovery = NeedsRecovery, uncertain = Uncertain, priorUncertain = PriorUncertain
         });
         string temp = filePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
@@ -155,16 +164,16 @@ internal sealed class ServiceJournal
     }
 
     // The caller records explicit user consent before invoking this method.
-    internal void Begin(string action, string stateBefore, long bootTicks = 0)
+    internal void Begin(string action, string stateBefore, long bootTicks = 0, long bootSequence = 0)
     {
-        if (bootTicks < 0 || bootTicks > DateTime.MaxValue.Ticks || Invalid || HasPending || (action != "prepare" && action != "restore") || !ValidState(stateBefore)) throw new InvalidDataException();
+        if (bootSequence < 0 || bootSequence > UInt32.MaxValue || bootTicks < 0 || bootTicks > DateTime.MaxValue.Ticks || Invalid || HasPending || (action != "prepare" && action != "restore") || !ValidState(stateBefore)) throw new InvalidDataException();
         string oldAction = Action, oldState = StateBefore, oldResult = Result, oldId = OperationId, oldTime = TimeUtc;
         bool oldPrior = PriorUncertain, oldUncertain = Uncertain;
-        long oldBoot = BootTicks;
+        long oldBoot = BootTicks, oldSequence = BootSequence;
         try
         {
         PriorUncertain = Uncertain;
-        Action = action; StateBefore = stateBefore; Result = "pending"; BootTicks = bootTicks;
+        Action = action; StateBefore = stateBefore; Result = "pending"; BootTicks = bootTicks; BootSequence = bootSequence;
         OperationId = Guid.NewGuid().ToString("N");
         // Once written, interruption is an uncertain outcome, not a no-op.
         Uncertain = true;
@@ -173,7 +182,7 @@ internal sealed class ServiceJournal
         catch
         {
             Action = oldAction; StateBefore = oldState; Result = oldResult; OperationId = oldId; TimeUtc = oldTime;
-            PriorUncertain = oldPrior; Uncertain = oldUncertain; BootTicks = oldBoot; throw;
+            PriorUncertain = oldPrior; Uncertain = oldUncertain; BootTicks = oldBoot; BootSequence = oldSequence; throw;
         }
     }
 
@@ -213,16 +222,20 @@ internal sealed class ServiceJournal
         }
     }
 
-    internal bool CanResolveAfterRestart(long currentBoot, string actualState)
+    internal bool CanResolveAfterRestart(long currentBoot, long currentSequence, string actualState)
     {
+        // A wall-clock change alone is never evidence of a new boot. A sequence
+        // reset or wrap is ambiguous and is deliberately not accepted.
         return !Invalid && HasPending && BootTicks > 0 && currentBoot > BootTicks &&
-            currentBoot <= DateTime.MaxValue.Ticks && (actualState == "Running" || actualState == "Stopped");
+            currentBoot <= DateTime.MaxValue.Ticks && BootSequence > 0 &&
+            currentSequence > BootSequence && currentSequence <= UInt32.MaxValue &&
+            (actualState == "Running" || actualState == "Stopped");
     }
 
     // Explicitly reconcile an interrupted attempt, not a successful operation.
-    internal void ResolveAfterRestart(long currentBoot, string actualState)
+    internal void ResolveAfterRestart(long currentBoot, long currentSequence, string actualState)
     {
-        if (!CanResolveAfterRestart(currentBoot, actualState)) throw new InvalidDataException();
+        if (!CanResolveAfterRestart(currentBoot, currentSequence, actualState)) throw new InvalidDataException();
         string oldResult = Result, oldTime = TimeUtc;
         bool oldRecovery = NeedsRecovery, oldUncertain = Uncertain;
         try
@@ -285,19 +298,30 @@ internal sealed class ServiceJournal
             try { pending.Complete(0, "Running", false); } catch (IOException) { rejected = true; }
             if (!rejected || !pending.HasPending || !Load(path).NeedsRecovery) return false;
             Console.WriteLine("JOURNAL_CONCURRENCY_PASS");
-            j.Begin("restore", "Stopped", 1000);
+            j.Begin("restore", "Stopped", 1000, 10);
             j = Load(path);
-            if (j.BootTicks != 1000 || j.CanResolveAfterRestart(1000, "Running") || j.CanResolveAfterRestart(999, "Stopped") ||
-                j.CanResolveAfterRestart(2000, "StopPending") || j.CanResolveAfterRestart(2000, "unknown")) return false;
+            if (j.BootTicks != 1000 || j.BootSequence != 10 ||
+                j.CanResolveAfterRestart(1000, 11, "Running") || j.CanResolveAfterRestart(999, 11, "Stopped") ||
+                j.CanResolveAfterRestart(2000, 10, "Running") || j.CanResolveAfterRestart(2000, 9, "Stopped") ||
+                j.CanResolveAfterRestart(2000, 0, "Stopped") || j.CanResolveAfterRestart(2000, 4294967296L, "Stopped") ||
+                j.CanResolveAfterRestart(2000, 11, "StopPending") || j.CanResolveAfterRestart(2000, 11, "unknown")) return false;
             var oldPending = Load(path);
-            j.ResolveAfterRestart(2000, "Stopped");
+            j.ResolveAfterRestart(2000, 11, "Stopped");
             j = Load(path);
             if (j.HasPending || !j.NeedsRecovery || !j.Uncertain || j.Result != "failed:unknown") return false;
             rejected = false;
-            try { oldPending.ResolveAfterRestart(2000, "Running"); } catch (IOException) { rejected = true; }
+            try { oldPending.ResolveAfterRestart(2000, 11, "Running"); } catch (IOException) { rejected = true; }
             if (!rejected || !Load(path).NeedsRecovery) return false;
-            j.Begin("restore", "Stopped");
-            if (Load(path).CanResolveAfterRestart(2000, "Running")) return false; // missing boot evidence
+            j.Begin("restore", "Stopped", 1000);
+            if (Load(path).CanResolveAfterRestart(2000, 11, "Running")) return false; // missing sequence
+            // Simulate an actual old v3 pending record, not just a v4 zero.
+            var legacy = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(path));
+            legacy["v"] = 3; legacy.Remove("bootSequence");
+            File.WriteAllText(path, new JavaScriptSerializer().Serialize(legacy));
+            var old = Load(path);
+            if (old.Invalid || !old.HasPending || old.BootTicks != 1000 || old.BootSequence != 0 ||
+                old.CanResolveAfterRestart(2000, 11, "Running")) return false;
+            Console.WriteLine("JOURNAL_BOOT_SEQUENCE_PASS");
             Console.WriteLine("JOURNAL_RESTART_PASS");
             File.WriteAllText(path, "{broken");
             if (!Load(path).Invalid) return false;

@@ -387,3 +387,8 @@ Push 45574796280 / PR 45574804954 success；UI_SCROLL_PASS checks=715、UI_STRES
 ### 发布安全复审第一批回归修正（3806033）
 
 Push 45575904810 / PR 45575919612 failure，实际日志显示新增三项文件/核心安全断言、原有全部功能/UI及签名回归通过，Secret scan 唯一命中 Program.cs:1160 的人工 NUL 测试字符串；后续依赖核查/上传未执行。改为从既有虚构凭据构造非法 NUL 输入，保持测试；扫描报告不再打印匹配值，只列位置和规则；不添加豁免、不改变匹配规则或阻断退出码。现有启发式扫描仍有覆盖限制。新CI待验证，启动代次证据复审尚未实施，main未修改。
+
+
+### 发布安全复审第二批（57c2868）
+
+Push 45576570837 / PR 45576580976 success，新增 bounded read / integrity handle、UI/应用/资源/签名回归、敏感信息扫描、curl 双源均通过，artifact 15004183600。复审 v3 以 WMI 启动时间单证据判定重启不足，未采用可能表示 BCD 启动项的 BootIdentifier GUID。v4 增加 Windows 内核 BootId（公开 WDK 定义为 OS loader 启动序列，Win10+共享页偏移0x2c4；ReadProcessMemory 安全读取），双证据严格递增、稳定服务、用户确认及二次核验；旧 pending 缺序号保持阻断，非 pending 兼容。新增 JOURNAL_BOOT_SEQUENCE_PASS/BOOT_SEQUENCE_PASS，当前仅同启动跨进程及模拟变化，真实重启/快速启动/休眠和兼容性待现场，不能证明无其他风险。新 CI 待验证，main 未修改。
