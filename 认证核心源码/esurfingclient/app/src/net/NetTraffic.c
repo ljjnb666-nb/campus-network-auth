@@ -260,9 +260,14 @@ static bool stop_worker(void)
     return true;
 }
 
+bool net_traffic_stop_checked(void)
+{
+    return stop_worker();
+}
+
 void net_traffic_stop(void)
 {
-    if (!stop_worker()) LOG_ERROR("网速采样线程等待失败, 保留线程对象");
+    if (!net_traffic_stop_checked()) LOG_ERROR("网速采样线程等待失败, 保留线程对象");
 }
 
 static int test_worker(void* arg)
