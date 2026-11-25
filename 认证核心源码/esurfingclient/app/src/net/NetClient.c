@@ -127,6 +127,8 @@ static struct curl_slist* fail_second_header(struct curl_slist* list, const char
 
 /* No sockets or network requests: actual libcurl list allocations and
  * deterministic failure injection at the same production helper boundary. */
+extern bool probe_resource_self_test(void);
+
 bool net_resource_self_test(void)
 {
     const char* const values[] = { "X-Test: a", "X-Test: b" };
@@ -143,7 +145,7 @@ bool net_resource_self_test(void)
         !can_retry_connect(CURLE_OPERATION_TIMEDOUT, 200, 0, &resp) &&
         !can_retry_connect(CURLE_OPERATION_TIMEDOUT, 0, 0.01, &resp);
     resp.body_size = 1;
-    return ok && !can_retry_connect(CURLE_COULDNT_CONNECT, 0, 0, &resp) && net_callback_self_test();
+    return ok && !can_retry_connect(CURLE_COULDNT_CONNECT, 0, 0, &resp) && net_callback_self_test() && probe_resource_self_test();
 }
 
 curl_resp_t post(const char* url, const char* data)
