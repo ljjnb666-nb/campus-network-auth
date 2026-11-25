@@ -135,6 +135,7 @@ extern bool sim_thread_budget_self_test(void);
 extern bool watchdog_resource_self_test(void);
 extern bool time_control_resource_self_test(void);
 extern bool shutdown_resource_self_test(void);
+extern bool session_status_self_test(void);
 #ifndef __OPENWRT__
 extern bool traffic_resource_self_test(void);
 extern bool control_resource_self_test(void);
@@ -160,7 +161,7 @@ bool net_resource_self_test(void)
 #ifdef _WIN32
         && sim_thread_budget_self_test()
 #endif
-         && time_control_resource_self_test() && shutdown_resource_self_test()
+         && time_control_resource_self_test() && shutdown_resource_self_test() && session_status_self_test()
 #ifndef __OPENWRT__
         && traffic_resource_self_test() && control_resource_self_test()
 #endif
