@@ -40,3 +40,12 @@
 - [CVE-2026-67215](https://nvd.nist.gov/vuln/detail/CVE-2026-67215)：JSON Patch 造成递归深度放大。当前 CMakeLists 仅编译 cJSON.c，未列入 cJSON_Utils.c；仍需核对调用与链接证据。
 - [CVE-2026-67216](https://nvd.nist.gov/vuln/detail/CVE-2026-67216)：cJSON_Compare 的复杂度风险，需审查实际调用与输入边界。
 - 上述为已发现公告，不是穷尽扫描；必须完成当前公告清单、实际调用路径、修复/不适用证据和回归。curl 的零条版本公告不能代替 cJSON 或其他依赖核查。
+
+### 后续整改与证据（2026-11-25）
+
+- CI #268（45619253721）通过版本锁、manifest、源码级 SBOM 生成及 Linux crypto 审计。该 CI 不包含下列新门禁。
+- 本地 cJSON 增加 ensure 与 print_string_ptr 的长度累加上限检查；已同步本地源码 blob 锁。新增合成 ASan/UBSan 边界回归，待最新 CI 验证；没有执行 32 位完整构建或大型分配测试。
+- JSON Patch 与 Compare 的适用性通过 git grep 对 src/include 标识符扫描以及 CMake 组件检查进行辅助判定；这是源码级门禁，不是完整程序可达性证明。仍需验收输出，不标记上游 CVE 已修复。
+- 新增 PE 直接导入表及 x86-64 原生核心检查，输出 pe-imports.json；不覆盖传递依赖、运行时动态加载或所有静态链接组件。
+- CycloneDX 1.5 官方三份 Schema 按 Git blob 校验，并局部化外部引用后使用 PowerShell Test-Json 校验，加入无效格式负向测试；待 CI 验证。
+- 最新工作流修复了中间提交出现的重复步骤，检查最终文件仅有一组上传步骤及两个预期 job。
