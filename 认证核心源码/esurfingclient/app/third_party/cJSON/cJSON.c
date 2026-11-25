@@ -503,9 +503,9 @@ static unsigned char* ensure(printbuffer * const p, size_t needed)
         return NULL;
     }
 
-    if (needed > INT_MAX)
+    /* Bound the sum before adding, including the terminating byte. */
+    if (p->offset >= (size_t)INT_MAX || needed > (size_t)INT_MAX - p->offset - 1)
     {
-        /* sizes bigger than INT_MAX are currently not supported */
         return NULL;
     }
 
@@ -991,18 +991,24 @@ static cJSON_bool print_string_ptr(const unsigned char * const input, printbuffe
             case '\r':
             case '\t':
                 /* one character escape sequence */
+                if (escape_characters >= (size_t)INT_MAX) return false;
                 escape_characters++;
                 break;
             default:
                 if (*input_pointer < 32)
                 {
                     /* UTF-16 escape sequence uXXXX */
+                    if (escape_characters > (size_t)INT_MAX - 5) return false;
                     escape_characters += 5;
                 }
                 break;
         }
     }
-    output_length = (size_t)(input_pointer - input) + escape_characters;
+    /* Keep every intermediate within the print API's supported range. */
+    const size_t input_length = (size_t)(input_pointer - input);
+    const size_t limit = (size_t)INT_MAX - sizeof("\"\"");
+    if (input_length > limit || escape_characters > limit - input_length) return false;
+    output_length = input_length + escape_characters;
 
     output = ensure(output_buffer, output_length + sizeof("\"\""));
     if (output == NULL)
