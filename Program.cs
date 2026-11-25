@@ -7,6 +7,7 @@ using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Management;
+using System.Net.NetworkInformation;
 using Microsoft.Win32;
 using System.Reflection;
 using System.Security.AccessControl;
@@ -1310,7 +1311,9 @@ internal static class Program
         private Func<HandoffObservation> observeHandoff = ObserveHandoff;
         private bool offlineLifecycleProbe;
         private bool powerSuspended;
-        private int powerEvidenceEpoch;
+        private int networkEvidenceEpoch, networkChangeQueued;
+        private bool addressEventsSubscribed, availabilityEventsSubscribed;
+        private const long NetworkEvidenceTtlMs = 45000;
         private bool offlineProbeReady, offlineProbeStopAccepted, lastCoreReadersDrained;
         private long lastNetworkEvidence;
         private readonly Stopwatch evidenceClock = Stopwatch.StartNew();
@@ -1679,21 +1682,16 @@ internal static class Program
                 if (credentialLoadError != null) SetStatus(credentialLoadError, ToneWarn);
                 else if (loadedCredential) SetStatus("已载入保存的账号，正在检查天翼服务状态……", ToneOk);
                 else SetStatus("正在检查天翼服务状态……", ToneInfo);
-                if (!isSelfTest) RunStartupChecksAsync();
+                if (!isSelfTest) { SubscribeNetworkChanges(); RunStartupChecksAsync(); }
             };
             evidenceTimer.Interval = 5000;
             evidenceTimer.Tick += async delegate {
+                if (IsDisposed || Disposing) return;
+                // Expiry must not wait behind a slow WMI/SCM observation.
+                ExpireNetworkEvidence(evidenceClock.ElapsedMilliseconds);
                 if (pendingServiceChild != null) await PollTimedOutServiceAsync();
                 else if (!isSelfTest && !serviceBusy && !connectCheckPending && !retryTimer.Enabled && activeTask == null)
                     await RunPreConnectCheckAsync(false, true);
-                if (IsDisposed || Disposing) return;
-                if (state.Network == ConnectionStates.NetworkState.InternetAvailable &&
-                    evidenceClock.ElapsedMilliseconds - lastNetworkEvidence >= 45000)
-                {
-                    state.SetNetwork(ConnectionStates.NetworkState.Unknown);
-                    UpdateConnectionPill();
-                    if (!stopping) SetStatus("网络探测证据已过期，当前可达性待确认。", ToneWarn);
-                }
             };
             evidenceTimer.Start();
             timer.Interval = 1000;
@@ -1718,6 +1716,7 @@ internal static class Program
                     userStopped = true; taskGeneration++; activeTask = null;
                     SystemEvents.PowerModeChanged -= OnPowerModeChanged;
                     SystemEvents.SessionSwitch -= OnSessionSwitch;
+                    UnsubscribeNetworkChanges();
                     timer.Stop(); animTimer.Stop(); retryTimer.Stop(); evidenceTimer.Stop();
                     timer.Dispose(); animTimer.Dispose(); retryTimer.Dispose(); evidenceTimer.Dispose();
                     password.Clear(); tray.Visible = false; tray.Dispose(); trayMenu.Dispose(); tips.Dispose();
@@ -2117,6 +2116,28 @@ internal static class Program
                         OnCoreStatus(child, "network_online");
                         await FlushUiEventsForTest();
                         if (state.Network != ConnectionStates.NetworkState.InternetAvailable) return false;
+
+                        int generationBeforeNetwork = taskGeneration;
+                        // Queue a positive event first, then invalidate it with actual callback entry points.
+                        OnCoreStatus(child, "network_online");
+                        for (int burst = 0; burst < 16; burst++)
+                        {
+                            OnNetworkAddressChanged(this, EventArgs.Empty);
+                            OnNetworkAvailabilityChanged(this, null);
+                        }
+                        await FlushUiEventsForTest();
+                        if (networkChangeQueued != 0 || state.Network != ConnectionStates.NetworkState.Unknown ||
+                            state.Auth != ConnectionStates.AuthState.Authenticated || !Object.ReferenceEquals(child, running) ||
+                            taskGeneration != generationBeforeNetwork || retryTimer.Enabled) return false;
+                        OnCoreStatus(child, "network_online");
+                        await FlushUiEventsForTest();
+                        if (state.Network != ConnectionStates.NetworkState.InternetAvailable) return false;
+                        long stamp = lastNetworkEvidence;
+                        ExpireNetworkEvidence(stamp + NetworkEvidenceTtlMs - 1);
+                        if (state.Network != ConnectionStates.NetworkState.InternetAvailable) return false;
+                        ExpireNetworkEvidence(stamp + NetworkEvidenceTtlMs);
+                        if (state.Network != ConnectionStates.NetworkState.Unknown ||
+                            state.Auth != ConnectionStates.AuthState.Authenticated || retryTimer.Enabled) return false;
                     }
                     StopClicked(stop, EventArgs.Empty);
                     OnCoreStatus(child, "auth_ok"); OnCoreStatus(child, "network_online");
@@ -2144,6 +2165,8 @@ internal static class Program
                 Console.WriteLine("APP_LIFECYCLE_PASS cycles=" + completed + " seed=" + seed + " ready_ack_drain=100");
                 if (!await CheckPowerCancellationForTestAsync()) return false;
                 Console.WriteLine("POWER_TRANSITION_PASS active_cycles=20 pending_connect=1 pending_service=1 idle=1");
+                if (!await CheckNetworkObservationRaceForTestAsync()) return false;
+                Console.WriteLine("NETWORK_CHANGE_PASS active_cycles=20 burst_per_cycle=32 expiry_boundaries=40 service_wait=1 stale_idle=1");
                 return true;
             }
             finally
@@ -2184,6 +2207,11 @@ internal static class Program
             while (state.Handoff != ConnectionStates.HandoffState.WaitingForClient && !serviceWork.IsCompleted &&
                 clock.ElapsedMilliseconds < 3000) await Task.Delay(10);
             if (!serviceBusy || state.Handoff != ConnectionStates.HandoffState.WaitingForClient) return false;
+            int serviceGeneration = taskGeneration;
+            OnNetworkAddressChanged(this, EventArgs.Empty);
+            await FlushUiEventsForTest();
+            if (!serviceBusy || taskGeneration != serviceGeneration || serviceWork.IsCompleted ||
+                connect.Enabled || prepare.Enabled || restore.Enabled) return false;
             OnPowerModeChanged(this, new PowerModeChangedEventArgs(PowerModes.Suspend));
             await FlushUiEventsForTest();
             if (!serviceBusy || connect.Enabled || prepare.Enabled || restore.Enabled) return false;
@@ -2199,6 +2227,40 @@ internal static class Program
             await FlushUiEventsForTest();
             return !powerSuspended && Object.ReferenceEquals(previous, running) && activeTask == null &&
                 !retryTimer.Enabled && connect.Enabled && !stop.Enabled;
+        }
+
+        private async Task<bool> CheckNetworkObservationRaceForTestAsync()
+        {
+            // Deterministically delay the idle observation across an interface change.
+            if (!isSelfTest || !CurrentPermissions().CanConnect) return false;
+            using (var entered = new System.Threading.ManualResetEvent(false))
+            using (var release = new System.Threading.ManualResetEvent(false))
+            {
+                state.SetService(ConnectionStates.ServiceState.Stopped);
+                observeHandoff = delegate {
+                    entered.Set();
+                    if (!release.WaitOne(5000)) throw new TimeoutException();
+                    return new HandoffObservation(ConnectionStates.ServiceState.Running, 1);
+                };
+                Task work = RunPreConnectCheckAsync(false, true);
+                try
+                {
+                    var clock = Stopwatch.StartNew();
+                    while (!entered.WaitOne(0) && clock.ElapsedMilliseconds < 3000) await Task.Delay(10);
+                    if (!entered.WaitOne(0)) return false;
+                    OnNetworkAddressChanged(this, EventArgs.Empty);
+                    await FlushUiEventsForTest();
+                    release.Set();
+                    if (await Task.WhenAny(work, Task.Delay(5000)) != work) return false;
+                    await work;
+                    if (state.Service != ConnectionStates.ServiceState.Stopped || lastIdleObservation != null || checkingBlocked) return false;
+                    observeHandoff = delegate { return new HandoffObservation(ConnectionStates.ServiceState.Running, 1); };
+                    await RunPreConnectCheckAsync(false, true);
+                    return state.Service == ConnectionStates.ServiceState.Running && lastIdleObservation != null &&
+                        !checkingBlocked && CurrentPermissions().CanConnect;
+                }
+                finally { release.Set(); await work; observeHandoff = ObserveHandoff; }
+            }
         }
 
         internal bool CheckServiceRecoveryForTest(string dir)
@@ -2246,7 +2308,7 @@ internal static class Program
         internal bool CheckDisposedResourcesForTest()
         {
             return IsDisposed && resourcesDisposed && !timer.Enabled && !animTimer.Enabled &&
-                !retryTimer.Enabled && !evidenceTimer.Enabled;
+                !retryTimer.Enabled && !evidenceTimer.Enabled && !addressEventsSubscribed && !availabilityEventsSubscribed;
         }
 
         internal bool CheckTrayAndSaveForTest()
@@ -2935,11 +2997,13 @@ internal static class Program
         {
             if (checkingBlocked || powerSuspended || serviceBusy || connectCheckPending || retryTimer.Enabled || activeTask != null) return;
             int generation = taskGeneration;
+            int observationEpoch = System.Threading.Interlocked.CompareExchange(ref networkEvidenceEpoch, 0, 0);
             checkingBlocked = true;
             try
             {
-                var observation = await Task.Run((Func<HandoffObservation>)ObserveHandoff);
-                if (HandoffCancelled(generation, false) || serviceBusy || connectCheckPending ||
+                var observation = await Task.Run(observeHandoff);
+                if (observationEpoch != System.Threading.Interlocked.CompareExchange(ref networkEvidenceEpoch, 0, 0) ||
+                    HandoffCancelled(generation, false) || serviceBusy || connectCheckPending ||
                     (running != null && !Object.ReferenceEquals(running, completedProcess))) return;
                 state.SetService(observation.Service);
                 bool changed = lastIdleObservation == null || lastIdleObservation.Service != observation.Service ||
@@ -2966,7 +3030,8 @@ internal static class Program
             }
             catch
             {
-                if (!HandoffCancelled(generation, false) && !serviceBusy && !connectCheckPending && activeTask == null)
+                if (observationEpoch == System.Threading.Interlocked.CompareExchange(ref networkEvidenceEpoch, 0, 0) &&
+                    !HandoffCancelled(generation, false) && !serviceBusy && !connectCheckPending && activeTask == null)
                     SetHandoff(ConnectionStates.HandoffState.Blocked, "环境状态检查失败，请稍后重试。", ToneWarn);
             }
             finally { checkingBlocked = false; }
@@ -3171,11 +3236,89 @@ internal static class Program
             await CheckAndStartAsync(taskGeneration);
         }
 
+        private static bool NetworkEvidenceIsFresh(long received, long now)
+        {
+            return received >= 0 && now >= received && now - received < NetworkEvidenceTtlMs;
+        }
+
+        private void ExpireNetworkEvidence(long now)
+        {
+            if (IsDisposed || Disposing || state.Network != ConnectionStates.NetworkState.InternetAvailable ||
+                NetworkEvidenceIsFresh(lastNetworkEvidence, now)) return;
+            InvalidateNetworkEvidence("网络探测证据已过期，当前可达性待确认。");
+        }
+
+        private void InvalidateNetworkEvidence(string message)
+        {
+            bool hadPositiveEvidence = state.Network == ConnectionStates.NetworkState.InternetAvailable;
+            state.SetNetwork(ConnectionStates.NetworkState.Unknown);
+            UpdateConnectionPill();
+            if (hadPositiveEvidence && !serviceBusy && !connectCheckPending && !stopping &&
+                !userStopped && !authFailureSeen && !runtimeFailureSeen && !retryEligible &&
+                (state.Auth == ConnectionStates.AuthState.Authenticated || state.Auth == ConnectionStates.AuthState.AuthenticatedBySession))
+                SetStatus(message, ToneWarn);
+        }
+
+        private void SubscribeNetworkChanges()
+        {
+            // Availability means an interface is available, not internet connectivity.
+            // Either notification is only an invalidation hint.
+            try
+            {
+                if (!addressEventsSubscribed)
+                { NetworkChange.NetworkAddressChanged += OnNetworkAddressChanged; addressEventsSubscribed = true; }
+            }
+            catch { } // evidence expiry remains the fallback if Windows subscription fails
+            try
+            {
+                if (!availabilityEventsSubscribed)
+                { NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged; availabilityEventsSubscribed = true; }
+            }
+            catch { }
+        }
+
+        private void UnsubscribeNetworkChanges()
+        {
+            if (addressEventsSubscribed)
+            {
+                try { NetworkChange.NetworkAddressChanged -= OnNetworkAddressChanged; } catch { }
+                addressEventsSubscribed = false;
+            }
+            if (availabilityEventsSubscribed)
+            {
+                try { NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged; } catch { }
+                availabilityEventsSubscribed = false;
+            }
+        }
+
+        private void OnNetworkAddressChanged(object sender, EventArgs e) { QueueNetworkChange(); }
+        private void OnNetworkAvailabilityChanged(object sender, NetworkAvailabilityEventArgs e) { QueueNetworkChange(); }
+
+        private void QueueNetworkChange()
+        {
+            if (IsDisposed || Disposing || !IsHandleCreated) return;
+            System.Threading.Interlocked.Increment(ref networkEvidenceEpoch);
+            // Coalesce a burst of interface notifications into one pending UI callback.
+            if (System.Threading.Interlocked.Exchange(ref networkChangeQueued, 1) != 0) return;
+            try
+            {
+                BeginInvoke((Action)delegate {
+                    System.Threading.Interlocked.Exchange(ref networkChangeQueued, 0);
+                    if (IsDisposed || Disposing || resourcesDisposed) return;
+                    lastIdleObservation = null;
+                    InvalidateNetworkEvidence("检测到网络接口变化，当前可达性待重新确认。");
+                    // Do not start/restart a core, change a service or revoke an authorized handoff.
+                    // Existing retry rules and idle observation timer remain responsible.
+                });
+            }
+            catch (InvalidOperationException) { System.Threading.Interlocked.Exchange(ref networkChangeQueued, 0); }
+        }
+
         private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
         {
             if ((e.Mode != PowerModes.Suspend && e.Mode != PowerModes.Resume) || IsDisposed || Disposing) return;
             // Invalidate positive events already queued before the notification arrived.
-            System.Threading.Interlocked.Increment(ref powerEvidenceEpoch);
+            System.Threading.Interlocked.Increment(ref networkEvidenceEpoch);
             bool suspended = e.Mode == PowerModes.Suspend;
             try { BeginInvoke((Action)delegate { ApplyPowerTransition(suspended); }); }
             catch (InvalidOperationException) { }
@@ -3301,7 +3444,8 @@ internal static class Program
         private void OnCoreStatus(Process sender, string token)
         {
             if (IsDisposed || !IsHandleCreated) return;
-            int observedEpoch = System.Threading.Interlocked.CompareExchange(ref powerEvidenceEpoch, 0, 0);
+            int observedEpoch = System.Threading.Interlocked.CompareExchange(ref networkEvidenceEpoch, 0, 0);
+            long receivedAt = evidenceClock.ElapsedMilliseconds;
             try { BeginInvoke((Action)delegate {
                 if (!Object.ReferenceEquals(running, sender) || Object.ReferenceEquals(completedProcess, sender)) return;
                 // ParseCoreEvent already validated the PID, schema, event and code; token is allowlisted.
@@ -3316,7 +3460,8 @@ internal static class Program
                 if (stopEvent && !stopping) return;
                 if ((stopping || userStopped || authFailureSeen || runtimeFailureSeen || retryEligible) && !stopEvent) return;
                 if ((token == "network_online" || token == "online") &&
-                    (powerSuspended || observedEpoch != System.Threading.Interlocked.CompareExchange(ref powerEvidenceEpoch, 0, 0))) return;
+                    (powerSuspended || observedEpoch != System.Threading.Interlocked.CompareExchange(ref networkEvidenceEpoch, 0, 0) ||
+                        !NetworkEvidenceIsFresh(receivedAt, evidenceClock.ElapsedMilliseconds))) return;
                 if (token == "core_failed")
                 {
                     runtimeFailureSeen = true;
@@ -3335,7 +3480,7 @@ internal static class Program
                 }
                 if (token == "network_online")
                 {
-                    lastNetworkEvidence = evidenceClock.ElapsedMilliseconds;
+                    lastNetworkEvidence = receivedAt;
                     state.SetNetwork(ConnectionStates.NetworkState.InternetAvailable);
                     UpdateConnectionPill();
                     if (state.Auth == ConnectionStates.AuthState.Authenticated)
@@ -3382,7 +3527,7 @@ internal static class Program
                 }
                 else if (token == "online")
                 {
-                    lastNetworkEvidence = evidenceClock.ElapsedMilliseconds;
+                    lastNetworkEvidence = receivedAt;
                     runSawProgress = true; connect.Text = "运行中…";
                     state.SetNetwork(ConnectionStates.NetworkState.InternetAvailable);
                     UpdateConnectionPill();
@@ -3438,6 +3583,7 @@ internal static class Program
             if (serviceBusy) { SetStatus("正在进行系统服务切换，完成后才能停止或退出。", ToneWarn); return; }
             // Cancellation intent is independent of process existence and invalidates outstanding checks.
             userStopped = true; taskGeneration++; retryTimer.Stop(); activeTask = null;
+            state.SetNetwork(ConnectionStates.NetworkState.Unknown); UpdateConnectionPill();
             if (running == null || running.HasExited)
             {
                 RefreshOperationPermissions();

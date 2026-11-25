@@ -347,3 +347,8 @@ Push 45552962416 / PR 45552969825 failure，APP_CYCLE_START_FAIL cycle=0/1。原
 ### 主动审计第十批（基线 aca4036）
 
 Push 45554185087 / PR 45554192196 success；APP_LIFECYCLE_PASS cycles=100 seed=20261125 ready_ack_drain=100，110次资源/256权限/签名/curl双源均通过，artifact 14994274298。发现旧电源回调仅处理 Resume、可能覆盖终态提示，等待中的连接/重试可在唤醒后继续，服务操作后续启动缺乏电源变化失效标志。新增 Suspend/Resume 代次、正向证据失效、取消尚未执行的连接/重试、保留在途 helper 并阻断后续启动、UI事件注入组合测试 POWER_TRANSITION_PASS。新 CI 待验证；软件注入非真实休眠，旧事件接收代次非实际探测时间，真实 UAC/校园网/DPI/72h/签名仍未验收，main 未修改。
+
+
+### 主动审计第十一批（基线 f41c292）
+
+Push 45554742785 / PR 45554750745 success；POWER_TRANSITION_PASS active_cycles=20 pending_connect=1 pending_service=1 idle=1，100次应用、110次核心（326→326）、256种权限、签名及curl双源通过，artifact 14995331373。发现无主动网卡变化失效通知、TTL在异步查询后检查、正向事件以UI处理时间计时、空闲观测可跨网络变化。新增 Windows NetworkChange 订阅/释放、合并通知及共享证据代次、接收时间TTL、先行过期检查、空闲观测代次校验、停止意图立即撤销证据；NETWORK_CHANGE_PASS 组合注入。网络通知不证明联网、不自动认证、不取消已授权服务操作。新 CI 待验证；真实网络/休眠/DPI/UAC/72h、正式签名仍未验证，main 未修改。
