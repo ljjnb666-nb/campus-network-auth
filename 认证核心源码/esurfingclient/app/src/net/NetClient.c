@@ -130,8 +130,10 @@ static struct curl_slist* fail_second_header(struct curl_slist* list, const char
 extern bool probe_resource_self_test(void);
 extern bool watchdog_resource_self_test(void);
 extern bool time_control_resource_self_test(void);
+extern bool shutdown_resource_self_test(void);
 #ifndef __OPENWRT__
 extern bool traffic_resource_self_test(void);
+extern bool control_resource_self_test(void);
 #endif
 
 bool net_resource_self_test(void)
@@ -150,9 +152,9 @@ bool net_resource_self_test(void)
         !can_retry_connect(CURLE_OPERATION_TIMEDOUT, 200, 0, &resp) &&
         !can_retry_connect(CURLE_OPERATION_TIMEDOUT, 0, 0.01, &resp);
     resp.body_size = 1;
-    return ok && !can_retry_connect(CURLE_COULDNT_CONNECT, 0, 0, &resp) && net_callback_self_test() && probe_resource_self_test() && watchdog_resource_self_test() && time_control_resource_self_test()
+    return ok && !can_retry_connect(CURLE_COULDNT_CONNECT, 0, 0, &resp) && net_callback_self_test() && probe_resource_self_test() && watchdog_resource_self_test() && time_control_resource_self_test() && shutdown_resource_self_test()
 #ifndef __OPENWRT__
-        && traffic_resource_self_test()
+        && traffic_resource_self_test() && control_resource_self_test()
 #endif
         ;
 }
