@@ -1,4 +1,6 @@
 #include "aes_common.h"
+#include "cipher/CipherUtils.h"
+#include <stdbool.h>
 
 #include <stdint.h>
 #include <string.h>
@@ -75,7 +77,7 @@ void aes128_key_expansion(const uint8_t* key, uint8_t* round_keys)
         for (int j=0;j<4;j++) round_keys[i+j] = round_keys[i-16+j] ^ t[j];
         i += 4;
     }
-}
+    cipher_secure_zero(t, sizeof(t));
 
 static void add_round_key(uint8_t* state, const uint8_t* rk)
 {
@@ -96,6 +98,7 @@ static void shift_rows(uint8_t* s)
     s[4]=t[4]; s[5]=t[9]; s[6]=t[14]; s[7]=t[3];
     s[8]=t[8]; s[9]=t[13]; s[10]=t[2]; s[11]=t[7];
     s[12]=t[12]; s[13]=t[1]; s[14]=t[6]; s[15]=t[11];
+    cipher_secure_zero(t, sizeof(t));
 }
 static void inv_shift_rows(uint8_t* s)
 {
@@ -104,6 +107,7 @@ static void inv_shift_rows(uint8_t* s)
     s[4]=t[4]; s[5]=t[1]; s[6]=t[14]; s[7]=t[11];
     s[8]=t[8]; s[9]=t[5]; s[10]=t[2]; s[11]=t[15];
     s[12]=t[12]; s[13]=t[9]; s[14]=t[6]; s[15]=t[3];
+    cipher_secure_zero(t, sizeof(t));
 }
 static void mix_columns(uint8_t* s)
 {
@@ -143,6 +147,7 @@ void aes128_encrypt_block(const uint8_t* in, uint8_t* out, const uint8_t* rk)
     }
     sub_bytes(s); shift_rows(s); add_round_key(s,rk+160);
     memcpy(out,s,16);
+    cipher_secure_zero(s, sizeof(s));
 }
 
 void aes128_decrypt_block(const uint8_t* in, uint8_t* out, const uint8_t* rk)
@@ -158,5 +163,24 @@ void aes128_decrypt_block(const uint8_t* in, uint8_t* out, const uint8_t* rk)
     }
     inv_shift_rows(s); inv_sub_bytes(s); add_round_key(s,rk);
     memcpy(out,s,16);
+    cipher_secure_zero(s, sizeof(s));
 }
 
+
+/* FIPS 197 AES-128 example; public synthetic values only. */
+bool aes_common_known_answer_self_test(void)
+{
+    const uint8_t key[16] = {0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f};
+    const uint8_t plain[16] = {0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff};
+    const uint8_t expected[16] = {0x69,0xc4,0xe0,0xd8,0x6a,0x7b,0x04,0x30,0xd8,0xcd,0xb7,0x80,0x70,0xb4,0xc5,0x5a};
+    uint8_t rk[176], enc[16], dec[16];
+    aes128_key_expansion(key, rk);
+    aes128_encrypt_block(plain, enc, rk);
+    aes128_decrypt_block(expected, dec, rk);
+    const bool ok = memcmp(enc, expected, sizeof(enc)) == 0 &&
+                    memcmp(dec, plain, sizeof(dec)) == 0;
+    cipher_secure_zero(rk, sizeof(rk));
+    cipher_secure_zero(enc, sizeof(enc));
+    cipher_secure_zero(dec, sizeof(dec));
+    return ok;
+}
