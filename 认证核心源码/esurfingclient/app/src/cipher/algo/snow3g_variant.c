@@ -2,6 +2,7 @@
 #include "cipher/CipherUtils.h"
 
 #include <stdint.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -195,6 +196,7 @@ static void snow3g_generate(uint32_t *c, const uint8_t *in, int blocks, uint8_t 
 static uint8_t* snow3g_encrypt_raw(const uint8_t* key, const uint8_t* iv, const uint8_t* data,
                                    const size_t data_len, size_t* output_len)
 {
+    if (data_len > (size_t)INT_MAX - 3) return NULL;
     const int pad = (data_len & 3) ? 4 - (int)(data_len & 3) : 0;
     const int total = pad + (int)data_len;
     uint8_t* buf = s_calloc(1, total ? (size_t)total : 1);
@@ -203,6 +205,7 @@ static uint8_t* snow3g_encrypt_raw(const uint8_t* key, const uint8_t* iv, const 
     uint32_t c[SNOW3G_CELLS];
     snow3g_keyschedule(c, key, iv);
     snow3g_generate(c, buf, total / 4, buf);
+    cipher_secure_zero(c, sizeof(c));
     *output_len = (size_t)total;
     return buf;
 }
@@ -210,12 +213,14 @@ static uint8_t* snow3g_encrypt_raw(const uint8_t* key, const uint8_t* iv, const 
 static uint8_t* snow3g_decrypt_raw(const uint8_t* key, const uint8_t* iv, const uint8_t* data,
                                    const size_t data_len, size_t* output_len)
 {
+    if (data_len > INT_MAX) return NULL;
     uint8_t* buf = s_malloc(data_len ? data_len : 1);
     if(!buf) return NULL;
     memcpy(buf, data, data_len);
     uint32_t c[SNOW3G_CELLS];
     snow3g_keyschedule(c, key, iv);
     snow3g_generate(c, buf, (int)data_len / 4, buf);
+    cipher_secure_zero(c, sizeof(c));
     *output_len = data_len;
     return buf;
 }
@@ -228,7 +233,7 @@ static char* snow3g_variant_encrypt(cipher_interface_t* self, const char* text)
     size_t out_len=0; uint8_t* out = snow3g_encrypt_raw(d->key, d->iv, (const uint8_t*)text, text_len, &out_len);
     if(!out) return NULL;
     char* hex = bytes_2_hex(out, out_len);
-    s_free(out);
+    s_secure_free(out, out_len ? out_len : 1);
     return hex;
 }
 
@@ -239,13 +244,14 @@ static char* snow3g_variant_decrypt(cipher_interface_t* self, const char* hex)
     size_t bytes_len=0; uint8_t* bytes = hex_2_bytes(hex, &bytes_len);
     if(!bytes) return NULL;
     size_t out_len=0; uint8_t* out = snow3g_decrypt_raw(d->key, d->iv, bytes, bytes_len, &out_len);
-    s_free(bytes);
+    s_secure_free(bytes, bytes_len);
     if(!out) return NULL;
+    const size_t allocation_len = out_len ? out_len : 1;
     while(out_len > 0 && out[out_len - 1] == 0) out_len--;
     char* result = s_malloc(out_len + 1);
     memcpy(result, out, out_len);
     result[out_len] = '\0';
-    s_free(out);
+    s_secure_free(out, allocation_len);
     return result;
 }
 
@@ -253,7 +259,7 @@ static void snow3g_variant_destroy(cipher_interface_t* self)
 {
     if(self)
     {
-        s_free(self->private_data);
+        s_secure_free(self->private_data, sizeof(snow3g_variant_android_data_t));
         s_free(self);
     }
 }
