@@ -8,6 +8,7 @@
 #include "utils/text/TextUtils.h"
 
 #include <ctype.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -172,7 +173,9 @@ static void header_name_normalize(const char* header, char* out, const size_t ou
 
 size_t header_cb(const void* contents, const size_t size, const size_t nmemb, void* userdata)
 {
+    if (size != 0 && nmemb > SIZE_MAX / size) return 0;
     const size_t real_size = size * nmemb;
+    if (real_size == 0 || contents == NULL || userdata == NULL) return 0;
     curl_resp_t* resp = userdata;
 
     /**
@@ -280,24 +283,28 @@ size_t header_cb(const void* contents, const size_t size, const size_t nmemb, vo
     return real_size;
 }
 
-size_t write_cb(const void* contents, const size_t size, const size_t nmemb, void* userdata)
+#define MAX_BODY_BYTES (1024u * 1024u)
+static size_t write_body(const void* contents, const size_t size, const size_t nmemb, void* userdata,
+    void* (*resize)(void*, size_t))
 {
-    curl_resp_t* resp = userdata;
+    if (size != 0 && nmemb > SIZE_MAX / size) return 0;
     const size_t real_size = size * nmemb;
+    if (real_size == 0 || contents == NULL || userdata == NULL) return 0;
+    curl_resp_t* resp = userdata;
+    if (resp->body_size != 0 && resp->body_data == NULL) return 0;
 
     /**
      * 响应体总量上限: 被劫持/异常的门户不能把进程内存无限撑大。
      * 正常响应都在几 KB 量级, 1 MiB 已经非常宽裕。超限返回 0 让 curl 以
      * CURLE_WRITE_ERROR 中止本次请求。
      */
-    #define MAX_BODY_BYTES (1024u * 1024u)
     if (resp->body_size > MAX_BODY_BYTES || real_size > MAX_BODY_BYTES - resp->body_size)
     {
         LOG_ERROR("响应体超过 %u 字节上限, 中止接收", MAX_BODY_BYTES);
         return 0;
     }
 
-    char* ptr = realloc(resp->body_data, resp->body_size + real_size + 1);
+    char* ptr = resize(resp->body_data, resp->body_size + real_size + 1);
 
     if (!ptr) return 0;
 
@@ -309,8 +316,52 @@ size_t write_cb(const void* contents, const size_t size, const size_t nmemb, voi
     return real_size;
 }
 
+size_t write_cb(const void* contents, const size_t size, const size_t nmemb, void* userdata)
+{
+    return write_body(contents, size, nmemb, userdata, realloc);
+}
+
+static void* fail_resize(void* ptr, size_t length)
+{
+    (void)ptr; (void)length;
+    return NULL;
+}
+
+bool net_callback_self_test(void)
+{
+    curl_resp_t resp = {0};
+    const char data[] = "abcd";
+    bool ok = write_cb(data, SIZE_MAX, 2, &resp) == 0 &&
+        header_cb(data, SIZE_MAX, 2, &resp) == 0 &&
+        write_cb(NULL, 1, 4, &resp) == 0 && header_cb(NULL, 1, 4, &resp) == 0 &&
+        write_cb(data, 1, 4, NULL) == 0 && header_cb(data, 1, 4, NULL) == 0 &&
+        write_cb(NULL, 0, 1, &resp) == 0 && resp.body_data == NULL;
+    if (!ok) return false;
+    if (write_cb(data, 2, 2, &resp) != 4) { curl_resp_free(&resp); return false; }
+    char* previous = resp.body_data;
+    ok = write_body(data, 1, 4, &resp, fail_resize) == 0 &&
+        resp.body_data == previous && resp.body_size == 4 && memcmp(previous, "abcd", 5) == 0 &&
+        write_cb(data, 1, MAX_BODY_BYTES, &resp) == 0 && resp.body_size == 4;
+    curl_resp_free(&resp);
+    if (!ok) return false;
+    char* body = malloc(MAX_BODY_BYTES);
+    if (body == NULL) return false;
+    memset(body, 'x', MAX_BODY_BYTES);
+    ok = write_cb(body, 1, MAX_BODY_BYTES, &resp) == MAX_BODY_BYTES &&
+        resp.body_size == MAX_BODY_BYTES && resp.body_data[MAX_BODY_BYTES] == '\0' &&
+        write_cb(data, 1, 1, &resp) == 0 && resp.body_size == MAX_BODY_BYTES;
+    free(body);
+    curl_resp_free(&resp);
+    curl_resp_free(&resp);
+    if (!ok || resp.body_data != NULL || resp.body_size != 0) return false;
+    const char header[] = "Error-Code: test\r\n";
+    return header_cb(header, 1, sizeof(header) - 1, &resp) == sizeof(header) - 1 &&
+        strcmp(resp.error_code, "test") == 0;
+}
+
 char* calc_md5(const char* data)
 {
+    if (data == NULL) return NULL;
     unsigned char digest[EVP_MAX_MD_SIZE];
     unsigned int digest_len;
     char* md5_str = malloc(33);

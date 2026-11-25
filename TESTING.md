@@ -178,3 +178,8 @@ JOURNAL_OUTCOME_PASS cases=32 failure_history=1：prepare/restore、原始 Runni
 ## 原生凭据帧回归
 
 NATIVE_INPUT_PASS cases=19：独立真实 native 子进程 --ephemeral-check，无网络认证。测试完整 JSON、尾随空白/额外对象、重复/未知/大小写字段、原始/转义 NUL、字面量反斜杠、原始控制字符、非法转义、合法 UTF-8、字节边界、分数/越界 channel、缺换行、超限及非法 UTF-8。输入逐字节有界读取，不消费 STOP 后续帧；cJSON 要求完整对象及精确字段，原有清理保留。测试输出只报告索引及退出码，不打印输入。新CI待验证；不宣称 cJSON 完整语法验证或所有内存擦除路径覆盖。
+
+
+## 原生 GET/POST 资源边界回归
+
+NATIVE_NET_RESOURCE_PASS：实际嵌入核心的独立 --self-test-net-resources 模式，直接测试回调乘法溢出、空指针/空输入、1MiB 精确边界、分配失败注入后旧缓冲完整、重复释放、合法响应头；请求头构造第二项分配失败注入及正常链表，重试条件覆盖连接失败/未连接超时/写失败/取消/已收到响应或已连接。GET/POST 检查 setopt/getinfo、构造失败拒绝请求、备用解析链表均保留至 easy cleanup、传输失败清除残缺响应。测试不发网络请求；未覆盖所有 libcurl 内部 OOM、探测 multi 路径、真实网络与所有线程竞态。新CI待验证。

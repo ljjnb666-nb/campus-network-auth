@@ -58,6 +58,7 @@ internal static class Program
         if (args.Length == 2 && args[0] == "--self-test-signature") return SignatureTests(args[1]);
         if (args.Length == 1 && args[0] == "--self-test-core") return CoreTest(false);
         if (args.Length == 1 && args[0] == "--self-test-native-input") return NativeInputTests();
+        if (args.Length == 1 && args[0] == "--self-test-native-net") return NativeNetTests();
         if (args.Length == 1 && args[0] == "--self-test-stop") return CoreTest(true);
         if (args.Length == 1 && args[0] == "--self-test-resources") return ResourceTests();
         if (args.Length == 1 && args[0] == "--self-test-observe") return ObserveTests();
@@ -1342,6 +1343,38 @@ internal static class Program
         string line;
         while ((line = Console.ReadLine()) != null) if (line == "STOP") return 0;
         return 0;
+    }
+
+    private static int NativeNetTests()
+    {
+        try
+        {
+            ExtractCore();
+            using (var child = new Process { StartInfo = new ProcessStartInfo {
+                FileName = corePath, Arguments = "--self-test-net-resources", WorkingDirectory = tempDir,
+                UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true } })
+            {
+                bool started = false;
+                try
+                {
+                    using (OpenVerifiedCore()) { started = child.Start(); }
+                    if (!started) return 1;
+                    var output = child.StandardOutput.ReadToEndAsync();
+                    var errors = child.StandardError.ReadToEndAsync();
+                    if (!child.WaitForExit(10000) || !Task.WaitAll(new Task[] { output, errors }, 5000)) return 1;
+                    bool ok = child.ExitCode == 0 && errors.Result.Contains("NATIVE_NET_RESOURCE_PASS");
+                    Console.WriteLine(ok ? "NATIVE_NET_RESOURCE_PASS" : "NATIVE_NET_RESOURCE_FAIL exit=" + child.ExitCode);
+                    return ok ? 0 : 1;
+                }
+                finally
+                {
+                    if (started && !child.HasExited) { child.Kill(); child.WaitForExit(5000); }
+                }
+            }
+        }
+        catch (Exception ex) { Console.WriteLine("NATIVE_NET_RESOURCE_ERROR " + ex.GetType().Name); return 1; }
+        finally { CleanupCore(); }
     }
 
     private static int NativeInputTests()

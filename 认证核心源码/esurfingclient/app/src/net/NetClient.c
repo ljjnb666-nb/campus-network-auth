@@ -91,6 +91,61 @@ static struct curl_slist* fixed_host_resolve(const fixed_host_t* host, const cha
     return curl_slist_append(NULL, entry);
 }
 
+/* curl_slist_append returns NULL on allocation failure without freeing
+ * the existing list. Keep ownership until the full header set is built. */
+typedef struct curl_slist* (*append_header_fn)(struct curl_slist*, const char*);
+static bool build_headers(struct curl_slist** out, const char* const* values, size_t count, append_header_fn append)
+{
+    struct curl_slist* list = NULL;
+    *out = NULL;
+    for (size_t i = 0; i < count; ++i)
+    {
+        struct curl_slist* next = append(list, values[i]);
+        if (next == NULL)
+        {
+            curl_slist_free_all(list);
+            return false;
+        }
+        list = next;
+    }
+    *out = list;
+    return true;
+}
+
+static bool can_retry_connect(CURLcode code, long response_code, double connect_time,
+    const curl_resp_t* resp)
+{
+    return (code == CURLE_COULDNT_CONNECT || code == CURLE_OPERATION_TIMEDOUT) &&
+        response_code == 0 && connect_time == 0.0 &&
+        resp->body_size == 0 && resp->error_code[0] == '\0' && resp->sub_error[0] == '\0';
+}
+
+static struct curl_slist* fail_second_header(struct curl_slist* list, const char* value)
+{
+    return list == NULL ? curl_slist_append(list, value) : NULL;
+}
+
+/* No sockets or network requests: actual libcurl list allocations and
+ * deterministic failure injection at the same production helper boundary. */
+bool net_resource_self_test(void)
+{
+    const char* const values[] = { "X-Test: a", "X-Test: b" };
+    struct curl_slist* headers = NULL;
+    if (build_headers(&headers, values, 2, fail_second_header) || headers != NULL) return false;
+    if (!build_headers(&headers, values, 2, curl_slist_append)) return false;
+    bool ok = headers != NULL && headers->next != NULL && headers->next->next == NULL;
+    curl_slist_free_all(headers);
+    curl_resp_t resp = {0};
+    ok = ok && can_retry_connect(CURLE_COULDNT_CONNECT, 0, 0, &resp) &&
+        can_retry_connect(CURLE_OPERATION_TIMEDOUT, 0, 0, &resp) &&
+        !can_retry_connect(CURLE_WRITE_ERROR, 0, 0, &resp) &&
+        !can_retry_connect(CURLE_ABORTED_BY_CALLBACK, 0, 0, &resp) &&
+        !can_retry_connect(CURLE_OPERATION_TIMEDOUT, 200, 0, &resp) &&
+        !can_retry_connect(CURLE_OPERATION_TIMEDOUT, 0, 0.01, &resp);
+    resp.body_size = 1;
+    return ok && !can_retry_connect(CURLE_COULDNT_CONNECT, 0, 0, &resp) && net_callback_self_test();
+}
+
 curl_resp_t post(const char* url, const char* data)
 {
     LOG_DEBUG("POST 地址: %s", url);
@@ -100,7 +155,7 @@ curl_resp_t post(const char* url, const char* data)
     curl_resp_t resp = {0};
     char errbuf[CURL_ERROR_SIZE] = {0};
 
-    if (tl_thread_idx < 0 || g_prog_status == NULL)
+    if (url == NULL || data == NULL || tl_thread_idx < 0 || g_prog_status == NULL || tl_thread_idx >= g_prog_cnt)
     {
         LOG_ERROR("POST 缺少账号线程上下文, 拒绝请求");
         resp.status = STATUS_ERROR;
@@ -144,15 +199,13 @@ curl_resp_t post(const char* url, const char* data)
 
     struct curl_slist* headers = NULL;
 
-    headers = curl_slist_append(headers, md5_hash_str);
-    headers = curl_slist_append(headers, REQ_CONTENT_TYPE);
-    headers = curl_slist_append(headers, ua);
-    headers = curl_slist_append(headers, REQ_ACCEPT);
-    headers = curl_slist_append(headers, c_id);
-    headers = curl_slist_append(headers, a_id);
-    headers = curl_slist_append(headers, cdc_sid);
-    headers = curl_slist_append(headers, cdc_d);
-    headers = curl_slist_append(headers, cdc_a);
+    const char* const values[] = { md5_hash_str, REQ_CONTENT_TYPE, ua, REQ_ACCEPT,
+        c_id, a_id, cdc_sid, cdc_d, cdc_a };
+    if (!build_headers(&headers, values, sizeof(values) / sizeof(values[0]), curl_slist_append))
+    {
+        resp.status = STATUS_INIT_ERROR;
+        return resp;
+    }
 
     CURL* curl = curl_easy_init();
     if (curl == NULL)
@@ -166,25 +219,25 @@ curl_resp_t post(const char* url, const char* data)
 
     LOG_TRACE("设置 curl 选项");
     // POST URL
-    curl_easy_setopt(curl, CURLOPT_URL, url);
+    if (curl_easy_setopt(curl, CURLOPT_URL, url) != CURLE_OK) goto post_setup_failed;
     // 连接超时时长
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, g_conn_timeout);
+    if (curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, g_conn_timeout) != CURLE_OK) goto post_setup_failed;
     // 总超时时长
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, g_op_timeout);
+    if (curl_easy_setopt(curl, CURLOPT_TIMEOUT, g_op_timeout) != CURLE_OK) goto post_setup_failed;
     // 多线程程序必须关掉信号量超时 (DNS 解析走 SIGALRM 会崩)
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    if (curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L) != CURLE_OK) goto post_setup_failed;
 
-    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+    if (curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf) != CURLE_OK) goto post_setup_failed;
 
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data);
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb); // 错误码在响应头上, POST 也要收
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &resp);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    if (curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers) != CURLE_OK) goto post_setup_failed;
+    if (curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data) != CURLE_OK) goto post_setup_failed;
+    if (curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb) != CURLE_OK) goto post_setup_failed; // 错误码在响应头上, POST 也要收
+    if (curl_easy_setopt(curl, CURLOPT_HEADERDATA, &resp) != CURLE_OK) goto post_setup_failed;
+    if (curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb) != CURLE_OK) goto post_setup_failed;
+    if (curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp) != CURLE_OK) goto post_setup_failed;
 
 #ifdef __OPENWRT__
-    curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, open_socket_callback);
+    if (curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, open_socket_callback) != CURLE_OK) goto post_setup_failed;
 #endif
 
     LOG_TRACE("执行 CURL");
@@ -197,14 +250,16 @@ curl_resp_t post(const char* url, const char* data)
         // 再清理资源
         curl_easy_cleanup(curl);
         curl_slist_free_all(headers);
+        curl_resp_free(&resp);
+        resp.error_code[0] = '\0'; resp.sub_error[0] = '\0';
         resp.status = curl_err_msg_out(curl_code);
         resp.curl_code = curl_code;
         return resp;
     }
 
     LOG_TRACE("获取响应码");
-    long resp_code;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp_code);
+    long resp_code = 0;
+    if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp_code) != CURLE_OK) goto post_setup_failed;
 
     curl_easy_cleanup(curl);
     curl_slist_free_all(headers);
@@ -236,6 +291,14 @@ curl_resp_t post(const char* url, const char* data)
     resp.http_code = resp_code;
     resp.status = STATUS_ERROR;
     return resp;
+
+post_setup_failed:
+    curl_easy_cleanup(curl);
+    curl_slist_free_all(headers);
+    curl_resp_free(&resp);
+    resp.error_code[0] = '\0'; resp.sub_error[0] = '\0';
+    resp.status = STATUS_INIT_ERROR;
+    return resp;
 }
 
 void curl_resp_free(curl_resp_t* resp)
@@ -258,7 +321,14 @@ curl_resp_t get(const char* url)
     char c_id[MAX_LEN] = {0};
 
     struct curl_slist* headers = NULL;
+    struct curl_slist* resolve = NULL;
+    struct curl_slist* retry_resolve = NULL;
 
+    if (url == NULL || (tl_thread_idx >= 0 && (g_prog_status == NULL || tl_thread_idx >= g_prog_cnt)))
+    {
+        resp.status = STATUS_INIT_ERROR;
+        return resp;
+    }
     if (tl_thread_idx > -1)
     {
         snprintf(g_request_url, sizeof(g_request_url), "%s", safe_str(url));
@@ -270,9 +340,12 @@ curl_resp_t get(const char* url)
         LOG_TRACE("GET 添加头 %s", c_id);
         LOG_TRACE("线程下标: %" PRId8, tl_thread_idx);
 
-        headers = curl_slist_append(headers, ua);
-        headers = curl_slist_append(headers, REQ_ACCEPT);
-        headers = curl_slist_append(headers, c_id);
+        const char* const values[] = { ua, REQ_ACCEPT, c_id };
+        if (!build_headers(&headers, values, sizeof(values) / sizeof(values[0]), curl_slist_append))
+        {
+            resp.status = STATUS_INIT_ERROR;
+            return resp;
+        }
     }
 
     CURL* curl = curl_easy_init();
@@ -287,42 +360,42 @@ curl_resp_t get(const char* url)
 
     LOG_TRACE("设置 curl 选项");
     // GET URL
-    curl_easy_setopt(curl, CURLOPT_URL, url);
+    if (curl_easy_setopt(curl, CURLOPT_URL, url) != CURLE_OK) goto get_setup_failed;
 
     /**
      * 固定 IP 解析: 表里有的域名不走系统 DNS, 直接指定要连的地址
      */
-    struct curl_slist* resolve = NULL;
     const fixed_host_t* fixed = fixed_host_for_url(url);
     if (fixed != NULL && fixed->ips[0] != NULL)
     {
         resolve = fixed_host_resolve(fixed, fixed->ips[0], url);
-        if (resolve != NULL) curl_easy_setopt(curl, CURLOPT_RESOLVE, resolve);
+        if (resolve == NULL || curl_easy_setopt(curl, CURLOPT_RESOLVE, resolve) != CURLE_OK)
+            goto get_setup_failed;
     }
 
     // 连接超时时长
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, g_conn_timeout);
+    if (curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, g_conn_timeout) != CURLE_OK) goto get_setup_failed;
     // 总超时时长
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, g_op_timeout);
+    if (curl_easy_setopt(curl, CURLOPT_TIMEOUT, g_op_timeout) != CURLE_OK) goto get_setup_failed;
     // 多线程程序必须关掉信号量超时 (DNS 解析走 SIGALRM 会崩)
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    if (curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L) != CURLE_OK) goto get_setup_failed;
     // 是否跟随重定向 (当前否)
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    if (curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L) != CURLE_OK) goto get_setup_failed;
 
-    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+    if (curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf) != CURLE_OK) goto get_setup_failed;
 
     // 响应回调无条件注册: 没有账号上下文 (后台探测线程) 时也不能让响应体打到 stdout
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &resp);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    if (curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb) != CURLE_OK) goto get_setup_failed;
+    if (curl_easy_setopt(curl, CURLOPT_HEADERDATA, &resp) != CURLE_OK) goto get_setup_failed;
+    if (curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb) != CURLE_OK) goto get_setup_failed;
+    if (curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp) != CURLE_OK) goto get_setup_failed;
 
     if (tl_thread_idx > -1)
     {
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
+        if (curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers) != CURLE_OK) goto get_setup_failed;
+        if (curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L) != CURLE_OK) goto get_setup_failed;
     #ifdef __OPENWRT__
-        curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, open_socket_callback);
+        if (curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, open_socket_callback) != CURLE_OK) goto get_setup_failed;
     #endif
     }
 
@@ -336,7 +409,12 @@ curl_resp_t get(const char* url)
      * 只在"压根没连上"这类错误上重试 (连不上/超时), 已经拿到响应的不重试 ——
      * 免得把一个正常的 302/404 当成失败又打一遍。
      */
-    if (curl_code != CURLE_OK && fixed != NULL && fixed->ips[1] != NULL)
+    long first_response = 0;
+    double first_connect = 0.0;
+    if (fixed != NULL && fixed->ips[1] != NULL &&
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &first_response) == CURLE_OK &&
+        curl_easy_getinfo(curl, CURLINFO_CONNECT_TIME, &first_connect) == CURLE_OK &&
+        can_retry_connect(curl_code, first_response, first_connect, &resp))
     {
         LOG_DEBUG("固定 IP %s 请求失败 (CURLcode %d), 换 %s 重试", fixed->ips[0], (int)curl_code, fixed->ips[1]);
 
@@ -347,14 +425,13 @@ curl_resp_t get(const char* url)
         resp.error_code[0] = '\0';
         resp.sub_error[0] = '\0';
 
-        curl_slist_free_all(resolve);
-        resolve = fixed_host_resolve(fixed, fixed->ips[1], url);
-        if (resolve != NULL)
-        {
-            curl_easy_setopt(curl, CURLOPT_RESOLVE, resolve);
-            watchdog_pet_network();
-            curl_code = curl_easy_perform(curl);
-        }
+        // Both lists outlive the easy handle, including setopt failure.
+        retry_resolve = fixed_host_resolve(fixed, fixed->ips[1], url);
+        if (retry_resolve == NULL || curl_easy_setopt(curl, CURLOPT_RESOLVE, retry_resolve) != CURLE_OK)
+            goto get_setup_failed;
+        errbuf[0] = '\0';
+        watchdog_pet_network();
+        curl_code = curl_easy_perform(curl);
     }
 
     if (curl_code != CURLE_OK)
@@ -365,18 +442,22 @@ curl_resp_t get(const char* url)
         curl_easy_cleanup(curl);
         curl_slist_free_all(headers);
         curl_slist_free_all(resolve);
+        curl_slist_free_all(retry_resolve);
+        curl_resp_free(&resp);
+        resp.error_code[0] = '\0'; resp.sub_error[0] = '\0';
         resp.status = curl_err_msg_out(curl_code);
         resp.curl_code = curl_code;
         return resp;
     }
 
     LOG_TRACE("获取响应码");
-    long resp_code;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp_code);
+    long resp_code = 0;
+    if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp_code) != CURLE_OK) goto get_setup_failed;
 
     curl_easy_cleanup(curl);
     curl_slist_free_all(headers);
     curl_slist_free_all(resolve);
+        curl_slist_free_all(retry_resolve);
 
     if (resp_code == 200)
     {
@@ -411,5 +492,15 @@ curl_resp_t get(const char* url)
     LOG_ERROR("意外的 HTTP 响应码: %ld", resp_code);
     resp.http_code = resp_code;
     resp.status = STATUS_ERROR;
+    return resp;
+
+get_setup_failed:
+    curl_easy_cleanup(curl);
+    curl_slist_free_all(headers);
+    curl_slist_free_all(resolve);
+    curl_slist_free_all(retry_resolve);
+    curl_resp_free(&resp);
+    resp.error_code[0] = '\0'; resp.sub_error[0] = '\0';
+    resp.status = STATUS_INIT_ERROR;
     return resp;
 }

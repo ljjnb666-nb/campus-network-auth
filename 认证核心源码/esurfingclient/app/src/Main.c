@@ -21,6 +21,7 @@
 #endif
 
 extern void work(void);
+extern bool net_resource_self_test(void);
 
 #define ARG_CONTINUE (-1)
 
@@ -423,6 +424,15 @@ int main(const int argc, char *argv[])
     // 记下来: 重启进程时要原样带上这些参数, 否则重启后会变成另一个角色
     g_main_argc = argc;
     g_main_argv = argv;
+
+    // Standalone offline native regression: never reaches authentication.
+    if (argc == 2 && strcmp(argv[1], "--self-test-net-resources") == 0)
+    {
+        const bool ok = net_resource_self_test();
+        curl_global_cleanup();
+        fprintf(stderr, "%s\n", ok ? "NATIVE_NET_RESOURCE_PASS" : "NATIVE_NET_RESOURCE_FAIL");
+        return ok ? 0 : 1;
+    }
 
     // 记下启动时的父进程号: 被监管的子进程靠它判断监管者是否还活着
     record_parent_pid();

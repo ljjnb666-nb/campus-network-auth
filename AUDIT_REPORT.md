@@ -402,3 +402,8 @@ Push 45577413944 / PR 45577426560 success；JOURNAL_BOOT_SEQUENCE_PASS/BOOT_SEQU
 ### 发布安全复审第四批（af0b9c3）
 
 Push 45578459708 / PR 45578471934 success，JOURNAL_OUTCOME_PASS 32、所有既有回归通过，artifact 15004643629。原生凭据入口审计发现 fgets/字符串语义与原始NUL、cJSON默认接受尾随内容、重复/未知字段、转义NUL截断及UTF8校验不足。改为有界帧读取、预检、完整精确对象、19个实际离线子进程回归；不改变真实认证协议或服务动作。新CI待验证。后续审计 curl 错误分支、回调尺寸、线程退出及凭据中间缓冲；上游HTTP限制仍开放，main未修改。
+
+
+### 发布安全复审第五批（dd5ad72）
+
+Push 45579355374 / PR 45579370437 success，NATIVE_INPUT_PASS 19、全部既有门禁通过，artifact 15005009712。GET/POST 审计发现回调乘法未校验、slist append失败丢失旧链表、固定地址重试先释放仍引用列表、重试过宽、忽略 setopt/getinfo 结果、传输失败保留残缺响应。新增防御和 NATIVE_NET_RESOURCE_PASS 独立原生离线故障注入；未实际发网络请求，不改变认证协议，不声称覆盖所有探测/线程路径。新 CI 待验证；main 未修改。

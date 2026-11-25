@@ -90,6 +90,7 @@ jobs:
           Invoke-SelfTest '--self-test-credentials'
           Invoke-SelfTest '--self-test-core'
           Invoke-SelfTest '--self-test-native-input'
+          Invoke-SelfTest '--self-test-native-net'
           Invoke-SelfTest '--self-test-stop'   # 离线 probe 钩子：仅验证 STOP 通道与结构化事件，不触碰真实认证
           Invoke-SelfTest '--self-test-resources' # 30 offline core cycles, mandatory exit and pipe drain
 
