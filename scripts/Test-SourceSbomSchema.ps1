@@ -14,9 +14,16 @@ try {
     $schemas = @{}
     foreach ($name in $pins.Keys) {
         $file = Join-Path $temp $name
-        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/CycloneDX/specification/1.5/schema/$name" -OutFile $file -TimeoutSec 60
+        # Fetch the exact reviewed Git object, not the mutable 1.5 branch
+        # or tag. Decode its bytes without newline/encoding conversion.
+        $expected = $pins[$name]
+        $blob = Invoke-RestMethod -Uri "https://api.github.com/repos/CycloneDX/specification/git/blobs/$expected" -Headers @{Accept='application/vnd.github+json'} -TimeoutSec 60
+        if ($blob.sha -cne $expected -or $blob.encoding -cne 'base64' -or -not $blob.content) { throw "Unexpected schema blob response: $name" }
+        $bytes = [Convert]::FromBase64String([string]$blob.content)
+        if ($bytes.Length -ne $blob.size) { throw "Schema blob size mismatch: $name" }
+        [IO.File]::WriteAllBytes($file, $bytes)
         $actual = (& git hash-object --no-filters -- $file | Select-Object -First 1)
-        if ($LASTEXITCODE -ne 0 -or $actual -cne $pins[$name]) { throw "Schema digest mismatch: $name" }
+        if ($LASTEXITCODE -ne 0 -or $actual -cne $expected) { throw "Schema digest mismatch: $name expected=$expected observed=$actual" }
         $schemas[$name] = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json -AsHashtable
     }
     function Rewrite-References($node, [bool]$jsf) {
