@@ -26,10 +26,11 @@ static char* aes_ecb_encrypt(cipher_interface_t* self, const char* text)
         uint8_t tmp[16];
         aes128_encrypt_block(padded + i, tmp, ctx->round_keys2);
         aes128_encrypt_block(tmp, out + i, ctx->round_keys1);
+        cipher_secure_zero(tmp, sizeof(tmp));
     }
     char* hex = bytes_2_hex(out, padded_len);
-    s_free(padded);
-    s_free(out);
+    s_secure_free(padded, padded_len);
+    s_secure_free(out, padded_len);
     return hex;
 }
 
@@ -41,7 +42,7 @@ static char* aes_ecb_decrypt(cipher_interface_t* self, const char* hex)
     uint8_t* in = hex_2_bytes(hex, &in_len);
     if (!in || in_len % 16 != 0)
     {
-        s_free(in); return NULL;
+        s_secure_free(in, in_len); return NULL;
     }
     uint8_t* out = s_malloc(in_len);
     for (size_t i = 0; i < in_len; i += 16)
@@ -49,21 +50,22 @@ static char* aes_ecb_decrypt(cipher_interface_t* self, const char* hex)
         uint8_t tmp[16];
         aes128_decrypt_block(in + i, tmp, ctx->round_keys1);
         aes128_decrypt_block(tmp, out + i, ctx->round_keys2);
+        cipher_secure_zero(tmp, sizeof(tmp));
     }
     size_t plain_len = in_len;
     while (plain_len > 0 && out[plain_len - 1] == 0x00) plain_len--;
     char* text = s_malloc(plain_len + 1);
     memcpy(text, out, plain_len);
     text[plain_len] = '\0';
-    s_free(in);
-    s_free(out);
+    s_secure_free(in, in_len);
+    s_secure_free(out, in_len);
     return text;
 }
 
 static void aes_ecb_destroy(cipher_interface_t* self)
 {
     if (!self) return;
-    if (self->private_data) s_free(self->private_data);
+    s_secure_free(self->private_data, sizeof(aes_ecb_linux_ctx_t));
     s_free(self);
 }
 
