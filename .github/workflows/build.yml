@@ -238,10 +238,6 @@ jobs:
         shell: pwsh
         run: ./scripts/New-SourceSbom.ps1
 
-      - name: Validate source SBOM against pinned CycloneDX schema
-        shell: pwsh
-        run: ./scripts/Test-SourceSbomSchema.ps1
-
       - name: Measure same-runner rebuild repeatability
         timeout-minutes: 10
         shell: pwsh
@@ -269,6 +265,7 @@ jobs:
               $bm = @($second.outputs | Where-Object { $_.file -ceq $name })
               if ($am.Count -ne 1 -or $bm.Count -ne 1 -or $a -cne $am[0].sha256 -or $b -cne $bm[0].sha256) { throw "Rebuild manifest mismatch: $name" }
               $results += [ordered]@{file=$name;firstSha256=$a;secondSha256=$b;byteIdentical=($a -ceq $b)}
+              Write-Host "REBUILD_FILE $name first=$a second=$b identical=$($a -ceq $b)"
             }
             $identical = @($results | Where-Object { -not $_.byteIdentical }).Count -eq 0
             [ordered]@{schemaVersion=1;scope='two builds on one runner, distinct temporary directories; not independent reproducibility';gitCommit=$first.gitCommit;allByteIdentical=$identical;outputs=$results} |
@@ -295,6 +292,10 @@ jobs:
             ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $dir 'build-evidence.json') -Encoding utf8
           Write-Host 'BUILD_EVIDENCE_INDEX_PASS'
 
+      - name: Validate source SBOM against pinned CycloneDX schema
+        shell: pwsh
+        run: ./scripts/Test-SourceSbomSchema.ps1
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -310,6 +311,20 @@ jobs:
             build-core/build-evidence.json
             build-core/澈知科技-源码重建.exe.config
           if-no-files-found: error
+
+      - name: Preserve non-executable audit evidence when a gate fails
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chezhi-failed-build-audit-only
+          path: |
+            build-core/build-manifest.json
+            build-core/sbom.cdx.json
+            build-core/pe-imports.json
+            build-core/repeatability.json
+            build-core/build-evidence.json
+            build-core/build-toolchain-evidence.json
+          if-no-files-found: ignore
 
   linux-crypto-audit:
     runs-on: ubuntu-latest
