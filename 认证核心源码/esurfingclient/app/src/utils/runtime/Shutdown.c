@@ -13,6 +13,10 @@
 #ifdef _WIN32
 #include <windows.h>
 extern bool get_service_mode(void);
+
+/* Provisional native join budget, not the GUI's complete stop timeout.
+ * All Windows worker joins consume the same 60-second window. */
+#define SHUTDOWN_JOIN_BUDGET_MS 60000u
 #else
 #include <stdlib.h>
 #endif
@@ -124,6 +128,9 @@ void shut(const int8_t exit_code)
 
     /* Publish shutdown before any join or potentially blocking event output. */
     atomic_store(&g_need_exit, true);
+#ifdef _WIN32
+    sim_thread_shutdown_budget_begin(SHUTDOWN_JOIN_BUDGET_MS);
+#endif
 
     /**
      * 关闭流程一开始就停掉看门狗: 接下来主循环不再打卡,
@@ -140,6 +147,9 @@ void shut(const int8_t exit_code)
      */
     if (g_prog_role == ROLE_SUPERVISOR)
     {
+#ifdef _WIN32
+        sim_thread_shutdown_budget_end();
+#endif
         ephemeral_emit_event("exit", exit_code);
         return;
     }
@@ -181,6 +191,9 @@ void shut(const int8_t exit_code)
         }
     }
 
+#ifdef _WIN32
+    sim_thread_shutdown_budget_end();
+#endif
     ephemeral_emit_event("exit", exit_code);
     LOG_INFO("退出程序, 退出码: %" PRIu8, exit_code);
     clean_logger();
