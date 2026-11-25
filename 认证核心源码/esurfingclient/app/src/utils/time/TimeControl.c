@@ -388,9 +388,14 @@ static bool stop_worker(void)
     return true;
 }
 
+bool time_control_stop_checked(void)
+{
+    return stop_worker();
+}
+
 void time_control_stop(void)
 {
-    if (!stop_worker()) LOG_ERROR("时间控制线程等待失败, 保留线程对象");
+    if (!time_control_stop_checked()) LOG_ERROR("时间控制线程等待失败, 保留线程对象");
 }
 
 static int scheduler_test_worker(void* arg)
