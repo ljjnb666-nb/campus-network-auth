@@ -24,6 +24,13 @@ void s_free(void* ptr);
  * Never pass a string length in place of a known binary buffer size. */
 void s_secure_free(void* ptr, size_t len);
 
+/* C-string extent only; use s_secure_free with the original allocation
+ * length for binary or fixed-capacity buffers. */
+static inline void s_secure_free_string(char* ptr)
+{
+    if (ptr) s_secure_free(ptr, strlen(ptr) + 1);
+}
+
 static inline void cipher_secure_zero(void* ptr, size_t len)
 {
     volatile unsigned char* p = (volatile unsigned char*)ptr;
