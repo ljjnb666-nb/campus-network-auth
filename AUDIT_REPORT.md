@@ -317,3 +317,8 @@ Push 45550140241 / PR 45550145561 success；CURL_RANGE_TEST_PASS、CURL_FEED_CRO
 ### 主动审计第六批（基线 ce047fd）
 
 Push 45550721734 / PR 45550731789 success；110 次循环，预热后 handles 326→326，threads 18→18，private bytes 27803648→28823552；UI_DISPOSE_PASS，curl 双源公告 0。发现管理员子进程缺乏跨进程互斥、旧事务实例可覆盖新记录、启动时仅 Running 即清除 pending。新增机器范围 helper 互斥、事务独占写锁及快照版本检查、保留遗留 pending，并新增 SERVICE_GATE_PASS / JOURNAL_CONCURRENCY_PASS。新 CI 未验证。遗留 pending 需人工核对，自动解除尚未实现；Global 权限/跨会话实机未验，外部 SCM 竞争仍存在。未修改 main、未执行实际校园网或系统服务操作。
+
+
+### 主动审计第七批（基线 ebd3825）
+
+Push 45551297375 / PR 45551302877 success；SERVICE_GATE_PASS / JOURNAL_CONCURRENCY_PASS，110 次句柄 326→326。新增 v3 启动代次证据、托盘显式核对中断事务、二次观察、保守记录失败未知及恢复责任；JOURNAL_RESTART_PASS；禁止重试期间重复连接。未自动清除旧 pending 或损坏记录，缺少 WMI 启动证据时拒绝新服务切换。WMI 时间并非不可伪造的 boot ID，真实重启和跨会话仍待验证；未完全统一按钮管理，未修改 main，最新 CI 待验证。

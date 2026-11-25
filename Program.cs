@@ -440,6 +440,28 @@ internal static class Program
 
     // Only invoked in an explicitly elevated child after the user clicks a service action.
     // Fail closed if the original service identity, other client processes, or Wi-Fi Direct state cannot be checked.
+    private static long ReadBootTicks()
+    {
+        try
+        {
+            using (var query = new ManagementObjectSearcher("SELECT LastBootUpTime FROM Win32_OperatingSystem"))
+            using (var results = query.Get())
+            {
+                long ticks = 0; int count = 0;
+                foreach (ManagementObject item in results)
+                using (item)
+                {
+                    count++;
+                    var value = item["LastBootUpTime"] as string;
+                    if (String.IsNullOrEmpty(value)) return 0;
+                    ticks = ManagementDateTimeConverter.ToDateTime(value).ToUniversalTime().Ticks;
+                }
+                return count == 1 && ticks <= DateTime.UtcNow.Ticks ? ticks : 0;
+            }
+        }
+        catch { return 0; }
+    }
+
     private static int ChangeService(bool prepare)
     {
         try
@@ -1533,6 +1555,7 @@ internal static class Program
             trayMenu.Items.Add("停止认证", null, delegate { ShowFromTray(); StopClicked(stop, EventArgs.Empty); });
             trayMenu.Items.Add("清除已保存账号", null, delegate { ShowFromTray(); ForgetCredentials(); });
             trayMenu.Items.Add("导出诊断信息", null, delegate { ShowFromTray(); ExportDiagnostics(); });
+            trayMenu.Items.Add("核对遗留服务事务", null, async delegate { ShowFromTray(); await RecoverInterruptedJournalAsync(); });
             trayMenu.Items.Add(new ToolStripSeparator());
             trayMenu.Items.Add("退出程序", null, delegate { ShowFromTray(); exitRequested = true; Close(); });
             tray.ContextMenuStrip = trayMenu;
@@ -1978,7 +2001,8 @@ internal static class Program
             if (!running.HasExited) { userStopped = true; retryTimer.Stop(); return false; }
             // 泵消息让 Exited 回调（BeginInvoke）落地并执行 OnCoreExit → ScheduleAutoRetry
             for (int i = 0; i < 10; i++) { Application.DoEvents(); System.Threading.Thread.Sleep(50); }
-            bool ok = autoRetryCount == 1 && retryTimer.Enabled && state.Auth == ConnectionStates.AuthState.RetryScheduled;
+            bool ok = autoRetryCount == 1 && retryTimer.Enabled && state.Auth == ConnectionStates.AuthState.RetryScheduled &&
+                !connect.Enabled && !prepare.Enabled && !restore.Enabled && stop.Enabled;
             account.Text = "edited-user";
             ok &= activeTask != null && activeTask.Username == "retry-user";
             // 清理：取消重试，模拟用户停止（不变量验证：停止后重试被取消）
@@ -2611,7 +2635,7 @@ internal static class Program
 
         private async void ConnectClicked(object sender, EventArgs e)
         {
-            if (serviceBusy || connectCheckPending ||
+            if (serviceBusy || connectCheckPending || retryTimer.Enabled || exitRequested ||
                 (running != null && !Object.ReferenceEquals(running, completedProcess))) return;
             string invalid = ValidateAuthInput(account.Text, password.Text, channel.SelectedIndex + 1);
             if (invalid != null) { SetStatus(invalid, ToneWarn); return; }
@@ -2622,6 +2646,50 @@ internal static class Program
             await CheckAndStartAsync(taskGeneration);
         }
 
+        private async Task RecoverInterruptedJournalAsync()
+        {
+            if (isSelfTest || serviceBusy || connectCheckPending || retryTimer.Enabled || activeTask != null || exitRequested ||
+                (running != null && !Object.ReferenceEquals(running, completedProcess))) return;
+            int generation = ++taskGeneration;
+            serviceBusy = true; connect.Enabled = false; prepare.Enabled = false; restore.Enabled = false; stop.Enabled = false;
+            try
+            {
+                var journal = ServiceJournal.Load(ServiceJournal.DefaultPath());
+                if (journal.Invalid || !journal.HasPending)
+                {
+                    SetStatus(journal.Invalid ? "事务记录损坏，不能自动修复；请导出诊断。" : "没有未完成的服务事务。", ToneInfo);
+                    return;
+                }
+                long boot = await Task.Run((Func<long>)ReadBootTicks);
+                string actual = await Task.Run(readServiceState);
+                if (HandoffCancelled(generation, false)) return;
+                if (!journal.CanResolveAfterRestart(boot, actual))
+                {
+                    SetHandoff(ConnectionStates.HandoffState.Blocked, journal.BootTicks == 0 ?
+                        "旧事务缺少启动代次证据，请导出诊断并人工核对；不能自动解除。" :
+                        "尚未确认完整重启或服务仍未稳定。请先保存工作，通过 Windows 的重启功能重启后再核对。", ToneWarn);
+                    return;
+                }
+                if (MessageBox.Show(this, "已检测到新的 Windows 启动代次，当前天翼服务状态为 " + actual +
+                    "。是否将上次事务记录为结果未知的中断？不会启动/停止服务或自动连接；若服务原本运行，将保留恢复责任。",
+                    "核对遗留事务", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+                long latestBoot = await Task.Run((Func<long>)ReadBootTicks);
+                string latestState = await Task.Run(readServiceState);
+                if (HandoffCancelled(generation, false)) return;
+                if (latestBoot != boot || latestState != actual)
+                { SetHandoff(ConnectionStates.HandoffState.Blocked, "核对期间状态变化，未修改记录。", ToneWarn); return; }
+                journal.ResolveAfterRestart(latestBoot, latestState);
+                state.SetService(MapServiceState(latestState));
+                SetHandoff(ConnectionStates.HandoffState.None, "遗留事务已记录为中断；请重新选择连接或恢复，未自动执行任何网络操作。", ToneInfo);
+            }
+            catch { if (!IsDisposed) SetHandoff(ConnectionStates.HandoffState.Blocked, "遗留事务核对失败，记录保持原状，请导出诊断。", ToneWarn); }
+            finally
+            {
+                serviceBusy = false;
+                if (!IsDisposed && !Disposing) { connect.Enabled = true; prepare.Enabled = true; restore.Enabled = true; }
+            }
+        }
+
         private bool JournalAllowsNewAction()
         {
             if (isSelfTest) return true;
@@ -2629,7 +2697,7 @@ internal static class Program
             if (!journal.Invalid && !journal.HasPending) return true;
             SetHandoff(ConnectionStates.HandoffState.Blocked,
                 journal.Invalid ? "服务事务记录损坏，请先核对诊断。" :
-                "存在上次尚未确认的服务操作；请先核对天翼服务和管理员操作是否结束，避免重复切换。", ToneWarn);
+                "存在上次尚未确认的服务操作；请使用托盘菜单“核对遗留服务事务”。", ToneWarn);
             return false;
         }
 
@@ -2749,7 +2817,7 @@ internal static class Program
             int delay = autoRetryCount == 1 ? 10000 : 40000;
             retryTimer.Stop(); retryTimer.Interval = delay; retryTimer.Start();
             stop.Enabled = true; stop.Text = "取消重试";
-            prepare.Enabled = false; restore.Enabled = false;
+            connect.Enabled = false; prepare.Enabled = false; restore.Enabled = false;
             SetAuthState(ConnectionStates.AuthState.RetryScheduled, "网络探测失败（退出码 " + exitCode + "），" + (delay / 1000) + " 秒后重试（第 " + autoRetryCount + "/2 次）。", ToneWarn, true);
         }
 
@@ -3048,7 +3116,7 @@ internal static class Program
                 }
                 if (journal.HasPending)
                 {
-                    SetHandoff(ConnectionStates.HandoffState.Blocked, "上次服务事务未完成；不能仅凭当前服务状态判定结果，请核对诊断。", ToneWarn);
+                    SetHandoff(ConnectionStates.HandoffState.Blocked, "上次服务事务未完成；请使用托盘菜单“核对遗留服务事务”。", ToneWarn);
                     return;
                 }
                 if (!journal.NeedsRecovery && !journal.Uncertain) return;
@@ -3177,7 +3245,11 @@ internal static class Program
                 journal = ServiceJournal.Load(ServiceJournal.DefaultPath());
                 if (journal.Invalid)
                 { SetHandoff(ConnectionStates.HandoffState.Blocked, "服务事务记录损坏，需先人工核对，未执行切换。", ToneWarn); return false; }
-                journal.Begin(forPrepare ? "prepare" : "restore", before);
+                long boot = await Task.Run((Func<long>)ReadBootTicks);
+                if (HandoffCancelled(generation, fromConnect)) return false;
+                if (boot == 0)
+                { SetHandoff(ConnectionStates.HandoffState.Blocked, "无法读取 Windows 启动代次，未执行服务切换。", ToneWarn); return false; }
+                journal.Begin(forPrepare ? "prepare" : "restore", before, boot);
                 state.SetService(ConnectionStates.ServiceState.Transitioning);
                 SetHandoff(forPrepare ? ConnectionStates.HandoffState.Preparing : ConnectionStates.HandoffState.Restoring, "请在弹出的管理员确认窗口中操作……", ToneBusy, true);
                 var info = new ProcessStartInfo { FileName = Application.ExecutablePath, Arguments = forPrepare ? "--admin-prepare" : "--admin-restore", UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
