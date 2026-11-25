@@ -383,7 +383,18 @@ jobs:
           cd '认证核心源码/esurfingclient/app'
           # Search identifiers, including indirect references. Distinguish
           # no matches from a failed search; do not silently pass errors.
-          if git grep -n -w -E 'cJSON_(Compare|ApplyPatches|ApplyPatchesCaseSensitive|GeneratePatches|GeneratePatchesCaseSensitive)' -- src include; then
+          # cJSON_Compare belongs to the main library; JSON Patch and
+          # other utility functions use the cJSONUtils_ namespace.
+          pattern='(cJSON_Compare|cJSONUtils_[[:alnum:]_]+)'
+          printf '%s\n' cJSON_Compare cJSONUtils_ApplyPatches cJSONUtils_ApplyPatchesCaseSensitive cJSONUtils_GeneratePatches | grep -wE "$pattern" > "$RUNNER_TEMP/cjson-guard-positive.txt"
+          test "$(wc -l < "$RUNNER_TEMP/cjson-guard-positive.txt")" -eq 4
+          if printf '%s\n' cJSON_Parse cJSON_Delete cJSON_CompareExtra | grep -qwE "$pattern"; then
+            echo 'cJSON guard false positive'; exit 1
+          else
+            status=$?
+            test "$status" -eq 1
+          fi
+          if git grep -n -w -E "$pattern" -- src include; then
             echo 'Previously unreferenced cJSON comparison/patch API is now in use; review required'
             exit 1
           else
