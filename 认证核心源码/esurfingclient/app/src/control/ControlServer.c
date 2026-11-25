@@ -101,7 +101,11 @@ static int ctl_wait_readable(const ctl_sock_t sock, const long timeout_ms)
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
-    const int ready = select((int)sock + 1, &read_set, NULL, NULL, &tv);
+#ifdef _WIN32
+    const int ready = select(0, &read_set, NULL, NULL, &tv);
+#else
+    const int ready = select(sock + 1, &read_set, NULL, NULL, &tv);
+#endif
     if (ready <= 0) return ready;
 
     return FD_ISSET(sock, &read_set) ? 1 : 0;
@@ -121,7 +125,11 @@ int ctl_wait_writable(const ctl_sock_t sock, const long timeout_ms)
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
-    const int ready = select((int)sock + 1, NULL, &write_set, NULL, &tv);
+#ifdef _WIN32
+    const int ready = select(0, NULL, &write_set, NULL, &tv);
+#else
+    const int ready = select(sock + 1, NULL, &write_set, NULL, &tv);
+#endif
     if (ready <= 0) return ready;
 
     return FD_ISSET(sock, &write_set) ? 1 : 0;
@@ -548,8 +556,53 @@ void control_server_stop(void)
     if (!ok) LOG_ERROR("控制通道线程等待失败, 保留线程与套接字");
 }
 
-/* Offline checks exercise production deadline logic and invalid-buffer
- * handling without sending a command or touching an authentication session. */
+/* A kernel-assigned loopback port, no control command dispatch, no external
+ * network or account state. Exercise the production frame/close readers. */
+static bool loopback_reader_self_test(void)
+{
+    if (!ctl_net_init()) return false;
+    ctl_sock_t listener = CTL_INVALID_SOCK, peer = CTL_INVALID_SOCK, accepted = CTL_INVALID_SOCK;
+    bool ok = false;
+    struct sockaddr_in addr = {0};
+#ifdef _WIN32
+    int len = sizeof(addr);
+#else
+    socklen_t len = sizeof(addr);
+#endif
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (listener == CTL_INVALID_SOCK ||
+        bind(listener, (struct sockaddr*)&addr, sizeof(addr)) != 0 ||
+        listen(listener, 1) != 0 ||
+        getsockname(listener, (struct sockaddr*)&addr, &len) != 0) goto done;
+    peer = socket(AF_INET, SOCK_STREAM, 0);
+    if (peer == CTL_INVALID_SOCK ||
+        connect(peer, (struct sockaddr*)&addr, sizeof(addr)) != 0) goto done;
+    accepted = accept(listener, NULL, NULL);
+    if (accepted == CTL_INVALID_SOCK) goto done;
+
+    char frame[16] = {0};
+    if (send(peer, "x", 1, 0) != 1 ||
+        ctl_read_line(accepted, frame, sizeof(frame)) != 0 || frame[0] != '\0') goto done;
+    if (send(peer, "{}\n", 3, 0) != 3 ||
+        ctl_read_line(accepted, frame, sizeof(frame)) != 3 ||
+        strcmp(frame, "{}\n") != 0) goto done;
+    if (send(peer, "data", 4, 0) != 4) goto done;
+    ctl_wait_close(accepted, 50);
+    /* The peer is still open. Expiring the wait is not a socket close. */
+    if (send(peer, "{}\n", 3, 0) != 3 ||
+        ctl_read_line(accepted, frame, sizeof(frame)) != 3 ||
+        strcmp(frame, "{}\n") != 0) goto done;
+    ok = true;
+
+done:
+    if (accepted != CTL_INVALID_SOCK) ctl_close(accepted);
+    if (peer != CTL_INVALID_SOCK) ctl_close(peer);
+    if (listener != CTL_INVALID_SOCK) ctl_close(listener);
+    return ok;
+}
+
 bool control_resource_self_test(void)
 {
     char byte = 'x';
@@ -562,7 +615,8 @@ bool control_resource_self_test(void)
         remaining_ms(100, 100, 0) == 0 &&
         ctl_read_line(CTL_INVALID_SOCK, NULL, 0) == 0 &&
         ctl_read_line(CTL_INVALID_SOCK, &byte, 0) == 0 && byte == 'x' &&
-        ctl_read_line(CTL_INVALID_SOCK, &byte, 1) == 0 && byte == '\0';
+        ctl_read_line(CTL_INVALID_SOCK, &byte, 1) == 0 && byte == '\0' &&
+        loopback_reader_self_test();
 }
 
 void control_set_port(const uint16_t port)
