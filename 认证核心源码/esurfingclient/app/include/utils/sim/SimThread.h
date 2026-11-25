@@ -24,6 +24,18 @@ sim_thread_t* sim_thread_create_retry(sim_thread_func func, void* arg, int retri
 // 等待线程结束, 获取返回值
 int sim_thread_join(sim_thread_t* thread, int* exit_code);
 
+#ifdef _WIN32
+/* 0 = joined and consumed, 1 = timed out, -1 = error.
+ * Timeout/error retains the wrapper and does not write exit_code.
+ * Callers must serialize operations on the same wrapper. */
+int sim_thread_join_timeout(sim_thread_t* thread, int* exit_code, uint32_t timeout_ms);
+
+/* A thread-local, non-extending monotonic deadline shared by all joins
+ * on the shutdown owner. Does not bound unrelated locks or I/O. */
+void sim_thread_shutdown_budget_begin(uint32_t timeout_ms);
+void sim_thread_shutdown_budget_end(void);
+#endif
+
 // 分离线程 (让线程结束后自动清理)
 int sim_thread_detach(sim_thread_t* thread);
 
