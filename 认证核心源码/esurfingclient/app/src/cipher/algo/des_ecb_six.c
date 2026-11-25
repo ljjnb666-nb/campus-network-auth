@@ -2,6 +2,7 @@
 #include "cipher/CipherUtils.h"
 
 #include <stdint.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -65,6 +66,8 @@ static void des_six_rotate_cd(uint8_t *cd56, const int shift)
         cd56[i] = C[(i + shift) % 28];
         cd56[28 + i] = D[(i + shift) % 28];
     }
+    cipher_secure_zero(C, sizeof(C));
+    cipher_secure_zero(D, sizeof(D));
 }
 static void des_six_round_f(const uint8_t R[32], const uint8_t subkey48[48], uint8_t out32[32])
 {
@@ -84,6 +87,8 @@ static void des_six_round_f(const uint8_t R[32], const uint8_t subkey48[48], uin
         p += 6;
     }
     des_six_apply_perm(out32, s_out, DES_SIX_P, 32);
+    cipher_secure_zero(expanded, sizeof(expanded));
+    cipher_secure_zero(s_out, sizeof(s_out));
 }
 static void des_six_key_schedule(const uint8_t key8[8], uint8_t subkeys[16][48])
 {
@@ -96,6 +101,9 @@ static void des_six_key_schedule(const uint8_t key8[8], uint8_t subkeys[16][48])
         des_six_apply_perm(tmp48, cd, DES_SIX_PC2, 48);
         memcpy(subkeys[round], tmp48, 48);
     }
+    cipher_secure_zero(key_bits, sizeof(key_bits));
+    cipher_secure_zero(cd, sizeof(cd));
+    cipher_secure_zero(tmp48, sizeof(tmp48));
 }
 static void des_six_block_process(const uint8_t in[8], uint8_t out[8],
                                   const uint8_t subkeys[16][48], const int encrypt)
@@ -114,31 +122,42 @@ static void des_six_block_process(const uint8_t in[8], uint8_t out[8],
         for (int i = 0; i < 32; ++i) newR[i] = L[i] ^ f[i];
         memcpy(L, R, 32);
         memcpy(R, newR, 32);
+        cipher_secure_zero(f, sizeof(f));
+        cipher_secure_zero(newR, sizeof(newR));
     }
     uint8_t preout[64], out_bits[64];
     memcpy(preout, R, 32);
     memcpy(preout + 32, L, 32);
     des_six_apply_perm(out_bits, preout, DES_SIX_FP, 64);
     des_six_bits_to_bytes(out_bits, out);
+    cipher_secure_zero(in_bits, sizeof(in_bits));
+    cipher_secure_zero(ip, sizeof(ip));
+    cipher_secure_zero(L, sizeof(L));
+    cipher_secure_zero(R, sizeof(R));
+    cipher_secure_zero(preout, sizeof(preout));
+    cipher_secure_zero(out_bits, sizeof(out_bits));
 }
 static void des_six_encrypt_block(const uint8_t in[8], uint8_t out[8], const uint8_t key[8])
 {
     uint8_t subkeys[16][48];
     des_six_key_schedule(key, subkeys);
     des_six_block_process(in, out, subkeys, 1);
+    cipher_secure_zero(subkeys, sizeof(subkeys));
 }
 static void des_six_decrypt_block(const uint8_t in[8], uint8_t out[8], const uint8_t key[8])
 {
     uint8_t subkeys[16][48];
     des_six_key_schedule(key, subkeys);
     des_six_block_process(in, out, subkeys, 0);
+    cipher_secure_zero(subkeys, sizeof(subkeys));
 }
 
 /* sub_2DCC: six-layer DES-ECB encrypt (E K4 D K5 E K6 E K1 D K2 E K3) */
 static uint8_t* des_six_encrypt_raw(const uint8_t* key, const uint8_t* data,
                                     const size_t data_len, size_t* output_len)
 {
-    const int total = (int)((data_len + 7) & ~7);
+    if (data_len > (size_t)INT_MAX - 7) return NULL;
+    const int total = (int)((data_len + 7) & ~(size_t)7);
     uint8_t *out = s_calloc(1, total ? (size_t)total : DES_SIX_BLOCK_SIZE);
     if (!out) return NULL;
     memcpy(out, data, data_len);
@@ -152,6 +171,12 @@ static uint8_t* des_six_encrypt_raw(const uint8_t* key, const uint8_t* data,
         des_six_decrypt_block(t4, t5, key + 8);
         des_six_encrypt_block(t5, t6, key + 16);
         memcpy(out + off, t6, 8);
+        cipher_secure_zero(t, sizeof(t));
+        cipher_secure_zero(t2, sizeof(t2));
+        cipher_secure_zero(t3, sizeof(t3));
+        cipher_secure_zero(t4, sizeof(t4));
+        cipher_secure_zero(t5, sizeof(t5));
+        cipher_secure_zero(t6, sizeof(t6));
     }
     *output_len = (size_t)total;
     return out;
@@ -175,6 +200,12 @@ static uint8_t* des_six_decrypt_raw(const uint8_t* key, const uint8_t* data,
         des_six_encrypt_block(t4, t5, key + 32);
         des_six_decrypt_block(t5, t6, key + 24);
         memcpy(out + off, t6, 8);
+        cipher_secure_zero(t, sizeof(t));
+        cipher_secure_zero(t2, sizeof(t2));
+        cipher_secure_zero(t3, sizeof(t3));
+        cipher_secure_zero(t4, sizeof(t4));
+        cipher_secure_zero(t5, sizeof(t5));
+        cipher_secure_zero(t6, sizeof(t6));
     }
     *output_len = data_len;
     return out;
@@ -188,7 +219,7 @@ static char* des_ecb_six_encrypt(cipher_interface_t* self, const char* text)
     size_t out_len=0; uint8_t* out = des_six_encrypt_raw(d->key, (const uint8_t*)text, text_len, &out_len);
     if(!out) return NULL;
     char* hex = bytes_2_hex(out, out_len);
-    s_free(out);
+    s_secure_free(out, out_len ? out_len : DES_SIX_BLOCK_SIZE);
     return hex;
 }
 
@@ -199,13 +230,14 @@ static char* des_ecb_six_decrypt(cipher_interface_t* self, const char* hex)
     size_t bytes_len=0; uint8_t* bytes = hex_2_bytes(hex, &bytes_len);
     if(!bytes) return NULL;
     size_t out_len=0; uint8_t* out = des_six_decrypt_raw(d->key, bytes, bytes_len, &out_len);
-    s_free(bytes);
+    s_secure_free(bytes, bytes_len);
     if(!out) return NULL;
+    const size_t allocation_len = out_len;
     while(out_len > 0 && out[out_len - 1] == 0) out_len--;
     char* result = s_malloc(out_len + 1);
     memcpy(result, out, out_len);
     result[out_len] = '\0';
-    s_free(out);
+    s_secure_free(out, allocation_len);
     return result;
 }
 
@@ -213,7 +245,7 @@ static void des_ecb_six_destroy(cipher_interface_t* self)
 {
     if(self)
     {
-        s_free(self->private_data);
+        s_secure_free(self->private_data, sizeof(des_ecb_six_android_data_t));
         s_free(self);
     }
 }
