@@ -8,7 +8,7 @@
 |---|---|---|---|---|
 | ESurfingClient-CVersion（认证核心） | 上游基线 `ffdfaf13965661ff1c5e298c2c9d9cc6f9194687` 的修改版 | 随仓库携带（`认证核心源码/`），已移除 Web 界面/mongoose/OpenWrt 支持 | Apache-2.0 | 整个认证核心；静态编译进独立 `认证核心.exe`，由桌面程序按 SHA-256 校验后释放执行 |
 | libcurl | 8.23.0 | `scripts/Fetch-Curl.ps1` 从 `https://curl.se/download/curl-8.23.0.tar.gz` 下载，SHA-256 `E3DE77CFA6367083C776A26647FC9F633B538C06C3BAA73D931A252AC8F72B49` 固定校验；缓存于 `third-party/`（不入库） | curl license（MIT 系） | HTTP 客户端；静态链接进认证核心（Schannel 后端，关闭 OpenSSL/zlib/PSL/SSH2/Brotli/zstd 与 curl 命令行工具） |
-| cJSON | 1.7.19 | 随仓库携带（`认证核心源码/esurfingclient/app/third_party/cJSON/`） | MIT | JSON 解析；静态编译进认证核心 |
+| cJSON | 1.7.19（本地修订） | 随仓库携带（`认证核心源码/esurfingclient/app/third_party/cJSON/`） | MIT | JSON 解析；静态编译进认证核心 |
 | .NET Framework | 4.x（Windows 系统自带） | 系统 | Microsoft Windows 许可 | 桌面程序（WinForms）运行时；系统自带，不随本程序分发 |
 | Windows 系统 API | DPAPI / WMI / ServiceController / Win32 | 系统 | Microsoft Windows 许可 | 凭据加密、服务与网络状态查询 |
 
@@ -27,3 +27,16 @@
 - 认证核心为 Apache-2.0 衍生作品：再分发时须保留 `Licenses.txt` 中的 Apache-2.0 声明与版权条款（§4）。
 - libcurl 与 cJSON 许可宽松，随附声明即可。
 - 桌面界面源码（Program.cs/CredentialStore.cs）当前未附许可声明：**对外分发前必须补充**，在此之前仅限作者自用。
+
+## 构建依赖锁与机器可读清单
+
+- `scripts/build-dependencies.lock.json` 记录 CI #257（45618397006）安装的 20 个 UCRT64 软件包版本及 CMake 4.5.0；构建前检查安装结果，不匹配则失败。此为版本漂移门禁，不是归档字节级锁定或可复现安装；滚动仓库不保证旧版本一直可用。
+- cJSON.h 与上游 v1.7.19 Git blob 一致；cJSON.c 不一致，经逐行比较，本地额外增加 SetNumberHelper 空指针检查、两个打印嵌套深度检查。锁定当前本地 blob，不声称与原版完全一致。
+- `build-core/sbom.cdx.json` 由构建清单生成，CycloneDX 1.5 源码级物料清单，记录核心、curl、cJSON 及已检查构建包版本；不代表完整二进制链接/系统组件清单，不是签名或来源证明。
+
+## cJSON 公开公告复审（发布阻断，2026-11-25）
+
+- [CVE-2026-16554](https://cert.pl/en/posts/2026/07/CVE-2026-16554/)：1.7.19 的 32 位 print_string_ptr 整数溢出。Windows 当前核心构建目标为 x86_64，仍需核实实际二进制架构、输入大小约束及其他平台；不得泛化为已修复。
+- [CVE-2026-67215](https://nvd.nist.gov/vuln/detail/CVE-2026-67215)：JSON Patch 造成递归深度放大。当前 CMakeLists 仅编译 cJSON.c，未列入 cJSON_Utils.c；仍需核对调用与链接证据。
+- [CVE-2026-67216](https://nvd.nist.gov/vuln/detail/CVE-2026-67216)：cJSON_Compare 的复杂度风险，需审查实际调用与输入边界。
+- 上述为已发现公告，不是穷尽扫描；必须完成当前公告清单、实际调用路径、修复/不适用证据和回归。curl 的零条版本公告不能代替 cJSON 或其他依赖核查。
