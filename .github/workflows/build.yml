@@ -252,6 +252,7 @@ jobs:
             [IO.File]::WriteAllText($source, 'public static class Probe { public static int Value() { return 42; } }')
             $digests = @()
             $exits = @()
+            $unsupported = 0
             foreach ($dir in @('one','two')) {
               $dest = Join-Path $temp $dir
               [void](New-Item -ItemType Directory -Path $dest)
@@ -263,15 +264,21 @@ jobs:
               if ($code -eq 0) {
                 if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) { throw 'Compiler success without output' }
                 $digests += (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash
-              }
+              } elseif ($code -eq 1 -and (($output -join "`n") -match 'CS2007: Unrecognized option: ''/deterministic\+''')) {
+                $unsupported++
+              } else { throw "Unexpected synthetic compiler failure: exit=$code" }
             }
             $identical = $digests.Count -eq 2 -and $digests[0] -ceq $digests[1]
             Write-Host "CSC_DETERMINISM_PROBE exits=$($exits -join ',') outputs=$($digests.Count) byteIdentical=$identical"
-            # Diagnostic only: synthetic success does not prove GUI reproducibility.
-            # Unsupported flags or compilation errors leave the release blocker open.
+            if ($unsupported -eq 2) {
+              Write-Host '::warning::Existing CSharp compiler does not support deterministic compilation; GUI reproducibility remains blocked'
+            } elseif ($unsupported -ne 0) { throw 'Inconsistent compiler capability result' }
+            # Only the explicitly recognized unsupported-option outcome is diagnostic.
+            # Synthetic success does not establish GUI reproducibility.
           } finally {
             Remove-Item -LiteralPath $temp -Recurse -Force
           }
+          exit 0
 
       - name: Measure same-runner rebuild repeatability
         timeout-minutes: 10
