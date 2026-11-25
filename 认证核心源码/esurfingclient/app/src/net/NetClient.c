@@ -1,3 +1,4 @@
+#include "cipher/CipherUtils.h"
 #include "net/NetClient.h"
 
 #include "NetClientInternal.h"
@@ -174,7 +175,7 @@ bool net_resource_self_test(void)
 
 curl_resp_t post(const char* url, const char* data)
 {
-    LOG_DEBUG("POST 地址: %s", url);
+    LOG_DEBUG("POST 请求 (地址不记录)");
     // 登录报文是密文, 但密钥内嵌于客户端, 密文等价于明文 —— 只记长度不记内容
     LOG_DEBUG("POST 数据长度: %zu", strlen(safe_str(data)));
 
@@ -204,7 +205,7 @@ curl_resp_t post(const char* url, const char* data)
     }
 
     snprintf(md5_hash_str, MAX_LEN, "CDC-Checksum: %s", safe_str(md5_hash));
-    free(md5_hash);
+    s_secure_free(md5_hash, 33);
     snprintf(ua, MAX_LEN, "User-Agent: %s", safe_str(g_prog_status[tl_thread_idx].cfg.user_agent));
     snprintf(c_id, MAX_LEN, "Client-ID: %s", safe_str(g_prog_status[tl_thread_idx].auth_cfg.client_id));
     snprintf(a_id, MAX_LEN, "Algo-ID: %s", safe_str(g_prog_status[tl_thread_idx].auth_cfg.algo_id));
@@ -212,11 +213,11 @@ curl_resp_t post(const char* url, const char* data)
     snprintf(cdc_d, MAX_LEN, "CDC-Domain: %s", safe_str(g_school_domain));
     snprintf(cdc_a, MAX_LEN, "CDC-Area: %s", safe_str(g_area));
 
-    LOG_TRACE("POST 添加头 %s", md5_hash_str);
+    LOG_TRACE("POST 添加校验头 (内容不记录)");
     LOG_TRACE("POST 添加头 %s", REQ_CONTENT_TYPE);
     LOG_DEBUG("POST 添加头 %s", ua);
     LOG_TRACE("POST 添加头 %s", REQ_ACCEPT);
-    LOG_TRACE("POST 添加头 %s", c_id);
+    LOG_TRACE("POST 添加客户端标识头 (内容不记录)");
     LOG_DEBUG("POST 添加头 %s", a_id);
     LOG_TRACE("POST 添加头 %s", cdc_sid);
     LOG_TRACE("POST 添加头 %s", cdc_d);
@@ -307,7 +308,7 @@ curl_resp_t post(const char* url, const char* data)
     if (resp_code == 302)
     {
         LOG_DEBUG("重定向, 响应码: 302");
-        if (tl_thread_idx > -1) LOG_DEBUG("重定向至: %s", g_prog_status[tl_thread_idx].last_location);
+        if (tl_thread_idx > -1) LOG_DEBUG("重定向地址已更新 (内容不记录)");
         resp.http_code = HTTP_FOUND;
         resp.status = STATUS_OK;
         return resp;
@@ -331,14 +332,14 @@ void curl_resp_free(curl_resp_t* resp)
 {
     if (resp == NULL) return;
 
-    free(resp->body_data);
+    if (resp->body_data) s_secure_free(resp->body_data, resp->body_size + 1);
     resp->body_data = NULL;
     resp->body_size = 0;
 }
 
 curl_resp_t get(const char* url)
 {
-    LOG_DEBUG("GET 地址: %s", url);
+    LOG_DEBUG("GET 请求 (地址不记录)");
 
     curl_resp_t resp = {0};
     char errbuf[CURL_ERROR_SIZE] = {0};
@@ -363,7 +364,7 @@ curl_resp_t get(const char* url)
 
         LOG_DEBUG("GET 添加头 %s", ua);
         LOG_TRACE("GET 添加头 %s", REQ_ACCEPT);
-        LOG_TRACE("GET 添加头 %s", c_id);
+        LOG_TRACE("GET 添加客户端标识头 (内容不记录)");
         LOG_TRACE("线程下标: %" PRId8, tl_thread_idx);
 
         const char* const values[] = { ua, REQ_ACCEPT, c_id };
@@ -445,9 +446,7 @@ curl_resp_t get(const char* url)
         LOG_DEBUG("固定 IP %s 请求失败 (CURLcode %d), 换 %s 重试", fixed->ips[0], (int)curl_code, fixed->ips[1]);
 
         // 第一次可能已经写进一部分响应体/响应头错误码, 重试前全部清掉, 免得归因错乱
-        free(resp.body_data);
-        resp.body_data = NULL;
-        resp.body_size = 0;
+        curl_resp_free(&resp);
         resp.error_code[0] = '\0';
         resp.sub_error[0] = '\0';
 
@@ -509,7 +508,7 @@ curl_resp_t get(const char* url)
     if (resp_code == 302)
     {
         LOG_DEBUG("临时移动, 重定向, 响应码: 302");
-        if (tl_thread_idx > -1) LOG_DEBUG("重定向至: %s", g_prog_status[tl_thread_idx].last_location);
+        if (tl_thread_idx > -1) LOG_DEBUG("重定向地址已更新 (内容不记录)");
         resp.http_code = HTTP_FOUND;
         resp.status = STATUS_NEED_AUTH;
         return resp;
