@@ -21,6 +21,7 @@ $ErrorActionPreference = 'Stop'
 # 固定依赖三元组：版本 / 来源 / SHA-256（与本地长期使用的源码包逐字节核对过，
 # 亦可用官方 .asc 签名复核）。升级版本必须同步更新此处并重新核验哈希。
 $expectedSha256 = 'E3DE77CFA6367083C776A26647FC9F633B538C06C3BAA73D931A252AC8F72B49'
+if ($Version -cne '8.23.0') { throw 'Version is not in the reviewed dependency lock.' }
 if (-not $SourceUrl) { $SourceUrl = "https://curl.se/download/curl-$Version.tar.gz" }
 
 $archiveName = "curl-$Version.tar.gz"
@@ -50,18 +51,22 @@ if (Test-Path -LiteralPath $target -PathType Leaf) {
 }
 
 [void](New-Item -ItemType Directory -Path $OutputDir -Force)
+# Download to a unique sibling; never publish partially downloaded data.
+$staging = Join-Path $OutputDir ($archiveName + '.' + [Guid]::NewGuid().ToString('N') + '.partial')
 Write-Host "下载 $SourceUrl ..."
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $SourceUrl -OutFile $target -UseBasicParsing
-} catch {
-    if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue }
-    throw "下载失败：$($_.Exception.Message)。可手动放置 $archiveName 到 $OutputDir 后重试（离线构建）。"
-}
-try { Test-Archive $target }
-catch {
-    Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
-    throw
+    Invoke-WebRequest -Uri $SourceUrl -OutFile $staging -UseBasicParsing -TimeoutSec 180
+    Test-Archive $staging
+    try {
+        [IO.File]::Move($staging, $target)
+    } catch [IO.IOException] {
+        # Another builder may have published the same verified file.
+        if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw }
+    }
+    Test-Archive $target
+} finally {
+    if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Force }
 }
 Write-Host "下载完成，SHA-256 校验通过：$target"
 Write-Output $target
