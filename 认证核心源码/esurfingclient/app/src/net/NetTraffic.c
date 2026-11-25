@@ -126,10 +126,11 @@ static uint64_t traffic_now_ms(void)
     ULARGE_INTEGER value;
     value.LowPart = file_time.dwLowDateTime;
     value.HighPart = file_time.dwHighDateTime;
+    if (value.QuadPart < NET_TRAFFIC_EPOCH_DIFF) return 0;
     return (uint64_t)((value.QuadPart - NET_TRAFFIC_EPOCH_DIFF) / 10000ULL);
 #else
     struct timespec now;
-    if (clock_gettime(CLOCK_REALTIME, &now) != 0) return 0;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0 || now.tv_sec < 0) return 0;
     return (uint64_t)now.tv_sec * 1000ULL + (uint64_t)now.tv_nsec / 1000000ULL;
 #endif
 }
@@ -283,8 +284,11 @@ static int test_stop(void* arg)
     return stop_worker() ? 0 : 1;
 }
 
+static bool traffic_json_self_test(void);
+
 bool traffic_resource_self_test(void)
 {
+    if (!traffic_json_self_test()) return false;
     double down = 0, up = 0;
     if (!calculate_rate(1000, 2000, 10, 20, 1010, 2020, &down, &up) ||
         down != 1000 || up != 2000 ||
@@ -327,52 +331,131 @@ bool traffic_resource_self_test(void)
     return true;
 }
 
-char* net_traffic_json(void)
+/* Snapshot ownership is independent of the sampling lock. JSON allocation
+ * and rendering must not stall the producer or return a partial document.
+ * fail_at is a per-call synthetic failure gate, never a global allocator hook. */
+typedef struct
 {
-    // s_row_count 的读取也放进锁内, 与采样线程的写保持一致
-    if (!atomic_load(&s_running)) return NULL;
+    traffic_row_t rows[NET_TRAFFIC_MAX];
+    uint8_t count;
+    char default_id[ADAPTER_ID_LEN];
+    uint64_t timestamp;
+} traffic_snapshot_t;
 
-    cJSON* root = cJSON_CreateObject();
-    if (root == NULL) return NULL;
+static bool json_step(unsigned* step, unsigned fail_at)
+{
+    return ++(*step) != fail_at;
+}
 
-    traffic_lock();
-    if (!atomic_load(&s_running) || s_row_count == 0)
+static char* render_snapshot(const traffic_snapshot_t* snapshot, unsigned fail_at)
+{
+    if (snapshot == NULL || snapshot->count == 0 || snapshot->count > NET_TRAFFIC_MAX) return NULL;
+    unsigned step = 0;
+    cJSON* root = NULL;
+    cJSON* adapters = NULL;
+    cJSON* item = NULL;
+    char* json = NULL;
+
+    if (!json_step(&step, fail_at) || !(root = cJSON_CreateObject())) goto cleanup;
+    if (!json_step(&step, fail_at) || !cJSON_AddNumberToObject(root, "timestamp", (double)snapshot->timestamp)) goto cleanup;
+    if (!json_step(&step, fail_at) || !cJSON_AddStringToObject(root, "defaultId", snapshot->default_id)) goto cleanup;
+    if (!json_step(&step, fail_at) || !(adapters = cJSON_CreateArray())) goto cleanup;
+    for (uint8_t i = 0; i < snapshot->count; i++)
     {
-        traffic_unlock();
-        cJSON_Delete(root);
-        return NULL;
-    }
-    cJSON_AddNumberToObject(root, "timestamp", (double)s_timestamp_ms);
-    cJSON_AddStringToObject(root, "defaultId", s_default_id);
-    cJSON* adapters = cJSON_CreateArray();
-    for (uint8_t i = 0; i < s_row_count; i++)
-    {
-        cJSON* item = cJSON_CreateObject();
-        cJSON_AddStringToObject(item, "id", s_rows[i].id);
-        cJSON_AddStringToObject(item, "name", s_rows[i].name);
-        cJSON_AddBoolToObject(item, "connected", s_rows[i].connected);
-        if (s_rows[i].has_rate)
+        const traffic_row_t* row = &snapshot->rows[i];
+        if (!json_step(&step, fail_at) || !(item = cJSON_CreateObject())) goto cleanup;
+        if (!json_step(&step, fail_at) || !cJSON_AddStringToObject(item, "id", row->id)) goto cleanup;
+        if (!json_step(&step, fail_at) || !cJSON_AddStringToObject(item, "name", row->name)) goto cleanup;
+        if (!json_step(&step, fail_at) || !cJSON_AddBoolToObject(item, "connected", row->connected)) goto cleanup;
+        if (row->has_rate)
         {
-            cJSON_AddNumberToObject(item, "down", s_rows[i].down);
-            cJSON_AddNumberToObject(item, "up", s_rows[i].up);
+            if (!json_step(&step, fail_at) || !cJSON_AddNumberToObject(item, "down", row->down)) goto cleanup;
+            if (!json_step(&step, fail_at) || !cJSON_AddNumberToObject(item, "up", row->up)) goto cleanup;
         }
         else
         {
-            // 首帧没有速率: 给 null, 界面显示"正在采样"
-            cJSON_AddNullToObject(item, "down");
-            cJSON_AddNullToObject(item, "up");
+            if (!json_step(&step, fail_at) || !cJSON_AddNullToObject(item, "down")) goto cleanup;
+            if (!json_step(&step, fail_at) || !cJSON_AddNullToObject(item, "up")) goto cleanup;
         }
-        cJSON_AddItemToArray(adapters, item);
+        if (!json_step(&step, fail_at) || !cJSON_AddItemToArray(adapters, item)) goto cleanup;
+        item = NULL; /* ownership transferred */
     }
-    traffic_unlock();
-
-    cJSON_AddItemToObject(root, "adapters", adapters);
+    if (!json_step(&step, fail_at) || !cJSON_AddItemToObject(root, "adapters", adapters)) goto cleanup;
+    adapters = NULL; /* ownership transferred */
 #ifdef __APPLE__
-    // macOS 的采样没有真机验证过, 页面上打个"实验性"标记
-    cJSON_AddBoolToObject(root, "experimental", true);
+    if (!json_step(&step, fail_at) || !cJSON_AddBoolToObject(root, "experimental", true)) goto cleanup;
 #endif
+    if (json_step(&step, fail_at)) json = cJSON_PrintUnformatted(root);
 
-    char* json = cJSON_PrintUnformatted(root);
+cleanup:
+    cJSON_Delete(item);
+    cJSON_Delete(adapters);
     cJSON_Delete(root);
     return json;
+}
+
+static bool traffic_json_self_test(void)
+{
+    traffic_snapshot_t sample = {0};
+    sample.count = 2;
+    sample.timestamp = 1234;
+    snprintf(sample.default_id, sizeof(sample.default_id), "test0");
+    snprintf(sample.rows[0].id, sizeof(sample.rows[0].id), "test0");
+    snprintf(sample.rows[0].name, sizeof(sample.rows[0].name), "synthetic");
+    sample.rows[0].connected = true;
+    sample.rows[0].has_rate = true;
+    sample.rows[0].down = 12;
+    sample.rows[0].up = 34;
+    snprintf(sample.rows[1].id, sizeof(sample.rows[1].id), "test1");
+
+    char* json = render_snapshot(&sample, 0);
+    if (json == NULL) return false;
+    cJSON* root = cJSON_Parse(json);
+    cJSON_free(json);
+    const cJSON* rows = cJSON_GetObjectItemCaseSensitive(root, "adapters");
+    const cJSON* first = cJSON_GetArrayItem(rows, 0);
+    const cJSON* second = cJSON_GetArrayItem(rows, 1);
+    const cJSON* down = cJSON_GetObjectItemCaseSensitive(first, "down");
+    const bool ok = cJSON_IsArray(rows) && cJSON_GetArraySize(rows) == 2 &&
+        cJSON_IsNumber(down) && down->valuedouble == 12 &&
+        cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(second, "down")) &&
+        cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(second, "up"));
+    cJSON_Delete(root);
+    if (!ok) return false;
+
+    /* Every construction/attachment/render gate must fail without
+     * returning partial JSON, including both row variants. */
+#ifdef __APPLE__
+    const unsigned last_step = 21;
+#else
+    const unsigned last_step = 20;
+#endif
+    for (unsigned step = 1; step <= last_step; ++step)
+    {
+        json = render_snapshot(&sample, step);
+        if (json != NULL) { cJSON_free(json); return false; }
+    }
+    sample.count = 0;
+    json = render_snapshot(&sample, 0);
+    if (json != NULL) { cJSON_free(json); return false; }
+    return true;
+}
+
+char* net_traffic_json(void)
+{
+    if (!atomic_load(&s_running)) return NULL;
+    traffic_snapshot_t snapshot;
+    traffic_lock();
+    if (!atomic_load(&s_running) || s_row_count == 0 || s_row_count > NET_TRAFFIC_MAX)
+    {
+        traffic_unlock();
+        return NULL;
+    }
+    snapshot.count = s_row_count;
+    snapshot.timestamp = s_timestamp_ms;
+    memcpy(snapshot.default_id, s_default_id, sizeof(snapshot.default_id));
+    memcpy(snapshot.rows, s_rows, sizeof(traffic_row_t) * snapshot.count);
+    traffic_unlock();
+
+    return render_snapshot(&snapshot, 0);
 }
