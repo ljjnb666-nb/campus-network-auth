@@ -65,3 +65,22 @@
 4MiB 枚举缓冲上限、3次分配尝试和255行上限是工程保护初值，不宣称适合全部拓扑。Windows测试替换API及分配函数，核对返回状态、活跃分配和输出边界；不调用真实网卡查询，不代表Windows系统API自身资源释放证明。未修改认证、网关获取、网络访问控制、服务切换或协议。
 
 专项结论：LOCAL_ADAPTER_OFFLINE_REGRESSION_VERIFIED（#338已覆盖部分）；LATEST_RESOURCE_GATE_PENDING；FULL_NATIVE_NETWORK_RESOURCE_ACCEPTANCE_BLOCKED。最新提交的CI尚未确认前不关闭专项，不合并、不发布。
+
+
+### 专项一验收更新：CI #348
+
+基线 53c2c8edc6106155b04d941e7e15845e1eaca6d5，[CI #348](https://github.com/ljjnb666-nb/campus-network-auth/actions/runs/45634777812)：Windows 139277191818、Linux 139277192498 均成功。
+
+实际输出：
+- WINDOWS_LOCAL_ADAPTER_RESOURCE_PASS cases=22
+- ADAPTER_RESOURCE_AUDIT_PASS growthFailures=6 jsonFailures=22 maxRows=255
+- TRAFFIC_ALLOCATOR_FAILURE_PASS cases=36
+- TRAFFIC_SNAPSHOT_LIFECYCLE_PASS
+- NATIVE_NET_RESOURCE_PASS
+- APP_LIFECYCLE_PASS cycles=100；UI_STRESS_PASS measured=100
+
+Windows/Linux 已定义的本地枚举和采样资源离线验收通过，共64个 Linux 分配失败位置及22个 Windows 合成场景，两类计数不得合并声称为86个内存分配失败位置。Windows 独立编译的PATH及诊断修正后门禁通过，不能据此证明原先唯一根因。
+
+f81ba6c / dbc4d3b：补充 macOS 独立合成缓冲测试12例及 clang ASan/UBSan 门禁，覆盖零/超限容量、分配失败、读取失败、返回长度大于容量、截断记录、非法记录长度、非法地址长度及正常恢复。测试不访问实际路由表或网卡；显式关闭 macOS LSan，使用测试分配计数校验释放。新平台门禁尚未验证。
+
+剩余阻断：macOS新门禁、其余原生资源路径未全面审计、真实系统API/热插拔/长期运行需授权环境。结论：WINDOWS_LINUX_LOCAL_RESOURCE_OFFLINE_VERIFIED（#348基线）；FULL_NATIVE_NETWORK_RESOURCE_ACCEPTANCE_BLOCKED。不得宣称全专项完成或正式发布。
