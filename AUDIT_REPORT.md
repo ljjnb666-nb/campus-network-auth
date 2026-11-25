@@ -297,3 +297,8 @@ Push 45434028192、PR 45434052362 success；push 日志 HANDOFF_CANCEL_PASS 等�
 ### 主动审计第三批（基线 3fdaa06）
 
 Push 45434982617 / PR 45435005570 success，日志 CREDENTIAL_ORDER_PASS 等通过。新发现：事务写盘失败导致内存结果不可重试；超时 helper 退出时 SCM 仍可能切换；重复 auth_ok 覆盖新网络证据；强制结束确认框期间进程对象可能变化。整改事务回滚、保留 helper 直到稳定观测和持久化、迟到事件过滤与强制结束目标绑定。新增 JOURNAL_RETRY_PASS / CORE_LIFECYCLE_PASS / SERVICE_RECOVERY_PASS，测试真实离线子进程及注入观测，不进行真实认证/提权。最新 CI 待核实；C09 外部竞争、C13 DPI、C14 依赖适用性及实际服务场景仍开放。
+
+
+### 主动审计第四批（基线 b2d4bc0）
+
+Push 45547153523 / PR 45547161298 success，实际 JOURNAL_RETRY_PASS、CORE_LIFECYCLE_PASS、SERVICE_RECOVERY_PASS 及既有自测通过。新增发现：通配符递归清理可能删除非本实例目录；启动早期异常不在统一回收范围；输出读取任务登记未主动释放；迟到退出回调可影响新任务；服务完成后重复观测与持久化证据不一致。整改清理范围、失败启动回收、读取任务排空、退出回调身份及单一服务观察；新增 CLEANUP_SCOPE_PASS/CORE_RESOURCE_PASS 强制自测。新 CI 待验证。短期句柄计数为诊断，不宣称无泄漏。旧残留不自动清理；依赖评估 C14 仍开放（扫描报告 42 条，尚未验证适用性）。未修改 main 或实际校园网环境。

@@ -46,6 +46,7 @@ internal static class Program
         if (args.Length == 2 && args[0] == "--self-test-signature") return SignatureTests(args[1]);
         if (args.Length == 1 && args[0] == "--self-test-core") return CoreTest(false);
         if (args.Length == 1 && args[0] == "--self-test-stop") return CoreTest(true);
+        if (args.Length == 1 && args[0] == "--self-test-resources") return ResourceTests();
         if (args.Length == 1 && args[0] == "--self-test-observe") return ObserveTests();
         if (args.Length == 1 && args[0] == "--self-test-credentials") return CredentialTests();
         if (args.Length == 1 && args[0] == "--self-test-ui") return UiTests();
@@ -133,7 +134,6 @@ internal static class Program
             using (var output = new FileStream(corePath, FileMode.CreateNew, FileAccess.Write, FileShare.None)) input.CopyTo(output);
         }
         VerifyCore();
-        CleanupStaleCoreDirs(dir); // 启动即清扫上次异常退出留下的残留（A18）
     }
 
     private static void VerifyCore()
@@ -148,27 +148,52 @@ internal static class Program
 
     private static void CleanupCore()
     {
-        try { if (corePath != null && File.Exists(corePath)) File.Delete(corePath); } catch (IOException) { } catch (UnauthorizedAccessException) { }
-        try { if (tempDir != null && Directory.Exists(tempDir)) Directory.Delete(tempDir, false); } catch (IOException) { } catch (UnauthorizedAccessException) { }
-        CleanupStaleCoreDirs(tempDir);
+        // Only clean the directory allocated by this execution. Never recursively
+        // delete arbitrary temp folders selected by a name prefix.
+        if (tempDir != null) CleanupOwnedCoreDirectory(tempDir);
+        corePath = null; tempDir = null;
     }
 
-    // A18：程序崩溃/被强杀后 %TEMP%\Chezhi-* 会残留（含核心 exe）。单实例互斥保证
-    // 不存在第二个 GUI，因此非当前目录的 Chezhi-* 均为历史残留；正被运行中核心
-    // 占用的目录删除会失败（文件锁），静默跳过留给下次，绝不影响活动进程。
-    private static void CleanupStaleCoreDirs(string keep)
+    private static void CleanupOwnedCoreDirectory(string dir)
     {
         try
         {
-            string root = Path.GetFullPath(Path.GetTempPath());
-            foreach (string dir in Directory.GetDirectories(root, "Chezhi-*"))
+            if (!Directory.Exists(dir)) return;
+            if ((File.GetAttributes(dir) & FileAttributes.ReparsePoint) != 0) return;
+            string file = Path.Combine(dir, "ESurfingClient.exe");
+            if (File.Exists(file))
             {
-                string full = Path.GetFullPath(dir);
-                if (String.Equals(full, keep, StringComparison.OrdinalIgnoreCase)) continue;
-                try { Directory.Delete(full, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+                if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0) return;
+                File.Delete(file);
             }
+            // Unknown contents must be preserved. A locked executable is also left alone.
+            Directory.Delete(dir, false);
         }
-        catch { }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private static bool CleanupScopeInvariants()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "ChezhiCleanupTest-" + Guid.NewGuid().ToString("N"));
+        string owned = Path.Combine(root, "Chezhi-" + Guid.NewGuid().ToString("N"));
+        string other = Path.Combine(root, "Chezhi-other");
+        try
+        {
+            Directory.CreateDirectory(owned); Directory.CreateDirectory(other);
+            string known = Path.Combine(owned, "ESurfingClient.exe");
+            string unknown = Path.Combine(owned, "keep.txt");
+            string unrelated = Path.Combine(other, "keep.txt");
+            File.WriteAllText(known, "test"); File.WriteAllText(unknown, "preserve"); File.WriteAllText(unrelated, "preserve");
+            CleanupOwnedCoreDirectory(owned);
+            bool ok = !File.Exists(known) && File.Exists(unknown) && File.Exists(unrelated);
+            File.Delete(unknown);
+            CleanupOwnedCoreDirectory(owned);
+            ok &= !Directory.Exists(owned) && File.Exists(unrelated);
+            Console.WriteLine(ok ? "CLEANUP_SCOPE_PASS" : "CLEANUP_SCOPE_FAIL");
+            return ok;
+        }
+        finally { try { Directory.Delete(root, true); } catch { } }
     }
 
     private static int ClientCount() { bool visible; return ReadClients(out visible); }
@@ -560,7 +585,11 @@ internal static class Program
             StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8
         };
         var p = new Process { StartInfo = si, EnableRaisingEvents = true };
-        p.Start();
+        bool started = false;
+        try
+        {
+        if (!p.Start()) throw new InvalidOperationException("Core failed to start.");
+        started = true;
         int pid = p.Id;
         TextReader errors = p.StandardError;
         TextReader output = p.StandardOutput;
@@ -576,14 +605,86 @@ internal static class Program
         });
         CoreReaders.Add(p, Task.WhenAll(stderrTask, stdoutTask));
 
-        try
-        {
             byte[] bytes = Utf8.GetBytes(json + "\n");
             try { p.StandardInput.BaseStream.Write(bytes, 0, bytes.Length); p.StandardInput.BaseStream.Flush(); }
             finally { Array.Clear(bytes, 0, bytes.Length); }
         }
-        catch { try { p.StandardInput.Close(); } catch { } try { if (!p.WaitForExit(5000)) p.Kill(); } catch { } p.Dispose(); throw; }
+        catch
+        {
+            if (started) ReapOfflineOrFailedCore(p);
+            else p.Dispose();
+            throw;
+        }
         return p;
+    }
+
+    private static bool DrainCoreReaders(Process p, int timeoutMs)
+    {
+        Task readers;
+        if (!CoreReaders.TryGetValue(p, out readers)) return false;
+        try { return readers.Wait(timeoutMs); }
+        catch (AggregateException) { return false; }
+        finally { if (readers.IsCompleted) CoreReaders.Remove(p); }
+    }
+
+    // For a failed launch or an explicitly offline test only; never use this
+    // to terminate another client or a privileged service helper.
+    private static void ReapOfflineOrFailedCore(Process p)
+    {
+        try
+        {
+            if (!p.HasExited)
+            {
+                try { p.StandardInput.Close(); } catch { }
+                if (!p.WaitForExit(5000))
+                {
+                    p.Kill();
+                    p.WaitForExit(5000);
+                }
+            }
+            DrainCoreReaders(p, 5000);
+        }
+        catch { }
+        finally { p.Dispose(); }
+    }
+
+    private static int ResourceTests()
+    {
+        try
+        {
+            ExtractCore();
+            int baseline;
+            using (Process self = Process.GetCurrentProcess()) baseline = self.HandleCount;
+            int completed = 0;
+            for (int cycle = 0; cycle < 30; cycle++)
+            {
+                Process child = null;
+                try
+                {
+                    bool probe = cycle % 3 == 0;
+                    using (var accepted = new System.Threading.ManualResetEvent(false))
+                    {
+                        child = LaunchCore(probe ? "--ephemeral-probe" : "--ephemeral-check",
+                            "dummy-user", "dummy-pass", 1, delegate(Process sender, string value) {
+                                if (value == "stop_accepted") accepted.Set();
+                            });
+                        if (probe && (!RequestStop(child) || !accepted.WaitOne(5000))) return 1;
+                        if (!child.WaitForExit(10000) || child.ExitCode != 0 || !DrainCoreReaders(child, 5000)) return 1;
+                    }
+                    completed++;
+                }
+                finally { if (child != null) ReapOfflineOrFailedCore(child); }
+            }
+            GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+            int finalCount;
+            using (Process self = Process.GetCurrentProcess()) finalCount = self.HandleCount;
+            Console.WriteLine("RESOURCE_CYCLES=" + completed + " HANDLE_BASELINE=" + baseline + " HANDLE_FINAL=" + finalCount);
+            // Handles are diagnostic only: runner and CLR background activity vary.
+            Console.WriteLine("CORE_RESOURCE_PASS");
+            return 0;
+        }
+        catch (Exception e) { Console.WriteLine("CORE_RESOURCE_FAIL " + e.GetType().Name); return 1; }
+        finally { CleanupCore(); }
     }
 
     private static bool RequestStop(Process p)
@@ -624,7 +725,7 @@ internal static class Program
             && ValidateAuthInput("a", new string('b', 128), 1) != null
             && ValidateAuthInput("a", "b", 0) != null
             && ValidateAuthInput("a", "b\0", 1) != null
-            && ServicePathInvariants() && HandoffInvariants() && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && ServiceIdentity.NativeLayoutIsValid() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
+            && CleanupScopeInvariants() && ServicePathInvariants() && HandoffInvariants() && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && ServiceIdentity.NativeLayoutIsValid() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
             && !ServiceIdentity.IsKnownPublisher("fake telecom", "CN=fake telecom");
         Console.WriteLine(ok ? "LOGIC_PASS" : "LOGIC_FAIL");
         return ok ? 0 : 1;
@@ -2461,9 +2562,9 @@ internal static class Program
                     Task.Run(delegate {
                         // WaitForExit() drains asynchronous output before queuing the terminal event.
                         bool drained = false;
-                        try { started.WaitForExit(); Task readers; drained = CoreReaders.TryGetValue(started, out readers) && readers.Wait(5000); } catch { }
+                        try { started.WaitForExit(); drained = DrainCoreReaders(started, 5000); } catch { }
                         if (!IsDisposed && IsHandleCreated) try {
-                            BeginInvoke((Action)delegate { if (!drained) retryEligible = false; OnCoreExit(started); });
+                            BeginInvoke((Action)delegate { if (!Object.ReferenceEquals(running, started) || Object.ReferenceEquals(completedProcess, started)) return; if (!drained) retryEligible = false; OnCoreExit(started); });
                         } catch (InvalidOperationException) { }
                     });
                 };
@@ -2922,6 +3023,7 @@ internal static class Program
                 if (child == null) throw new InvalidOperationException();
                 started = true;
                 bool transferred = false;
+                string actual = null;
                 try
                 {
                     bool exited = await Task.Run(() => child.WaitForExit(60000));
@@ -2941,6 +3043,7 @@ internal static class Program
                         return false;
                     }
                     journal.Complete(code, observed, false);
+                    actual = observed;
                 }
                 catch
                 {
@@ -2948,7 +3051,6 @@ internal static class Program
                     throw;
                 }
                 finally { if (!transferred) child.Dispose(); }
-                string actual = await Task.Run(readServiceState);
                 if (HandoffCancelled(generation, fromConnect)) return false;
                 state.SetService(MapServiceState(actual));
                 bool expected = forPrepare ? actual == "Stopped" || actual == "NotInstalled" : actual == "Running";
