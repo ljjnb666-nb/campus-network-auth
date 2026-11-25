@@ -60,6 +60,8 @@ static traffic_row_t s_rows[NET_TRAFFIC_MAX];
 static uint8_t s_row_count;
 static char s_default_id[ADAPTER_ID_LEN];
 static uint64_t s_timestamp_ms;
+/* Accessed only under s_lock; changes whenever samples are invalidated. */
+static uint64_t s_generation;
 
 static traffic_prev_t s_prev[NET_TRAFFIC_MAX];
 static uint8_t s_prev_count;
@@ -93,6 +95,7 @@ static void traffic_unlock(void) { release(&s_lock); }
 static void clear_samples(void)
 {
     traffic_lock();
+    ++s_generation;
     s_row_count = 0;
     s_prev_count = 0;
     s_prev_at_ms = 0;
@@ -285,10 +288,11 @@ static int test_stop(void* arg)
 }
 
 static bool traffic_json_self_test(void);
+static bool traffic_snapshot_lifecycle_self_test(void);
 
 bool traffic_resource_self_test(void)
 {
-    if (!traffic_json_self_test()) return false;
+    if (!traffic_json_self_test() || !traffic_snapshot_lifecycle_self_test()) return false;
     double down = 0, up = 0;
     if (!calculate_rate(1000, 2000, 10, 20, 1010, 2020, &down, &up) ||
         down != 1000 || up != 2000 ||
@@ -340,6 +344,7 @@ typedef struct
     uint8_t count;
     char default_id[ADAPTER_ID_LEN];
     uint64_t timestamp;
+    uint64_t generation;
 } traffic_snapshot_t;
 
 static bool json_step(unsigned* step, unsigned fail_at)
@@ -441,21 +446,82 @@ static bool traffic_json_self_test(void)
     return true;
 }
 
-char* net_traffic_json(void)
+static bool capture_snapshot(traffic_snapshot_t* snapshot)
 {
-    if (!atomic_load(&s_running)) return NULL;
-    traffic_snapshot_t snapshot;
     traffic_lock();
     if (!atomic_load(&s_running) || s_row_count == 0 || s_row_count > NET_TRAFFIC_MAX)
     {
         traffic_unlock();
+        return false;
+    }
+    snapshot->count = s_row_count;
+    snapshot->timestamp = s_timestamp_ms;
+    snapshot->generation = s_generation;
+    memcpy(snapshot->default_id, s_default_id, sizeof(snapshot->default_id));
+    memcpy(snapshot->rows, s_rows, sizeof(traffic_row_t) * snapshot->count);
+    traffic_unlock();
+    return true;
+}
+
+/* Revalidate after rendering. A result is current at this check, not
+ * guaranteed to remain current after the caller receives it. */
+static char* finish_snapshot(const traffic_snapshot_t* snapshot, char* json)
+{
+    if (json == NULL) return NULL;
+    traffic_lock();
+    const bool current = atomic_load(&s_running) && s_generation == snapshot->generation;
+    traffic_unlock();
+    if (!current)
+    {
+        cJSON_free(json);
         return NULL;
     }
-    snapshot.count = s_row_count;
-    snapshot.timestamp = s_timestamp_ms;
-    memcpy(snapshot.default_id, s_default_id, sizeof(snapshot.default_id));
-    memcpy(snapshot.rows, s_rows, sizeof(traffic_row_t) * snapshot.count);
-    traffic_unlock();
+    return json;
+}
 
-    return render_snapshot(&snapshot, 0);
+static void seed_test_snapshot(void)
+{
+    traffic_lock();
+    memset(&s_rows[0], 0, sizeof(s_rows[0]));
+    snprintf(s_rows[0].id, sizeof(s_rows[0].id), "test0");
+    s_row_count = 1;
+    s_timestamp_ms = 1234;
+    traffic_unlock();
+}
+
+static bool traffic_snapshot_lifecycle_self_test(void)
+{
+    traffic_snapshot_t old;
+    traffic_snapshot_t current;
+    char* json = NULL;
+    bool ok = false;
+    if (!start_worker(test_worker)) goto cleanup;
+    if (capture_snapshot(&old)) goto cleanup; /* first sample pending */
+    seed_test_snapshot();
+    if (!capture_snapshot(&old)) goto cleanup;
+    json = render_snapshot(&old, 0);
+    if (json == NULL) goto cleanup;
+    if (!stop_worker()) goto cleanup;
+    json = finish_snapshot(&old, json);
+    if (json != NULL || capture_snapshot(&current)) goto cleanup;
+    if (!start_worker(test_worker)) goto cleanup;
+    seed_test_snapshot();
+    if (!capture_snapshot(&current)) goto cleanup;
+    json = render_snapshot(&old, 0);
+    if (json == NULL) goto cleanup;
+    json = finish_snapshot(&old, json);
+    if (json != NULL) goto cleanup;
+    json = finish_snapshot(&current, render_snapshot(&current, 0));
+    ok = json != NULL;
+cleanup:
+    cJSON_free(json);
+    if (!stop_worker()) return false;
+    return ok;
+}
+
+char* net_traffic_json(void)
+{
+    traffic_snapshot_t snapshot;
+    if (!capture_snapshot(&snapshot)) return NULL;
+    return finish_snapshot(&snapshot, render_snapshot(&snapshot, 0));
 }
