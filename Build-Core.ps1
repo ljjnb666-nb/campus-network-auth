@@ -99,7 +99,7 @@ Invoke-BuildTool $tar @('-xzf', $verifiedArchive, '-C', $work)
 Invoke-BuildTool $CMake @('-S', $curlSource, '-B', $curlBuild, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', "-DCMAKE_MAKE_PROGRAM=$Ninja", "-DCMAKE_C_COMPILER=$Gcc", "-DCMAKE_CXX_COMPILER=$Gxx", "-DCMAKE_INSTALL_PREFIX=$prefix", '-DBUILD_SHARED_LIBS=OFF', '-DBUILD_STATIC_LIBS=ON', '-DBUILD_CURL_EXE=OFF', '-DBUILD_TESTING=OFF', '-DBUILD_EXAMPLES=OFF', '-DBUILD_LIBCURL_DOCS=OFF', '-DBUILD_MISC_DOCS=OFF', '-DENABLE_CURL_MANUAL=OFF', '-DCURL_USE_SCHANNEL=ON', '-DCURL_USE_OPENSSL=OFF', '-DCURL_USE_LIBPSL=OFF', '-DCURL_USE_LIBSSH2=OFF', '-DCURL_ZLIB=OFF', '-DCURL_BROTLI=OFF', '-DCURL_ZSTD=OFF')
 Invoke-BuildTool $CMake @('--build', $curlBuild, '--parallel', '4')
 Invoke-BuildTool $CMake @('--install', $curlBuild)
-Invoke-BuildTool $CMake @('-S', $project, '-B', $coreBuild, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', "-DCMAKE_MAKE_PROGRAM=$Ninja", "-DCMAKE_C_COMPILER=$Gcc", "-DCMAKE_CXX_COMPILER=$Gxx", "-DCMAKE_PREFIX_PATH=$prefix", '-DBUILD_SHARED_LIBS=OFF')
+Invoke-BuildTool $CMake @('-S', $project, '-B', $coreBuild, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', "-DCMAKE_MAKE_PROGRAM=$Ninja", "-DCMAKE_C_COMPILER=$Gcc", "-DCMAKE_CXX_COMPILER=$Gxx", "-DCMAKE_PREFIX_PATH=$prefix", '-DBUILD_SHARED_LIBS=OFF', '-DCMAKE_EXE_LINKER_FLAGS=-Wl,--no-insert-timestamp')
 Invoke-BuildTool $CMake @('--build', $coreBuild, '--parallel', '4')
 
 $core = Join-Path $coreBuild 'ESurfingClient.exe'
