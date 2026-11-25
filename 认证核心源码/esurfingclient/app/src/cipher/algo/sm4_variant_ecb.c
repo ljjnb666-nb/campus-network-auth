@@ -2,6 +2,7 @@
 #include "cipher/CipherUtils.h"
 
 #include <stdint.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -76,6 +77,7 @@ static void sm4_variant_ecb_keysched(const uint8_t key[16], uint32_t rk[32], int
             rk[31 - i] = t;
         }
     }
+    cipher_secure_zero(K, sizeof(K));
 }
 
 /* one 16-byte block (sub_1FA0, forward transform, same for enc/dec) */
@@ -104,6 +106,8 @@ static void sm4_variant_ecb_block(uint32_t rk[32], const uint8_t in[16], uint8_t
     sm4_variant_ecb_wr32be(out + 4, store[30]);
     sm4_variant_ecb_wr32be(out + 8, store[29]);
     sm4_variant_ecb_wr32be(out + 12, store[28]);
+    cipher_secure_zero(X, sizeof(X));
+    cipher_secure_zero(store, sizeof(store));
 }
 
 /* sub_2304: ECB encrypt with PKCS7 pad */
@@ -111,6 +115,7 @@ static uint8_t* sm4_variant_ecb_encrypt_raw(const uint8_t* key, const uint8_t* d
                                             const size_t data_len, size_t* output_len)
 {
     const int pad = (int)(SM4_VARIANT_ECB_BLOCK_SIZE - (data_len & 0xF));
+    if (data_len > (size_t)INT_MAX - 16) return NULL;
     const int total = (int)data_len + pad;
     uint8_t *buf = s_calloc(1, (size_t)total);
     if (!buf) return NULL;
@@ -120,6 +125,7 @@ static uint8_t* sm4_variant_ecb_encrypt_raw(const uint8_t* key, const uint8_t* d
     sm4_variant_ecb_keysched(key, rk, 1);
     for (int off = 0; off < total; off += 16)
         sm4_variant_ecb_block(rk, buf + off, buf + off);
+    cipher_secure_zero(rk, sizeof(rk));
     *output_len = (size_t)total;
     return buf;
 }
@@ -136,8 +142,9 @@ static uint8_t* sm4_variant_ecb_decrypt_raw(const uint8_t* key, const uint8_t* d
     sm4_variant_ecb_keysched(key, rk, 0);
     for (size_t off = 0; off < data_len; off += 16)
         sm4_variant_ecb_block(rk, buf + off, buf + off);
+    cipher_secure_zero(rk, sizeof(rk));
     const int pad = buf[data_len - 1];
-    if (pad < 1 || pad > 16) { s_free(buf); return NULL; }
+    if (pad < 1 || pad > 16) { s_secure_free(buf, data_len); return NULL; }
     *output_len = data_len - (size_t)pad;
     return buf;
 }
@@ -150,7 +157,7 @@ static char* sm4_variant_ecb_encrypt(cipher_interface_t* self, const char* text)
     size_t out_len=0; uint8_t* out = sm4_variant_ecb_encrypt_raw(d->key, (const uint8_t*)text, text_len, &out_len);
     if(!out) return NULL;
     char* hex = bytes_2_hex(out, out_len);
-    s_free(out);
+    s_secure_free(out, out_len);
     return hex;
 }
 
@@ -161,12 +168,12 @@ static char* sm4_variant_ecb_decrypt(cipher_interface_t* self, const char* hex)
     size_t bytes_len=0; uint8_t* bytes = hex_2_bytes(hex, &bytes_len);
     if(!bytes) return NULL;
     size_t out_len=0; uint8_t* out = sm4_variant_ecb_decrypt_raw(d->key, bytes, bytes_len, &out_len);
-    s_free(bytes);
+    s_secure_free(bytes, bytes_len);
     if(!out) return NULL;
     char* result = s_malloc(out_len + 1);
     memcpy(result, out, out_len);
     result[out_len] = '\0';
-    s_free(out);
+    s_secure_free(out, bytes_len);
     return result;
 }
 
@@ -174,7 +181,7 @@ static void sm4_variant_ecb_destroy(cipher_interface_t* self)
 {
     if(self)
     {
-        s_free(self->private_data);
+        s_secure_free(self->private_data, sizeof(sm4_variant_ecb_android_data_t));
         s_free(self);
     }
 }
