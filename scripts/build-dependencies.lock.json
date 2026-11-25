@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "baseline": {
+    "commit": "02c8d9d6a7cd7041478c4e0789d800be5697a08e",
+    "ciRun": 45618397006,
+    "job": 139219706262
+  },
+  "cmake": "4.5.0",
+  "msys2Packages": {
+    "mingw-w64-ucrt-x86_64-binutils": "2.47-5",
+    "mingw-w64-ucrt-x86_64-cc-libs": "16.2.0-7",
+    "mingw-w64-ucrt-x86_64-crt": "14.0.0.r598.ge3d18511f-1",
+    "mingw-w64-ucrt-x86_64-gettext-runtime": "1.0-1",
+    "mingw-w64-ucrt-x86_64-gmp": "6.3.0-2",
+    "mingw-w64-ucrt-x86_64-headers": "14.0.0.r598.ge3d18511f-1",
+    "mingw-w64-ucrt-x86_64-isl": "0.28-1",
+    "mingw-w64-ucrt-x86_64-libgcc": "16.2.0-7",
+    "mingw-w64-ucrt-x86_64-libiconv": "1.19.1-1",
+    "mingw-w64-ucrt-x86_64-libstdc++": "16.2.0-7",
+    "mingw-w64-ucrt-x86_64-libwinpthread": "14.0.0.r598.ge3d18511f-1",
+    "mingw-w64-ucrt-x86_64-mpc": "1.4.1-1",
+    "mingw-w64-ucrt-x86_64-mpfr": "4.2.2-3",
+    "mingw-w64-ucrt-x86_64-tzdata": "2026f-1",
+    "mingw-w64-ucrt-x86_64-windows-default-manifest": "20260815-1",
+    "mingw-w64-ucrt-x86_64-winpthreads": "14.0.0.r598.ge3d18511f-1",
+    "mingw-w64-ucrt-x86_64-zlib": "1.4-2",
+    "mingw-w64-ucrt-x86_64-zstd": "1.5.7-2",
+    "mingw-w64-ucrt-x86_64-gcc": "16.2.0-7",
+    "mingw-w64-ucrt-x86_64-ninja": "1.13.2-1"
+  },
+  "vendoredCJSON": {
+    "declaredVersion": "1.7.19",
+    "upstreamTag": "v1.7.19",
+    "upstreamRepository": "https://github.com/DaveGamble/cJSON",
+    "files": {
+      "cJSON.c": {
+        "gitBlob": "88c2d95b313132abde96d0f6e200789c771fc1e1",
+        "upstreamGitBlob": "6e4fb0dd369cd905923da515be87ab06db6c1ee0"
+      },
+      "cJSON.h": {
+        "gitBlob": "cab5feb427725f8e5c82287f7fe59481b609b9b5",
+        "upstreamGitBlob": "cab5feb427725f8e5c82287f7fe59481b609b9b5"
+      }
+    }
+  }
+}
