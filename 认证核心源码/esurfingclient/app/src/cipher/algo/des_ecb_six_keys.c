@@ -233,8 +233,8 @@ static char* des_ecb_six_encrypt(cipher_interface_t* self, const char* text)
         write_be64(out + i, b);
     }
     char* hex = bytes_2_hex(out, padded_len);
-    s_free(padded);
-    s_free(out);
+    s_secure_free(padded, padded_len);
+    s_secure_free(out, padded_len);
     return hex;
 }
 
@@ -246,7 +246,7 @@ static char* des_ecb_six_decrypt(cipher_interface_t* self, const char* hex)
     uint8_t* in = hex_2_bytes(hex, &in_len);
     if (!in || (in_len % 8) != 0)
     {
-        s_free(in); return NULL;
+        s_secure_free(in, in_len); return NULL;
     }
     uint8_t* out = s_malloc(in_len);
     for (size_t i = 0; i < in_len; i += 8)
@@ -265,15 +265,15 @@ static char* des_ecb_six_decrypt(cipher_interface_t* self, const char* hex)
     char* text = s_malloc(plain_len + 1);
     memcpy(text, out, plain_len);
     text[plain_len] = '\0';
-    s_free(in);
-    s_free(out);
+    s_secure_free(in, in_len);
+    s_secure_free(out, in_len);
     return text;
 }
 
 static void des_ecb_six_destroy(cipher_interface_t* self)
 {
     if (!self) return;
-    if (self->private_data) s_free(self->private_data);
+    s_secure_free(self->private_data, sizeof(des_ecb_six_pc_ctx_t));
     s_free(self);
 }
 
