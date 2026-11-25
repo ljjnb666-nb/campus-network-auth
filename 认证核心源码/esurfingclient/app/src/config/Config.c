@@ -549,6 +549,58 @@ static account_state_t fill_account(const cJSON* account, const uint8_t cfg_no, 
     return ACCOUNT_READY;
 }
 
+/* cJSON strings are NUL-terminated; reject decoded NUL before parsing,
+ * including in object names. Respect escaped backslashes so a literal
+ * backslash followed by u0000 remains valid. Also reject raw controls
+ * inside strings and invalid UTF-8 before passing input to cJSON. */
+static bool validate_ephemeral_text(const char* input)
+{
+    const unsigned char* p = (const unsigned char*)input;
+    bool in_string = false;
+    while (*p)
+    {
+        unsigned char ch = *p++;
+        if (ch >= 0x80)
+        {
+            unsigned int extra;
+            unsigned char low = 0x80, high = 0xbf;
+            if (ch >= 0xc2 && ch <= 0xdf) extra = 1;
+            else if (ch >= 0xe0 && ch <= 0xef)
+            {
+                extra = 2;
+                if (ch == 0xe0) low = 0xa0;
+                if (ch == 0xed) high = 0x9f;
+            }
+            else if (ch >= 0xf0 && ch <= 0xf4)
+            {
+                extra = 3;
+                if (ch == 0xf0) low = 0x90;
+                if (ch == 0xf4) high = 0x8f;
+            }
+            else return false;
+            if (*p < low || *p > high) return false;
+            ++p;
+            for (unsigned int i = 1; i < extra; ++i)
+            {
+                if (*p < 0x80 || *p > 0xbf) return false;
+                ++p;
+            }
+            continue;
+        }
+        if (in_string && ch == '\\')
+        {
+            if (*p == '\0') return false;
+            if (*p == 'u' && strncmp((const char*)p, "u0000", 5) == 0) return false;
+            if (strchr("\"\\/bfnrtu", *p) == NULL) return false;
+            ++p;
+            continue;
+        }
+        if (ch == '"') in_string = !in_string;
+        else if (ch < 0x20 && (in_string || (ch != '\t' && ch != '\r' && ch != '\n'))) return false;
+    }
+    return !in_string;
+}
+
 bool load_cfg(void)
 {
     /* Subsequent loads reuse the validated in-memory account; there is no file. */
@@ -593,12 +645,16 @@ bool load_cfg(void)
     cJSON* cfg_json = NULL;
     if (g_ephemeral_auth)
     {
-        cJSON* input = cJSON_Parse(g_ephemeral_input);
+        cJSON* input = validate_ephemeral_text(g_ephemeral_input) ?
+            cJSON_ParseWithOpts(g_ephemeral_input, NULL, 1) : NULL;
         clear_ephemeral_input();
         const cJSON* user = input ? cJSON_GetObjectItemCaseSensitive(input, "username") : NULL;
         const cJSON* pass = input ? cJSON_GetObjectItemCaseSensitive(input, "password") : NULL;
         const cJSON* channel = input ? cJSON_GetObjectItemCaseSensitive(input, "channel") : NULL;
-        if (!cJSON_IsString(user) || !cJSON_IsString(pass) || !cJSON_IsNumber(channel) ||
+        // Exactly three case-sensitive fields. Duplicate or unknown keys
+        // cannot coexist with all three required fields at this size.
+        if (!cJSON_IsObject(input) || cJSON_GetArraySize(input) != 3 ||
+            !cJSON_IsString(user) || !cJSON_IsString(pass) || !cJSON_IsNumber(channel) ||
             !user->valuestring[0] || !pass->valuestring[0] ||
             strlen(user->valuestring) >= USR_LEN || strlen(pass->valuestring) >= PWD_LEN ||
             channel->valuedouble != channel->valueint || channel->valueint < 1 || channel->valueint > 5)

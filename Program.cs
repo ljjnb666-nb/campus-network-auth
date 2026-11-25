@@ -57,6 +57,7 @@ internal static class Program
         }
         if (args.Length == 2 && args[0] == "--self-test-signature") return SignatureTests(args[1]);
         if (args.Length == 1 && args[0] == "--self-test-core") return CoreTest(false);
+        if (args.Length == 1 && args[0] == "--self-test-native-input") return NativeInputTests();
         if (args.Length == 1 && args[0] == "--self-test-stop") return CoreTest(true);
         if (args.Length == 1 && args[0] == "--self-test-resources") return ResourceTests();
         if (args.Length == 1 && args[0] == "--self-test-observe") return ObserveTests();
@@ -1341,6 +1342,79 @@ internal static class Program
         string line;
         while ((line = Console.ReadLine()) != null) if (line == "STOP") return 0;
         return 0;
+    }
+
+    private static int NativeInputTests()
+    {
+        // Raw bytes exercise the native parser, bypassing GUI validation.
+        // Every child is explicitly --ephemeral-check, never network auth.
+        try
+        {
+            ExtractCore();
+            string valid = new JavaScriptSerializer().Serialize(new { username = "dummy-user", password = "dummy-pass", channel = 1 });
+            var cases = new List<KeyValuePair<byte[], bool>>();
+            Action<string, bool> add = (value, ok) => cases.Add(new KeyValuePair<byte[], bool>(Utf8.GetBytes(value), ok));
+            add(valid + "\n", true);
+            add(valid + " \t\r\n", true);
+            add(valid + " {}\n", false);
+            add(valid.TrimEnd('}') + ",\"username\":\"duplicate\"}\n", false);
+            add(valid.TrimEnd('}') + ",\"extra\":0}\n", false);
+            add(valid.Replace("\"username\"", "\"Username\"") + "\n", false);
+            add(valid.Replace("dummy-pass", "dummy-pass\\u0000suffix") + "\n", false);
+            add(valid.Replace("dummy-pass", "dummy-pass\\\\u0000") + "\n", true);
+            add(valid.Replace("dummy-pass", "dummy-pass\0suffix") + "\n", false);
+            add(valid.Replace("dummy-pass", "dummy-pass\t") + "\n", false);
+            add(valid.Replace("dummy-pass", "dummy-pass\\q") + "\n", false);
+            add(valid.Replace("dummy-user", "测试12") + "\n", true);
+            add(valid.Replace("dummy-user", new string('a', 16)) + "\n", false);
+            add(valid.Replace("dummy-pass", new string('b', 128)) + "\n", false);
+            add(valid.Replace("\"channel\":1", "\"channel\":1.5") + "\n", false);
+            add(valid.Replace("\"channel\":1", "\"channel\":6") + "\n", false);
+            add(valid, false);
+            add(valid + new string(' ', 4096) + "\n", false);
+            byte[] invalidUtf8 = Utf8.GetBytes(valid + "\n");
+            int offset = Array.IndexOf(invalidUtf8, (byte)'d');
+            invalidUtf8[offset] = 0xff;
+            cases.Add(new KeyValuePair<byte[], bool>(invalidUtf8, false));
+            int index = 0;
+            foreach (var fixture in cases)
+            {
+                using (var child = new Process { StartInfo = new ProcessStartInfo {
+                    FileName = corePath, Arguments = "--ephemeral-check", WorkingDirectory = tempDir,
+                    UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
+                    RedirectStandardOutput = true, RedirectStandardError = true } })
+                {
+                    bool started = false;
+                    try
+                    {
+                        using (OpenVerifiedCore()) { started = child.Start(); }
+                        if (!started) return 1;
+                        var output = child.StandardOutput.ReadToEndAsync();
+                        var errors = child.StandardError.ReadToEndAsync();
+                        try { child.StandardInput.BaseStream.Write(fixture.Key, 0, fixture.Key.Length); }
+                        catch (IOException) { } // an invalid frame may be rejected before the write completes
+                        try { child.StandardInput.Close(); } catch (IOException) { }
+                        if (!child.WaitForExit(10000) || !Task.WaitAll(new Task[] { output, errors }, 5000)) return 1;
+                        if (child.ExitCode != (fixture.Value ? 0 : 1) ||
+                            (errors.Result.Contains("EPHEMERAL_CONFIG_OK") != fixture.Value) ||
+                            output.Result.Contains("dummy-pass") || errors.Result.Contains("dummy-pass"))
+                        {
+                            Console.WriteLine("NATIVE_INPUT_FAIL case=" + index + " exit=" + child.ExitCode + " expected_valid=" + fixture.Value);
+                            return 1;
+                        }
+                    }
+                    finally
+                    {
+                        if (started && !child.HasExited) { child.Kill(); child.WaitForExit(5000); }
+                    }
+                }
+                index++;
+            }
+            Console.WriteLine("NATIVE_INPUT_PASS cases=" + index);
+            return 0;
+        }
+        catch (Exception ex) { Console.WriteLine("NATIVE_INPUT_ERROR " + ex.GetType().Name); return 1; }
+        finally { CleanupCore(); }
     }
 
     private static int CoreTest(bool stop)

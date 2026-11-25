@@ -173,3 +173,8 @@ JOURNAL_BOOT_SEQUENCE_PASS：事务 v4 保存 WMI 启动时间及内核 KUSER_SH
 ## 服务事务结果一致性回归
 
 JOURNAL_OUTCOME_PASS cases=32 failure_history=1：prepare/restore、原始 Running/Stopped、返回0/10、实际 Running/Stopped/NotInstalled/unknown 全组合；返回成功但目标不符、实际变更码与服务缺失矛盾、原本运行而 no-op 停止等记录 failed:unknown 而不是 ok，保留不确定性。观察到 Running 可解除恢复责任但不重写历史失败。GUI 自动后续动作要求 HasConfirmedOutcome 且目标状态吻合。旧超时恢复测试使用实际离线子进程返回0并注入原本运行/最终停止，确认不虚报成功。WMI 查询释放 ManagementObject。无真实服务操作，新 CI 待验证。
+
+
+## 原生凭据帧回归
+
+NATIVE_INPUT_PASS cases=19：独立真实 native 子进程 --ephemeral-check，无网络认证。测试完整 JSON、尾随空白/额外对象、重复/未知/大小写字段、原始/转义 NUL、字面量反斜杠、原始控制字符、非法转义、合法 UTF-8、字节边界、分数/越界 channel、缺换行、超限及非法 UTF-8。输入逐字节有界读取，不消费 STOP 后续帧；cJSON 要求完整对象及精确字段，原有清理保留。测试输出只报告索引及退出码，不打印输入。新CI待验证；不宣称 cJSON 完整语法验证或所有内存擦除路径覆盖。

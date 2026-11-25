@@ -397,3 +397,8 @@ Push 45576570837 / PR 45576580976 success，新增 bounded read / integrity hand
 ### 发布安全复审第三批（3ae0fab）
 
 Push 45577413944 / PR 45577426560 success；JOURNAL_BOOT_SEQUENCE_PASS/BOOT_SEQUENCE_PASS、既有全部门禁通过，artifact 15004064735。复审发现 helper 成功码与实际服务状态矛盾时 journal 仍可能写 ok，ReconcileRunning 抹去历史失败。改为目标及返回码一致性校验、保留历史结果、GUI 后续动作须明确确认结果，新增32种组合与超时离线子进程断言，WMI 对象显式释放。新 CI 待验证；管理员真实服务操作、外部 SCM 竞态、原生协议安全、真实重启/72h仍待验收。main 未修改。
+
+
+### 发布安全复审第四批（af0b9c3）
+
+Push 45578459708 / PR 45578471934 success，JOURNAL_OUTCOME_PASS 32、所有既有回归通过，artifact 15004643629。原生凭据入口审计发现 fgets/字符串语义与原始NUL、cJSON默认接受尾随内容、重复/未知字段、转义NUL截断及UTF8校验不足。改为有界帧读取、预检、完整精确对象、19个实际离线子进程回归；不改变真实认证协议或服务动作。新CI待验证。后续审计 curl 错误分支、回调尺寸、线程退出及凭据中间缓冲；上游HTTP限制仍开放，main未修改。

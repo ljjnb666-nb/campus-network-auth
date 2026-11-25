@@ -381,6 +381,26 @@ static void load_control_token_env(void)
     snprintf(g_control_token, sizeof(g_control_token), "%s", env_token);
 }
 
+/* Read exactly one bounded frame. Unlike fgets/strlen, raw NUL cannot
+ * hide a suffix or make a partial credential appear valid. Do not consume
+ * bytes after the newline: they belong to the STOP reader. */
+static bool read_ephemeral_frame(void)
+{
+    size_t length = 0;
+    int ch;
+    while ((ch = fgetc(stdin)) != EOF)
+    {
+        if (ch == 0 || length >= sizeof(g_ephemeral_input) - 1) return false;
+        g_ephemeral_input[length++] = (char)ch;
+        if (ch == '\n')
+        {
+            g_ephemeral_input[length] = '\0';
+            return true;
+        }
+    }
+    return false;
+}
+
 int main(const int argc, char *argv[])
 {
 #ifdef _WIN32
@@ -423,8 +443,7 @@ int main(const int argc, char *argv[])
             fprintf(stderr, "Ephemeral mode requires JSON on a private pipe.\n");
             return 1;
         }
-        if (fgets(g_ephemeral_input, sizeof(g_ephemeral_input), stdin) == NULL ||
-            strchr(g_ephemeral_input, '\n') == NULL)
+        if (!read_ephemeral_frame())
         {
             fprintf(stderr, "Missing or oversized ephemeral input.\n");
             clear_ephemeral_secrets();
