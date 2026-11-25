@@ -207,6 +207,55 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: cJSON source usage and arithmetic regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd '认证核心源码/esurfingclient/app'
+          if grep -R -nE 'cJSON_(Compare|ApplyPatches|ApplyPatchesCaseSensitive|GeneratePatches|GeneratePatchesCaseSensitive)[[:space:]]*\\(' src include; then
+            echo 'Previously unreferenced cJSON comparison/patch API is now in use; review required'
+            exit 1
+          fi
+          if grep -q 'cJSON_Utils' CMakeLists.txt; then
+            echo 'cJSON utilities build selection requires review'
+            exit 1
+          fi
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          cat > "$tmp/json_audit.c" <<'EOF'
+          #include "cJSON.c"
+          #include <assert.h>
+          int main(void)
+          {
+              unsigned char bytes[32] = {0};
+              printbuffer p = {0};
+              p.buffer = bytes;
+              p.length = sizeof(bytes);
+              p.noalloc = true;
+              p.offset = 1;
+              assert(ensure(&p, (size_t)INT_MAX) == NULL);
+              assert(ensure(&p, (size_t)-1) == NULL);
+              assert(ensure(&p, 1) == bytes + 1);
+              p.offset = 0;
+              assert(print_string_ptr((const unsigned char*)"a\n\t\\\"b", &p));
+              assert(strcmp((const char*)bytes, "\"a\\n\\t\\\\\\\"b\"") == 0);
+              cJSON *obj = cJSON_Parse("{\"name\":\"synthetic\",\"items\":[1,2,3]}");
+              assert(obj != NULL);
+              char *render = cJSON_PrintUnformatted(obj);
+              assert(render != NULL);
+              cJSON *parsed = cJSON_Parse(render);
+              assert(parsed != NULL);
+              cJSON_Delete(parsed);
+              cJSON_free(render);
+              cJSON_Delete(obj);
+              puts("CJSON_BOUNDS_REGRESSION_PASS");
+              return 0;
+          }
+          EOF
+          gcc -std=c11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -Ithird_party/cJSON "$tmp/json_audit.c" -lm -o "$tmp/json_audit"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/json_audit"
+          echo CJSON_UNUSED_API_SOURCE_GATE_PASS
+
       - name: Optimized and sanitized offline cipher regression
         shell: bash
         run: |
