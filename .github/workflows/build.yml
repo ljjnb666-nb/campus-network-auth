@@ -189,23 +189,39 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $objdump = Join-Path $env:MSYS2_ROOT 'ucrt64/bin/objdump.exe'
           $dir = 'build-core'
+          # MinGW objdump on this runner cannot open non-ASCII filenames.
+          # Inspect a private ASCII-named copy of the exact verified bytes.
+          $temp = Join-Path $env:RUNNER_TEMP ('pe-audit-' + [Guid]::NewGuid().ToString('N'))
+          if ($temp -match '[^\x20-\x7e]') { throw 'PE audit needs an ASCII temporary path' }
+          [void](New-Item -ItemType Directory -Path $temp)
           $report = [ordered]@{ schemaVersion = 1; scope = 'direct PE imports only; not transitive or dynamic loads'; files = @() }
-          foreach ($name in @('认证核心-源码重建.exe','澈知科技-源码重建.exe')) {
-            $file = Join-Path $dir $name
-            $header = @(& $objdump -f $file)
-            if ($LASTEXITCODE -ne 0) { throw "PE header inspection failed: $name" }
-            $imports = @(& $objdump -p $file)
-            if ($LASTEXITCODE -ne 0) { throw "PE import inspection failed: $name" }
-            $format = @($header | Select-String 'file format ' | ForEach-Object { $_.Line.Trim() })
-            if ($format.Count -ne 1) { throw "Unexpected PE format: $name" }
-            if ($name -eq '认证核心-源码重建.exe' -and $format[0] -notmatch 'pei-x86-64$') { throw 'Native core is not x86-64' }
-            $dlls = @($imports | ForEach-Object { if ($_ -match 'DLL Name:\s*(\S+)') { $Matches[1].ToLowerInvariant() } } | Sort-Object -Unique)
-            if ($dlls.Count -eq 0) { throw "No direct imports found: $name" }
-            if (@($dlls | Where-Object { $_ -match '^(libcurl|libgcc|libstdc\+\+|libwinpthread|cjson|libcjson).*\.dll$' }).Count -gt 0) {
-              throw "Unexpected shared dependency: $name"
+          try {
+            foreach ($name in @('认证核心-源码重建.exe','澈知科技-源码重建.exe')) {
+              $file = Join-Path $dir $name
+              $isCore = $name -ceq '认证核心-源码重建.exe'
+              $copy = Join-Path $temp $(if ($isCore) { 'core.exe' } else { 'gui.exe' })
+              $digest = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+              [IO.File]::Copy((Resolve-Path -LiteralPath $file).Path, $copy, $false)
+              if ((Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash -cne $digest) { throw "PE audit copy mismatch: $name" }
+              $header = @(& $objdump -f $copy)
+              if ($LASTEXITCODE -ne 0) { throw "PE header inspection failed: $name" }
+              $imports = @(& $objdump -p $copy)
+              if ($LASTEXITCODE -ne 0) { throw "PE import inspection failed: $name" }
+              $format = @($header | Select-String 'file format ' | ForEach-Object { ($_.Line -split 'file format ')[-1].Trim() })
+              if ($format.Count -ne 1) { throw "Unexpected PE format: $name" }
+              if ($isCore -and $format[0] -cne 'pei-x86-64') { throw 'Native core is not x86-64' }
+              $dlls = @($imports | ForEach-Object { if ($_ -match 'DLL Name:\s*(\S+)') { $Matches[1].ToLowerInvariant() } } | Sort-Object -Unique)
+              if ($dlls.Count -eq 0) { throw "No direct imports found: $name" }
+              if (@($dlls | Where-Object { $_ -match '^(libcurl|libgcc|libstdc\+\+|libwinpthread|cjson|libcjson).*\.dll$' }).Count -gt 0) {
+                throw "Unexpected shared dependency: $name"
+              }
+              if ((Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash -cne $digest -or
+                  (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -cne $digest) { throw "PE audit bytes changed: $name" }
+              $report.files += [ordered]@{file=$name;sha256=$digest;format=$format[0];imports=$dlls}
+              Write-Host "$name : $($dlls -join ', ')"
             }
-            $report.files += [ordered]@{file=$name;format=$format[0];imports=$dlls}
-            Write-Host "$name : $($dlls -join ', ')"
+          } finally {
+            Remove-Item -LiteralPath $temp -Recurse -Force
           }
           $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $dir 'pe-imports.json') -Encoding utf8
           Write-Host 'PE_DIRECT_IMPORT_AUDIT_PASS'
