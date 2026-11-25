@@ -38,8 +38,8 @@ static uint32_t ROL32(const uint32_t x, const int n)
 }
 static uint32_t tau(const uint32_t A)
 {
-    return (SM4_SBOX[A>>24&0xFF]<<24) | SM4_SBOX[A>>16&0xFF]<<16 |
-           (SM4_SBOX[A>>8&0xFF]<<8) | SM4_SBOX[A&0xFF];
+    return ((uint32_t)SM4_SBOX[A>>24&0xFF]<<24) | ((uint32_t)SM4_SBOX[A>>16&0xFF]<<16) |
+           ((uint32_t)SM4_SBOX[A>>8&0xFF]<<8) | (uint32_t)SM4_SBOX[A&0xFF];
 }
 static uint32_t L(const uint32_t B)
 {
