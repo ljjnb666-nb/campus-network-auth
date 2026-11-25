@@ -35,11 +35,36 @@ try {
 # setup action or runner has removed its package cache.
 $evidence = [ordered]@{
     schemaVersion = 1
-    scope = 'observed build toolchain; archive digests are evidence, not an independently verified archive lock'
+    scope = 'observed build toolchain; repository-declared digests and available cache bytes are evidence, not an independently verified archive lock'
     cmake = $cmakeVersion
     packages = @()
     tools = @()
 }
+# Read the package manager's existing sync database, without refreshing or
+# installing anything. %h is the repository's declared archive SHA-256.
+$names = @($lock.msys2Packages.PSObject.Properties.Name)
+foreach ($name in $names) {
+    if ($name -cnotmatch '^mingw-w64-ucrt-x86_64-[a-z0-9+_-]+$') { throw "Unexpected locked package name: $name" }
+}
+$printCommand = "pacman -Sddp --noconfirm --print-format '%n|%v|%r|%f|%h' " + ($names -join ' ')
+$repoLines = @(& $bash -lc $printCommand)
+if ($LASTEXITCODE -ne 0) { throw 'Package repository metadata query failed' }
+$repo = @{}
+foreach ($line in $repoLines) {
+    $parts = ([string]$line).Split('|')
+    if ($parts.Length -ne 5) { continue }
+    $name,$version,$repository,$filename,$sha = $parts
+    if ($names -cnotcontains $name -or $repo.ContainsKey($name)) { throw "Unexpected package metadata: $name" }
+    if ($repository -cne 'ucrt64' -or $sha -cnotmatch '^[0-9a-fA-F]{64}$' -or
+        $filename -cnotmatch '^[a-zA-Z0-9+_.-]+\.pkg\.tar\.(zst|xz|gz)$' -or
+        -not $filename.StartsWith($name + '-' + $version + '-', [StringComparison]::Ordinal)) {
+        throw "Invalid repository archive metadata: $name"
+    }
+    if ($version -cne $installed[$name]) { throw "Repository package version differs from installed lock: $name" }
+    $repo[$name] = [ordered]@{repository=$repository;file=$filename;sha256=$sha.ToUpperInvariant()}
+}
+if ($repo.Count -ne $names.Count) { throw 'Incomplete repository archive digest inventory' }
+Write-Host "BUILD_REPOSITORY_DIGESTS_PASS packages=$($repo.Count)"
 $cache = Join-Path $MsysRoot 'var/cache/pacman/pkg'
 foreach ($pkg in $lock.msys2Packages.PSObject.Properties) {
     $stem = $pkg.Name + '-' + $pkg.Value + '-'
@@ -51,7 +76,10 @@ foreach ($pkg in $lock.msys2Packages.PSObject.Properties) {
             [ordered]@{file=$_.Name;sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash;bytes=$_.Length}
         })
     }
-    $evidence.packages += [ordered]@{name=$pkg.Name;version=$installed[$pkg.Name];archives=$archives}
+    foreach ($archive in $archives) {
+        if ($archive.file -cne $repo[$pkg.Name].file -or $archive.sha256 -cne $repo[$pkg.Name].sha256) { throw "Cached archive differs from repository metadata: $($pkg.Name)" }
+    }
+    $evidence.packages += [ordered]@{name=$pkg.Name;version=$installed[$pkg.Name];repositoryMetadata=$repo[$pkg.Name];archives=$archives}
 }
 foreach ($tool in @('gcc.exe','g++.exe','ninja.exe','objdump.exe','ld.exe','strip.exe')) {
     $file = Join-Path $MsysRoot ('ucrt64/bin/' + $tool)
