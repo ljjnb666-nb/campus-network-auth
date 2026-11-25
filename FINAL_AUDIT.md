@@ -84,3 +84,25 @@ Windows/Linux 已定义的本地枚举和采样资源离线验收通过，共64�
 f81ba6c / dbc4d3b：补充 macOS 独立合成缓冲测试12例及 clang ASan/UBSan 门禁，覆盖零/超限容量、分配失败、读取失败、返回长度大于容量、截断记录、非法记录长度、非法地址长度及正常恢复。测试不访问实际路由表或网卡；显式关闭 macOS LSan，使用测试分配计数校验释放。新平台门禁尚未验证。
 
 剩余阻断：macOS新门禁、其余原生资源路径未全面审计、真实系统API/热插拔/长期运行需授权环境。结论：WINDOWS_LINUX_LOCAL_RESOURCE_OFFLINE_VERIFIED（#348基线）；FULL_NATIVE_NETWORK_RESOURCE_ACCEPTANCE_BLOCKED。不得宣称全专项完成或正式发布。
+
+
+### 专项一阶段验收：CI #354 三平台通过
+
+验收对象 b8d3189360845f7e015c16de25ea5f47020d199b，[CI #354](https://github.com/ljjnb666-nb/campus-network-auth/actions/runs/45635959300)，Windows 139281325475、Linux 139281325845、macOS 139281325997 均成功。
+
+| 验收范围 | 实际日志 | 结论 |
+| --- | --- | --- |
+| Windows 本地网卡枚举及流量资源 | WINDOWS_LOCAL_ADAPTER_RESOURCE_PASS cases=22 | PASS |
+| Linux 网卡列表扩容及 JSON 分配 | ADAPTER_RESOURCE_AUDIT_PASS growthFailures=6 jsonFailures=22 maxRows=255 | PASS |
+| Linux 流量快照分配及生命周期 | TRAFFIC_ALLOCATOR_FAILURE_PASS cases=36；TRAFFIC_SNAPSHOT_LIFECYCLE_PASS | PASS |
+| macOS 本地采样缓冲 | MACOS_LOCAL_ADAPTER_RESOURCE_PASS cases=12 | PASS |
+| Windows 既有原生资源门禁 | NATIVE_NET_RESOURCE_PASS | PASS |
+| 应用生命周期与界面压力 | APP_LIFECYCLE_PASS cycles=100；UI_STRESS_PASS measured=100 | PASS |
+
+64个实际分配失败位置（Linux）与34个合成系统/缓冲场景（Windows 22、macOS 12）分别计量。不是98个实际OOM位置。Linux指定范围使用ASan/UBSan/LSan，macOS指定范围使用ASan/UBSan和测试分配计数；Windows合成场景使用API替身、分配计数及输出检查，不宣称三个平台均有相同sanitizer覆盖。
+
+**阶段关闭：LOCAL_ADAPTER_AND_TRAFFIC_OFFLINE_VERIFIED。** 定义的本地网卡枚举、流量快照和合成故障门禁已通过。冻结该范围，除发现可证实的回归外不再重复扩展。后续文档提交不改变历史验收对象，最新HEAD的CI仍需独立确认。
+
+**整个专项仍未完成：FULL_NATIVE_NETWORK_RESOURCE_ACCEPTANCE_BLOCKED。** 未全面审计的其他网络资源路径、真实系统API阻塞、网卡热插拔、长期实机趋势分别保留为独立开放项；不将未审计项一概称为外部阻断。真实环境验证只限用户授权及学校允许范围，禁止借验收改动认证协议或访问控制。项目整体仍有GUI字节复现性、独立供应链证据、签名、实机验收等阻断。不得合并或正式发布。
+
+原生核心两次完整SHA-256均为59BB59E8BEBFC316E7F4197E905717A73FC58F0B4DFBEB494E03215661D0A443；GUI摘要38E7C85C / 739828A0不同；配置一致。UI GDI 51→51、USER 78→78、句柄346→347，属于短期测试数据，不证明长期无泄漏。
