@@ -21,11 +21,6 @@ typedef struct {
     uint8_t key[TEA_TRIPLE_KEY_SIZE];
 } tea_triple_ecb_android_data_t;
 
-static uint32_t tea_bswap32(uint32_t x)
-{
-    return ((x & 0xFF) << 24) | ((x & 0xFF00) << 8) | ((x >> 8) & 0xFF00) | (x >> 24);
-}
-
 /* one TEA layer, 32 rounds (encrypt side) */
 static void tea_enc_layer(uint32_t *v0, uint32_t *v1, const uint32_t k[4])
 {
@@ -62,7 +57,7 @@ static void tea_load_key_layers(const uint8_t key[48], uint32_t k[3][4])
 {
     for (int layer = 0; layer < 3; ++layer)
         for (int i = 0; i < 4; ++i)
-            k[layer][i] = tea_bswap32(((const uint32_t *)key)[layer * 4 + i]);
+            k[layer][i] = bytes_2_uint32_be(key + 4 * (layer * 4 + i));
 }
 
 static uint8_t* tea_encrypt_raw(const uint8_t* key, const uint8_t* data,
@@ -78,13 +73,13 @@ static uint8_t* tea_encrypt_raw(const uint8_t* key, const uint8_t* data,
     tea_load_key_layers(key, k);
     for (int off = 0; off < total; off += 8)
     {
-        uint32_t v0 = tea_bswap32(((const uint32_t *)buf)[off / 4]);
-        uint32_t v1 = tea_bswap32(((const uint32_t *)buf)[off / 4 + 1]);
+        uint32_t v0 = bytes_2_uint32_be(buf + off);
+        uint32_t v1 = bytes_2_uint32_be(buf + off + 4);
         tea_enc_layer(&v0, &v1, k[0]);
         tea_enc_layer(&v0, &v1, k[1]);
         tea_enc_layer(&v0, &v1, k[2]);
-        ((uint32_t *)buf)[off / 4] = tea_bswap32(v0);
-        ((uint32_t *)buf)[off / 4 + 1] = tea_bswap32(v1);
+        uint32_2_bytes_be(v0, buf + off);
+        uint32_2_bytes_be(v1, buf + off + 4);
     }
     cipher_secure_zero(k, sizeof(k));
     *output_len = (size_t)total;
@@ -102,13 +97,13 @@ static uint8_t* tea_decrypt_raw(const uint8_t* key, const uint8_t* data,
     tea_load_key_layers(key, k);
     for (size_t off = 0; off < data_len; off += 8)
     {
-        uint32_t v0 = tea_bswap32(((const uint32_t *)buf)[off / 4]);
-        uint32_t v1 = tea_bswap32(((const uint32_t *)buf)[off / 4 + 1]);
+        uint32_t v0 = bytes_2_uint32_be(buf + off);
+        uint32_t v1 = bytes_2_uint32_be(buf + off + 4);
         tea_dec_layer(&v0, &v1, k[2]);
         tea_dec_layer(&v0, &v1, k[1]);
         tea_dec_layer(&v0, &v1, k[0]);
-        ((uint32_t *)buf)[off / 4] = tea_bswap32(v0);
-        ((uint32_t *)buf)[off / 4 + 1] = tea_bswap32(v1);
+        uint32_2_bytes_be(v0, buf + off);
+        uint32_2_bytes_be(v1, buf + off + 4);
     }
     cipher_secure_zero(k, sizeof(k));
     *output_len = data_len;
