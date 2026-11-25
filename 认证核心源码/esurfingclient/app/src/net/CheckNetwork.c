@@ -16,6 +16,10 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <pthread.h>
+#include <time.h>
+#endif
 
 #define GENERATE_URL "http://connectivitycheck.platform.hicloud.com/generate_204"
 #define GENERATE_BAK_URL "http://connect.rom.miui.com/generate_204"
@@ -654,6 +658,15 @@ void log_network_state_change(const network_status_t status)
 static atomic_bool s_probe_running = false;
 static _Atomic(network_status_t) s_probe_cached = STATUS_ERROR;
 static sim_thread_t* s_probe_thread = NULL;
+#ifdef _WIN32
+static SRWLOCK s_probe_lifecycle = SRWLOCK_INIT;
+static void probe_lock(void) { AcquireSRWLockExclusive(&s_probe_lifecycle); }
+static void probe_unlock(void) { ReleaseSRWLockExclusive(&s_probe_lifecycle); }
+#else
+static pthread_mutex_t s_probe_lifecycle = PTHREAD_MUTEX_INITIALIZER;
+static void probe_lock(void) { pthread_mutex_lock(&s_probe_lifecycle); }
+static void probe_unlock(void) { pthread_mutex_unlock(&s_probe_lifecycle); }
+#endif
 
 static int probe_thread(void* arg)
 {
@@ -663,6 +676,7 @@ static int probe_thread(void* arg)
     {
         const uint64_t started = get_steady_tm_ms();
         const network_status_t observed = check_network_status(true);
+        if (!atomic_load(&s_probe_running)) return 0;
         atomic_store(&s_probe_cached, observed);
         const uint64_t elapsed = get_steady_tm_ms() - started;
 
@@ -686,42 +700,110 @@ static int probe_thread(void* arg)
     return 0;
 }
 
-void net_probe_start(void)
+static bool start_probe_worker(sim_thread_func worker)
 {
-    if (s_probe_thread != NULL) return;
+    probe_lock();
+    if (s_probe_thread != NULL)
+    {
+        const bool running = atomic_load(&s_probe_running);
+        probe_unlock();
+        return running;
+    }
 
     atomic_store(&s_probe_cached, STATUS_ERROR);
     atomic_store(&s_probe_running, true);
-    s_probe_thread = sim_thread_create(probe_thread, NULL);
-    if (s_probe_thread == NULL)
-    {
-        atomic_store(&s_probe_running, false);
-        LOG_WARN("联网状态探测线程创建失败, /api/status/online 会一直返回未知状态");
-        return;
-    }
+    s_probe_thread = sim_thread_create(worker, NULL);
+    const bool started = s_probe_thread != NULL;
+    if (!started) atomic_store(&s_probe_running, false);
+    probe_unlock();
+    return started;
+}
 
-    LOG_DEBUG("联网状态探测已启动 (后台, %d 毫秒一轮)", PROBE_INTERVAL_MS);
+void net_probe_start(void)
+{
+    if (!start_probe_worker(probe_thread))
+        LOG_WARN("联网状态探测线程创建失败或旧线程尚未回收");
+}
+
+bool net_probe_stop_checked(void)
+{
+    probe_lock();
+    atomic_store(&s_probe_running, false);
+    if (s_probe_thread != NULL)
+    {
+        if (sim_thread_join(s_probe_thread, NULL) != 0)
+        {
+            probe_unlock();
+            return false;
+        }
+        sim_thread_destroy(s_probe_thread);
+        s_probe_thread = NULL;
+    }
+    atomic_store(&s_probe_cached, STATUS_ERROR);
+    probe_unlock();
+    return true;
 }
 
 void net_probe_stop(void)
 {
-    if (s_probe_thread == NULL) return;
-
-    atomic_store(&s_probe_running, false);
-    int result_code = 0;
-    if (sim_thread_join(s_probe_thread, &result_code) != 0)
-    {
+    if (!net_probe_stop_checked())
         LOG_ERROR("联网状态探测线程等待失败, 保留线程对象");
-        return;
-    }
-    sim_thread_destroy(s_probe_thread);
-    s_probe_thread = NULL;
-    atomic_store(&s_probe_cached, STATUS_ERROR);
+}
 
-    LOG_DEBUG("联网状态探测已停止");
+static int probe_lifecycle_test_worker(void* arg)
+{
+    (void)arg;
+    while (atomic_load(&s_probe_running))
+    {
+#ifdef _WIN32
+        Sleep(1);
+#else
+        const struct timespec delay = {0, 1000000L};
+        nanosleep(&delay, NULL);
+#endif
+    }
+    return 0;
+}
+
+static int probe_lifecycle_test_stop(void* arg)
+{
+    (void)arg;
+    return net_probe_stop_checked() ? 0 : 1;
+}
+
+bool probe_lifecycle_self_test(void)
+{
+    for (int i = 0; i < 16; ++i)
+    {
+        if (!start_probe_worker(probe_lifecycle_test_worker) ||
+            !start_probe_worker(probe_lifecycle_test_worker))
+        {
+            net_probe_stop_checked();
+            return false;
+        }
+        atomic_store(&s_probe_cached, STATUS_OK);
+        sim_thread_t* one = sim_thread_create(probe_lifecycle_test_stop, NULL);
+        sim_thread_t* two = sim_thread_create(probe_lifecycle_test_stop, NULL);
+        int rc1 = -1, rc2 = -1;
+        if (one != NULL)
+        {
+            if (sim_thread_join(one, &rc1) != 0) abort();
+            sim_thread_destroy(one);
+        }
+        if (two != NULL)
+        {
+            if (sim_thread_join(two, &rc2) != 0) abort();
+            sim_thread_destroy(two);
+        }
+        if (!net_probe_stop_checked() || rc1 != 0 || rc2 != 0 ||
+            s_probe_thread != NULL || atomic_load(&s_probe_running) ||
+            atomic_load(&s_probe_cached) != STATUS_ERROR) return false;
+    }
+    return true;
 }
 
 network_status_t net_probe_status(void)
 {
+    if (!atomic_load(&s_probe_running)) return STATUS_ERROR;
     return atomic_load(&s_probe_cached);
 }
