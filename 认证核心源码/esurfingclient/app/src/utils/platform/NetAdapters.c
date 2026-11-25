@@ -206,27 +206,29 @@ static void adapter_wide_to_utf8(const wchar_t* wide, char* out, const size_t ou
 
 uint8_t get_adapters_stats(adapter_stats_t* out, const uint8_t max, char* default_id, const size_t default_id_len)
 {
-    if (out == NULL || max == 0) return 0;
     if (default_id != NULL && default_id_len > 0) default_id[0] = '\0';
+    if (out == NULL || max == 0) return 0;
 
     ULONG size = 16 * 1024;
-    PIP_ADAPTER_ADDRESSES addrs = malloc(size);
-    if (addrs == NULL) return 0;
-
-    // INCLUDE_GATEWAYS: 靠"有没有网关"把 VMware/Hyper-V 这类虚拟网卡挡掉
+    PIP_ADAPTER_ADDRESSES addrs = NULL;
     const ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER |
                         GAA_FLAG_INCLUDE_GATEWAYS;
-    ULONG rc = GetAdaptersAddresses(AF_UNSPEC, flags, NULL, addrs, &size);
-    if (rc == ERROR_BUFFER_OVERFLOW)
+    ULONG rc = ERROR_BUFFER_OVERFLOW;
+    /* Local traffic sampling only. Bound both allocation and topology-change retries. */
+    for (unsigned attempt = 0; attempt < 3 && rc == ERROR_BUFFER_OVERFLOW; ++attempt)
     {
-        free(addrs);
+        if (size == 0 || size > ADAPTER_INFO_MAX_BYTES) return 0;
         addrs = malloc(size);
         if (addrs == NULL) return 0;
         rc = GetAdaptersAddresses(AF_UNSPEC, flags, NULL, addrs, &size);
+        if (rc != NO_ERROR)
+        {
+            free(addrs);
+            addrs = NULL;
+        }
     }
     if (rc != NO_ERROR)
     {
-        free(addrs);
         LOG_WARN("枚举网卡失败 (错误码 %lu)", (unsigned long)rc);
         return 0;
     }
