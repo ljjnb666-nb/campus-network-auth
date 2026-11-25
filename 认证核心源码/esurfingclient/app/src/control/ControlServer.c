@@ -226,10 +226,55 @@ void ctl_wait_close(const ctl_sock_t sock, const long timeout_ms)
  * @param reply 输出缓冲
  * @param reply_len 缓冲长度
  */
+/* Only serialize a read-only diagnostic snapshot. No command dispatch,
+ * credential or access-control decisions are made here. */
+static char* render_status_snapshot(uint8_t account, bool is_authed, bool is_running,
+                                    bool is_time_disabled, const char* boot_id,
+                                    unsigned fail_at)
+{
+    unsigned step = 0;
+    cJSON* root = NULL;
+    cJSON* data = NULL;
+    char* text = NULL;
+    if (++step == fail_at || !(root = cJSON_CreateObject())) goto cleanup;
+    if (++step == fail_at || !(data = cJSON_CreateObject())) goto cleanup;
+    if (++step == fail_at || !cJSON_AddNumberToObject(data, "account", account)) goto cleanup;
+    if (++step == fail_at || !cJSON_AddBoolToObject(data, "is_authed", is_authed)) goto cleanup;
+    if (++step == fail_at || !cJSON_AddBoolToObject(data, "is_running", is_running)) goto cleanup;
+    if (++step == fail_at || !cJSON_AddBoolToObject(data, "is_time_disabled", is_time_disabled)) goto cleanup;
+    if (++step == fail_at || !cJSON_AddStringToObject(data, "bootId", boot_id)) goto cleanup;
+    if (++step == fail_at || !cJSON_AddBoolToObject(root, "ok", true)) goto cleanup;
+    if (++step == fail_at || !cJSON_AddItemToObject(root, "data", data)) goto cleanup;
+    data = NULL; /* ownership transferred */
+    if (++step != fail_at) text = cJSON_PrintUnformatted(root);
+cleanup:
+    cJSON_Delete(data);
+    cJSON_Delete(root);
+    return text;
+}
+
+static bool status_snapshot_self_test(void)
+{
+    char* text = render_status_snapshot(1, false, false, false, "fixture", 0);
+    if (!text) return false;
+    cJSON* root = cJSON_Parse(text);
+    cJSON_free(text);
+    const cJSON* data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    const cJSON* boot = cJSON_GetObjectItemCaseSensitive(data, "bootId");
+    const bool ok = cJSON_IsObject(data) && cJSON_IsString(boot) &&
+        strcmp(boot->valuestring, "fixture") == 0;
+    cJSON_Delete(root);
+    if (!ok) return false;
+    for (unsigned i = 1; i <= 10; ++i)
+    {
+        text = render_status_snapshot(1, false, false, false, "fixture", i);
+        if (text) { cJSON_free(text); return false; }
+    }
+    return true;
+}
+
 static void ctl_reply_status(char* reply, const size_t reply_len)
 {
-    cJSON* root = cJSON_CreateObject();
-    cJSON* data = cJSON_CreateObject();
 
     /**
      * 这里读的是认证线程在写的运行时状态。
@@ -249,19 +294,12 @@ static void ctl_reply_status(char* reply, const size_t reply_len)
         is_time_disabled = g_prog_status[0].runtime_status.is_time_disabled;
     }
 
-    cJSON_AddNumberToObject(data, "account", account);
-    cJSON_AddBoolToObject(data, "is_authed", is_authed);
-    cJSON_AddBoolToObject(data, "is_running", is_running);
-    cJSON_AddBoolToObject(data, "is_time_disabled", is_time_disabled);
-    cJSON_AddStringToObject(data, "bootId", boot_id_get());
-
-    cJSON_AddBoolToObject(root, "ok", true);
-    cJSON_AddItemToObject(root, "data", data);
-
-    char* text = cJSON_PrintUnformatted(root);
+    char* text = render_status_snapshot(account, is_authed, is_running,
+                                        is_time_disabled, boot_id_get(), 0);
+    /* Keep the existing empty-line failure representation. Never return
+     * a partially constructed successful diagnostic document. */
     snprintf(reply, reply_len, "%s\n", safe_str(text));
-    free(text);
-    cJSON_Delete(root);
+    cJSON_free(text);
 }
 
 /**
@@ -621,6 +659,7 @@ bool control_resource_self_test(void)
         ctl_read_line(CTL_INVALID_SOCK, NULL, 0) == 0 &&
         ctl_read_line(CTL_INVALID_SOCK, &byte, 0) == 0 && byte == 'x' &&
         ctl_read_line(CTL_INVALID_SOCK, &byte, 1) == 0 && byte == '\0' &&
+        status_snapshot_self_test() &&
         loopback_reader_self_test();
 }
 
