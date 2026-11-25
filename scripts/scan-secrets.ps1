@@ -38,19 +38,22 @@ $patterns = @(
     '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----'
 )
 
+# Report locations and rule names only. A real secret must never be copied
+# into CI logs by the scanner intended to detect it.
+$ruleNames = @('credential-literal', 'secret-key-literal', 'private-key-header')
 $findings = @()
 foreach ($f in (Get-TextFiles $root)) {
     $text = $null
     try { $text = [IO.File]::ReadAllText($f) } catch { continue }
-    foreach ($p in $patterns) {
-        foreach ($m in [regex]::Matches($text, $p)) {
+    for ($ruleIndex = 0; $ruleIndex -lt $patterns.Count; $ruleIndex++) {
+        foreach ($m in [regex]::Matches($text, $patterns[$ruleIndex])) {
             $v = $m.Groups['v'].Value
             $hit = $true
             foreach ($a in $allow) { if ($v -and $v.IndexOf($a, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $hit = $false; break } }
             if ($hit) {
                 $rel = $f.Substring($root.Length + 1)
                 $line = ([regex]::Matches($text.Substring(0, $m.Index), "`n")).Count + 1
-                $findings += [pscustomobject]@{ File = $rel; Line = $line; Value = $v }
+                $findings += [pscustomobject]@{ File = $rel; Line = $line; Rule = $ruleNames[$ruleIndex] }
             }
         }
     }

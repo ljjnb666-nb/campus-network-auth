@@ -158,3 +158,8 @@ UI_LAYOUT_MATRIX_PASS cases=36：4档字体指标（100/125/150/200%）×3种窗
 ## 发布安全复审：文件读取与核心启动
 
 CREDENTIAL_BOUNDED_READ_PASS / JOURNAL_BOUNDED_READ_PASS：凭据和事务记录使用同一文件句柄进行长度检查和有界读取，访问失败与缺失分离，验证超限、独占锁、缺失，以及凭据 NUL 拒绝、事务非法 UTF-8。核心使用 OpenVerifiedCore 持有禁止写入/删除共享的已校验句柄至启动返回，CORE_INTEGRITY_HANDLE_PASS 实测普通写入和重命名被拒绝；后续110轮仍须成功启动真实离线核心。保留所有旧门禁。未测试真实管理员服务、恶意同用户进程或路径祖先竞争，新CI待验证。
+
+
+### 敏感信息扫描回归修正
+
+3806033 Push 45575904810 / PR 45575919612：编译、CREDENTIAL_BOUNDED_READ_PASS、JOURNAL_BOUNDED_READ_PASS、CORE_INTEGRITY_HANDLE_PASS、所有原有离线UI/应用/资源及签名回归通过；Secret scan 失败，后续curl/上传跳过。唯一命中为 Program.cs:1160 新增的 NUL 拒绝测试虚构字面量，并非真实凭据。改为从 DummyCredential() 派生含 NUL 的测试输入，保留原拒绝断言；扫描报告仅保留文件、行号、规则，不输出命中值。原正则、既有允许列表和失败退出码均未放宽。扫描仍为启发式，既有子串允许列表及读取失败覆盖需进一步复审。新CI待验证。

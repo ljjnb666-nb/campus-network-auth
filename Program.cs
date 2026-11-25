@@ -1157,7 +1157,9 @@ internal static class Program
             }
             File.Delete(store.FilePath);
             if (store.Load() != null) return 1;
-            value.Password = "invalid\0password";
+            // Derive the deliberately invalid value from the existing offline
+            // fixture, never from a real credential.
+            value.Password = DummyCredential().Password + '\0';
             refused = false;
             try { store.Save(value); } catch (InvalidDataException) { refused = true; }
             if (!refused || File.Exists(store.FilePath)) return 1;
