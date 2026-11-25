@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
+#include <limits.h>
 
 struct myssl_cipher_ctx_st
 {
@@ -29,9 +31,18 @@ EVP_CIPHER_CTX* EVP_CIPHER_CTX_new(void)
     return ctx;
 }
 
+static void clear_cipher_context(EVP_CIPHER_CTX* ctx)
+{
+    simssl_secure_zero(ctx, sizeof(*ctx));
+}
+
 void EVP_CIPHER_CTX_free(EVP_CIPHER_CTX* ctx)
 {
-    if (ctx) free(ctx);
+    if (ctx)
+    {
+        clear_cipher_context(ctx);
+        free(ctx);
+    }
 }
 
 int EVP_CIPHER_CTX_set_padding(EVP_CIPHER_CTX* ctx, int padding)
@@ -50,11 +61,16 @@ static int simssl_cipher_init(EVP_CIPHER_CTX* ctx, const EVP_CIPHER* type,
     ctx->enc = enc;
     ctx->buflen = 0;
     ctx->have_hold = 0;
+    simssl_secure_zero(ctx->buf, sizeof(ctx->buf));
+    simssl_secure_zero(ctx->hold, sizeof(ctx->hold));
     /* 与 OpenSSL 相同：默认开启 padding，需显式 set_padding(ctx, 0) 关闭 */
     ctx->padding = 1;
 
     if (key)
     {
+        simssl_secure_zero(ctx->key, sizeof(ctx->key));
+        simssl_secure_zero(ctx->rk, sizeof(ctx->rk));
+        simssl_secure_zero(ctx->dk, sizeof(ctx->dk));
         memcpy(ctx->key, key, (size_t)type->key_len);
         if (type->alg == MYSSL_ALG_AES_128_ECB || type->alg == MYSSL_ALG_AES_128_CBC)
         {
@@ -68,7 +84,11 @@ static int simssl_cipher_init(EVP_CIPHER_CTX* ctx, const EVP_CIPHER* type,
         }
     }
 
-    if (type->iv_len > 0 && iv) memcpy(ctx->iv, iv, (size_t)type->iv_len);
+    if (type->iv_len > 0 && iv)
+    {
+        simssl_secure_zero(ctx->iv, sizeof(ctx->iv));
+        memcpy(ctx->iv, iv, (size_t)type->iv_len);
+    }
     memset(ctx->chain, 0, sizeof(ctx->chain));
     if (type->iv_len > 0) memcpy(ctx->chain, ctx->iv, (size_t)type->iv_len);
     return 1;
@@ -117,6 +137,7 @@ static void simssl_crypt_block(EVP_CIPHER_CTX* ctx, const uint8_t* in, uint8_t* 
             for (i = 0; i < bs; i++) out[i] = (uint8_t)(tmp[i] ^ ctx->chain[i]);
             memcpy(ctx->chain, in, (size_t)bs);
         }
+        simssl_secure_zero(tmp, sizeof(tmp));
         return;
     }
 
@@ -135,14 +156,13 @@ static void simssl_crypt_block(EVP_CIPHER_CTX* ctx, const uint8_t* in, uint8_t* 
 static int simssl_update(EVP_CIPHER_CTX* ctx, unsigned char* out, int* outl,
                         const unsigned char* in, int inl)
 {
+    if (!ctx || !ctx->cipher || !outl || inl < 0) return 0;
+    *outl = 0;
     const int bs = ctx->cipher->block_size;
+    if (inl > 0 && (!in || !out || inl > INT_MAX - bs)) return 0;
     int produced = 0;
     const uint8_t* p = in;
     int left = inl;
-
-    if (!ctx || !outl || inl < 0) return 0;
-    if (inl > 0 && !in) return 0;
-    *outl = 0;
 
     while (left > 0)
     {
@@ -171,6 +191,7 @@ static int simssl_update(EVP_CIPHER_CTX* ctx, unsigned char* out, int* outl,
                 simssl_crypt_block(ctx, ctx->buf, out + produced);
                 produced += bs;
             }
+            simssl_secure_zero(ctx->buf, sizeof(ctx->buf));
             ctx->buflen = 0;
         }
     }
@@ -195,9 +216,10 @@ int EVP_DecryptUpdate(EVP_CIPHER_CTX* ctx, unsigned char* out, int* outl,
 
 int EVP_EncryptFinal_ex(EVP_CIPHER_CTX* ctx, unsigned char* out, int* outl)
 {
-    const int bs = ctx->cipher ? ctx->cipher->block_size : 0;
     if (!ctx || !ctx->cipher || !outl) return 0;
     *outl = 0;
+    const int bs = ctx->cipher->block_size;
+    if (ctx->padding && !out) return 0;
 
     if (!ctx->padding)
     {
@@ -210,6 +232,7 @@ int EVP_EncryptFinal_ex(EVP_CIPHER_CTX* ctx, unsigned char* out, int* outl)
         memset(ctx->buf + ctx->buflen, pad, pad);
         ctx->buflen = 0;
         simssl_crypt_block(ctx, ctx->buf, out);
+        simssl_secure_zero(ctx->buf, sizeof(ctx->buf));
         *outl = bs;
     }
     return 1;
@@ -217,9 +240,10 @@ int EVP_EncryptFinal_ex(EVP_CIPHER_CTX* ctx, unsigned char* out, int* outl)
 
 int EVP_DecryptFinal_ex(EVP_CIPHER_CTX* ctx, unsigned char* out, int* outl)
 {
-    const int bs = ctx->cipher ? ctx->cipher->block_size : 0;
     if (!ctx || !ctx->cipher || !outl) return 0;
     *outl = 0;
+    const int bs = ctx->cipher->block_size;
+    if (ctx->padding && !out) return 0;
 
     if (!ctx->padding)
     {
@@ -238,7 +262,59 @@ int EVP_DecryptFinal_ex(EVP_CIPHER_CTX* ctx, unsigned char* out, int* outl)
         }
         memcpy(out, ctx->hold, (size_t)(bs - pad));
         *outl = bs - pad;
+        simssl_secure_zero(ctx->hold, sizeof(ctx->hold));
         ctx->have_hold = 0;
     }
     return 1;
+}
+
+/* Inspect buffers only while owned, never after free. Synthetic test data. */
+static bool bytes_are_zero(const void* data, size_t len)
+{
+    const unsigned char* p = data;
+    for (size_t i = 0; i < len; ++i) if (p[i] != 0) return false;
+    return true;
+}
+
+bool simssl_cipher_cleanup_self_test(void)
+{
+    const EVP_CIPHER* types[] = {
+        EVP_aes_128_ecb(), EVP_aes_128_cbc(),
+        EVP_des_ede3_ecb(), EVP_des_ede3_cbc()
+    };
+    unsigned char key[24], iv[16], input[23], encrypted[64], output[64];
+    for (size_t i = 0; i < sizeof(key); ++i) key[i] = (unsigned char)(i + 1);
+    memset(iv, 0x5a, sizeof(iv));
+    memset(input, 0xa5, sizeof(input));
+    EVP_CIPHER_CTX ctx = {0};
+    bool ok = true;
+    int n = 0, tail = 0, decoded = 0;
+    if (EVP_EncryptFinal_ex(NULL, output, &n) != 0 ||
+        EVP_DecryptFinal_ex(NULL, output, &n) != 0) return false;
+    for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); ++i)
+    {
+        if (!EVP_EncryptInit_ex(&ctx, types[i], NULL, key, iv) ||
+            !EVP_EncryptUpdate(&ctx, encrypted, &n, input, sizeof(input)) ||
+            !EVP_EncryptFinal_ex(&ctx, encrypted + n, &tail) ||
+            !bytes_are_zero(ctx.buf, sizeof(ctx.buf)) ||
+            !EVP_DecryptInit_ex(&ctx, types[i], NULL, key, iv) ||
+            !EVP_DecryptUpdate(&ctx, output, &decoded, encrypted, n + tail) ||
+            !EVP_DecryptFinal_ex(&ctx, output + decoded, &tail) ||
+            decoded + tail != sizeof(input) || memcmp(input, output, sizeof(input)) != 0 ||
+            !bytes_are_zero(ctx.buf, sizeof(ctx.buf)) ||
+            !bytes_are_zero(ctx.hold, sizeof(ctx.hold)))
+        {
+            ok = false;
+            break;
+        }
+        clear_cipher_context(&ctx);
+        if (!bytes_are_zero(&ctx, sizeof(ctx))) { ok = false; break; }
+    }
+    clear_cipher_context(&ctx);
+    simssl_secure_zero(key, sizeof(key));
+    simssl_secure_zero(iv, sizeof(iv));
+    simssl_secure_zero(input, sizeof(input));
+    simssl_secure_zero(encrypted, sizeof(encrypted));
+    simssl_secure_zero(output, sizeof(output));
+    return ok;
 }
