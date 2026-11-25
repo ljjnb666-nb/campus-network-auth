@@ -342,3 +342,8 @@ Push 45552962416 / PR 45552969825 failure，APP_CYCLE_START_FAIL cycle=0/1。原
 ### 生命周期第二轮回归修复（基线 8b8bd74）
 
 两次 CI 45553627347 / 45553634310 failure，详细日志 APP_CYCLE_START_FAIL cycle=1/0：pending=False ready=False missing=True phase=Idle 而 connect=False stop=True prepare=False restore=False recover=False，随后 UI_TEST_ERROR InvalidOperationException。提示异步中间状态/上下文问题，但未证明唯一根因。新独立 STA WinForms 消息循环门禁，等待共享 ConnectCommandAsync，显式 UI 线程检查及回调屏障，前置占用至启动结束、STOP ACK 排序；不减轮次或断言，新 CI 待证实。未操作实际服务/校园网，main 未变。
+
+
+### 主动审计第十批（基线 aca4036）
+
+Push 45554185087 / PR 45554192196 success；APP_LIFECYCLE_PASS cycles=100 seed=20261125 ready_ack_drain=100，110次资源/256权限/签名/curl双源均通过，artifact 14994274298。发现旧电源回调仅处理 Resume、可能覆盖终态提示，等待中的连接/重试可在唤醒后继续，服务操作后续启动缺乏电源变化失效标志。新增 Suspend/Resume 代次、正向证据失效、取消尚未执行的连接/重试、保留在途 helper 并阻断后续启动、UI事件注入组合测试 POWER_TRANSITION_PASS。新 CI 待验证；软件注入非真实休眠，旧事件接收代次非实际探测时间，真实 UAC/校园网/DPI/72h/签名仍未验收，main 未修改。

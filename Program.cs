@@ -1309,6 +1309,8 @@ internal static class Program
         private bool connectCheckPending, retryEligible, rememberRevoked;
         private Func<HandoffObservation> observeHandoff = ObserveHandoff;
         private bool offlineLifecycleProbe;
+        private bool powerSuspended;
+        private int powerEvidenceEpoch;
         private bool offlineProbeReady, offlineProbeStopAccepted, lastCoreReadersDrained;
         private long lastNetworkEvidence;
         private readonly Stopwatch evidenceClock = Stopwatch.StartNew();
@@ -2099,6 +2101,23 @@ internal static class Program
                         (scenario == 3 && (state.Failure != ConnectionStates.FailureKind.Runtime || retryEligible)) ||
                         (scenario == 4 && (state.Failure != ConnectionStates.FailureKind.Network || !retryEligible)))
                     { Console.WriteLine("APP_CYCLE_EVENT_FAIL cycle=" + cycle + " scenario=" + scenario + " auth=" + state.Auth + " network=" + state.Network); return false; }
+                    if (scenario == 0)
+                    {
+                        // A power notification invalidates already queued positive network evidence.
+                        OnPowerModeChanged(this, new PowerModeChangedEventArgs(PowerModes.Suspend));
+                        OnCoreStatus(child, "network_online");
+                        await FlushUiEventsForTest();
+                        if (!powerSuspended || state.Auth != ConnectionStates.AuthState.Authenticated ||
+                            state.Network != ConnectionStates.NetworkState.Unknown || !Object.ReferenceEquals(running, child) || retryTimer.Enabled)
+                            return false;
+                        OnPowerModeChanged(this, new PowerModeChangedEventArgs(PowerModes.Resume));
+                        await FlushUiEventsForTest();
+                        if (powerSuspended || state.Network != ConnectionStates.NetworkState.Unknown || !Object.ReferenceEquals(running, child))
+                            return false;
+                        OnCoreStatus(child, "network_online");
+                        await FlushUiEventsForTest();
+                        if (state.Network != ConnectionStates.NetworkState.InternetAvailable) return false;
+                    }
                     StopClicked(stop, EventArgs.Empty);
                     OnCoreStatus(child, "auth_ok"); OnCoreStatus(child, "network_online");
                     // Exercise the real process Exited callback and reader drain, not a synthetic exit.
@@ -2123,6 +2142,8 @@ internal static class Program
                     if (completed % 20 == 0) Console.WriteLine("APP_LIFECYCLE_PROGRESS=" + completed);
                 }
                 Console.WriteLine("APP_LIFECYCLE_PASS cycles=" + completed + " seed=" + seed + " ready_ack_drain=100");
+                if (!await CheckPowerCancellationForTestAsync()) return false;
+                Console.WriteLine("POWER_TRANSITION_PASS active_cycles=20 pending_connect=1 pending_service=1 idle=1");
                 return true;
             }
             finally
@@ -2136,6 +2157,48 @@ internal static class Program
                     ReapOfflineOrFailedCore(owned);
                 }
             }
+        }
+
+        private async Task<bool> CheckPowerCancellationForTestAsync()
+        {
+            if (!isSelfTest) return false;
+            // Both paths remain offline: the observation keeps the real service action
+            // in its waiting phase and cannot reach an elevation prompt.
+            observeHandoff = delegate { return new HandoffObservation(ConnectionStates.ServiceState.Running, 1); };
+            Task connectWork = ConnectCommandAsync();
+            var clock = Stopwatch.StartNew();
+            while (state.Handoff != ConnectionStates.HandoffState.WaitingForClient && !connectWork.IsCompleted &&
+                clock.ElapsedMilliseconds < 3000) await Task.Delay(10);
+            if (!connectCheckPending || state.Handoff != ConnectionStates.HandoffState.WaitingForClient) return false;
+            OnPowerModeChanged(this, new PowerModeChangedEventArgs(PowerModes.Suspend));
+            await FlushUiEventsForTest();
+            OnPowerModeChanged(this, new PowerModeChangedEventArgs(PowerModes.Resume));
+            await FlushUiEventsForTest();
+            if (await Task.WhenAny(connectWork, Task.Delay(5000)) != connectWork) return false;
+            await connectWork;
+            if (connectCheckPending || activeTask != null || retryTimer.Enabled || !connect.Enabled ||
+                state.Auth != ConnectionStates.AuthState.Idle) return false;
+
+            Task<bool> serviceWork = RunServiceAction(true);
+            clock.Restart();
+            while (state.Handoff != ConnectionStates.HandoffState.WaitingForClient && !serviceWork.IsCompleted &&
+                clock.ElapsedMilliseconds < 3000) await Task.Delay(10);
+            if (!serviceBusy || state.Handoff != ConnectionStates.HandoffState.WaitingForClient) return false;
+            OnPowerModeChanged(this, new PowerModeChangedEventArgs(PowerModes.Suspend));
+            await FlushUiEventsForTest();
+            if (!serviceBusy || connect.Enabled || prepare.Enabled || restore.Enabled) return false;
+            OnPowerModeChanged(this, new PowerModeChangedEventArgs(PowerModes.Resume));
+            await FlushUiEventsForTest();
+            if (await Task.WhenAny(serviceWork, Task.Delay(5000)) != serviceWork || await serviceWork) return false;
+            if (serviceBusy || activeTask != null || !connect.Enabled || pendingServiceChild != null) return false;
+            Process previous = running;
+            OnPowerModeChanged(this, new PowerModeChangedEventArgs(PowerModes.Suspend));
+            await FlushUiEventsForTest();
+            if (connect.Enabled || prepare.Enabled || restore.Enabled || stop.Enabled) return false;
+            OnPowerModeChanged(this, new PowerModeChangedEventArgs(PowerModes.Resume));
+            await FlushUiEventsForTest();
+            return !powerSuspended && Object.ReferenceEquals(previous, running) && activeTask == null &&
+                !retryTimer.Enabled && connect.Enabled && !stop.Enabled;
         }
 
         internal bool CheckServiceRecoveryForTest(string dir)
@@ -2785,7 +2848,7 @@ internal static class Program
         }
         private bool HandoffCancelled(int generation, bool connectionTask)
         {
-            return IsDisposed || Disposing || exitRequested || generation != taskGeneration ||
+            return IsDisposed || Disposing || exitRequested || powerSuspended || generation != taskGeneration ||
                 (connectionTask && (userStopped || activeTask == null));
         }
         private async Task<HandoffObservation> WaitForHandoffAsync(ConnectionStates.HandoffIntent intent, int generation, bool connectionTask)
@@ -2824,7 +2887,7 @@ internal static class Program
             bool owned = running != null && !Object.ReferenceEquals(running, completedProcess);
             bool force = stopping && grace != null && grace.Elapsed.TotalSeconds >= 100;
             return ConnectionStates.DecideOperations(serviceBusy, connectCheckPending, retryTimer.Enabled,
-                owned, stopping, force, exitRequested, userStopped);
+                owned, stopping, force, exitRequested || powerSuspended, userStopped);
         }
 
         private void RefreshOperationPermissions()
@@ -2870,7 +2933,7 @@ internal static class Program
         }
         private async Task RunPreConnectCheckAsync(bool showMessage, bool quiet = false)
         {
-            if (checkingBlocked || serviceBusy || connectCheckPending || retryTimer.Enabled || activeTask != null) return;
+            if (checkingBlocked || powerSuspended || serviceBusy || connectCheckPending || retryTimer.Enabled || activeTask != null) return;
             int generation = taskGeneration;
             checkingBlocked = true;
             try
@@ -2900,6 +2963,11 @@ internal static class Program
                 else if (!showMessage)
                     SetHandoff(ConnectionStates.HandoffState.Ready, loadedCredential ?
                         "已载入保存的账号，点击“立即连接”即可。" : "输入校园网账号和密码，点击“立即连接”即可。", ToneInfo);
+            }
+            catch
+            {
+                if (!HandoffCancelled(generation, false) && !serviceBusy && !connectCheckPending && activeTask == null)
+                    SetHandoff(ConnectionStates.HandoffState.Blocked, "环境状态检查失败，请稍后重试。", ToneWarn);
             }
             finally { checkingBlocked = false; }
         }
@@ -2977,7 +3045,7 @@ internal static class Program
 
         private async Task CheckAndStartAsync(int generation)
         {
-            if (activeTask == null || userStopped || serviceBusy || exitRequested || connectCheckPending) return;
+            if (activeTask == null || userStopped || serviceBusy || exitRequested || powerSuspended || connectCheckPending) return;
             if (!JournalAllowsNewAction())
             {
                 activeTask = null; retryTimer.Stop();
@@ -3037,7 +3105,7 @@ internal static class Program
         // The actual process always uses the immutable, user-authorized task snapshot.
         private void StartAuthProcess(string mode = "--ephemeral-auth")
         {
-            if (activeTask == null || userStopped || serviceBusy || exitRequested) return;
+            if (activeTask == null || userStopped || serviceBusy || exitRequested || powerSuspended) return;
             if (isSelfTest && mode == "--ephemeral-auth") throw new InvalidOperationException("Offline test cannot authenticate.");
             if (running != null && !Object.ReferenceEquals(running, completedProcess)) return;
             try
@@ -3085,7 +3153,7 @@ internal static class Program
         // Unknown failures, rejected credentials and arbitrary crashes require manual action.
         private void ScheduleAutoRetry(int exitCode)
         {
-            if (userStopped || exitRequested || stopping || activeTask == null ||
+            if (userStopped || exitRequested || powerSuspended || stopping || activeTask == null ||
                 !retryEligible || authFailureSeen || autoRetryCount >= 2) { activeTask = null; return; }
             autoRetryCount++;
             int delay = autoRetryCount == 1 ? 10000 : 40000;
@@ -3098,21 +3166,57 @@ internal static class Program
         {
             if (!retryTimer.Enabled) return;
             retryTimer.Stop();
-            if (userStopped || exitRequested || serviceBusy || stopping || activeTask == null ||
+            if (userStopped || exitRequested || powerSuspended || serviceBusy || stopping || activeTask == null ||
                 state.Auth != ConnectionStates.AuthState.RetryScheduled || isSelfTest) { RefreshOperationPermissions(); return; }
             await CheckAndStartAsync(taskGeneration);
         }
 
         private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
         {
-            if (e.Mode != PowerModes.Resume || IsDisposed) return;
-            try { BeginInvoke((Action)delegate {
-                // 唤醒后不自动重启：运行中的核心由自身心跳/退避循环重新确认；
-                // 已停止的会话保持停止。仅提示状态待确认。
-                if (running != null && !running.HasExited) { state.SetNetwork(ConnectionStates.NetworkState.Unknown); UpdateConnectionPill(); SetStatus("系统已唤醒，连接状态待确认……", ToneInfo, true); }
-                else if (!serviceBusy && !connectCheckPending && !retryTimer.Enabled && activeTask == null && !isSelfTest)
-                    RunPreConnectCheckAsync(false);
-            }); } catch (InvalidOperationException) { }
+            if ((e.Mode != PowerModes.Suspend && e.Mode != PowerModes.Resume) || IsDisposed || Disposing) return;
+            // Invalidate positive events already queued before the notification arrived.
+            System.Threading.Interlocked.Increment(ref powerEvidenceEpoch);
+            bool suspended = e.Mode == PowerModes.Suspend;
+            try { BeginInvoke((Action)delegate { ApplyPowerTransition(suspended); }); }
+            catch (InvalidOperationException) { }
+        }
+
+        private void ApplyPowerTransition(bool suspended)
+        {
+            if (IsDisposed || Disposing || resourcesDisposed) return;
+            powerSuspended = suspended;
+            taskGeneration++; // revoke stale environment checks and post-service continuation
+            lastIdleObservation = null;
+            state.SetNetwork(ConnectionStates.NetworkState.Unknown);
+            UpdateConnectionPill();
+            password.UseSystemPasswordChar = true; reveal.Text = "显示";
+            if (serviceBusy)
+            {
+                // Already-started helpers remain owned and supervised; never clear their journal.
+                // A generation change prevents automatically launching a client afterwards.
+                if (connectCheckPending) { userStopped = true; activeTask = null; }
+                RefreshOperationPermissions();
+                return;
+            }
+            if (connectCheckPending || retryTimer.Enabled)
+            {
+                userStopped = true; activeTask = null; retryTimer.Stop();
+                state.SetHandoff(ConnectionStates.HandoffState.None);
+                SetAuthState(ConnectionStates.AuthState.Idle, "系统电源状态变化，已取消待执行连接或重试，请重新连接。", ToneWarn);
+            }
+            else if (running != null && !Object.ReferenceEquals(running, completedProcess) && !stopping &&
+                !userStopped && !authFailureSeen && !runtimeFailureSeen && !retryEligible)
+            {
+                // Existing core may continue its own recovery; no new authentication is launched here.
+                SetStatus(suspended ? "系统即将休眠，网络可达性待确认。" : "系统已唤醒，网络可达性待确认。", ToneWarn);
+            }
+            else if (!suspended && state.Auth == ConnectionStates.AuthState.Idle &&
+                (running == null || Object.ReferenceEquals(running, completedProcess)))
+            {
+                SetHandoff(ConnectionStates.HandoffState.None, "系统已唤醒，请按需重新连接。", ToneInfo);
+                if (!isSelfTest) RunPreConnectCheckAsync(false);
+            }
+            RefreshOperationPermissions();
         }
 
         private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
@@ -3197,6 +3301,7 @@ internal static class Program
         private void OnCoreStatus(Process sender, string token)
         {
             if (IsDisposed || !IsHandleCreated) return;
+            int observedEpoch = System.Threading.Interlocked.CompareExchange(ref powerEvidenceEpoch, 0, 0);
             try { BeginInvoke((Action)delegate {
                 if (!Object.ReferenceEquals(running, sender) || Object.ReferenceEquals(completedProcess, sender)) return;
                 // ParseCoreEvent already validated the PID, schema, event and code; token is allowlisted.
@@ -3210,6 +3315,8 @@ internal static class Program
                 bool stopEvent = token == "stop_accepted" || token == "stop_channel_failed";
                 if (stopEvent && !stopping) return;
                 if ((stopping || userStopped || authFailureSeen || runtimeFailureSeen || retryEligible) && !stopEvent) return;
+                if ((token == "network_online" || token == "online") &&
+                    (powerSuspended || observedEpoch != System.Threading.Interlocked.CompareExchange(ref powerEvidenceEpoch, 0, 0))) return;
                 if (token == "core_failed")
                 {
                     runtimeFailureSeen = true;
@@ -3601,6 +3708,8 @@ internal static class Program
             finally
             {
                 serviceBusy = pendingServiceChild != null;
+                if (!serviceBusy && !IsDisposed && !Disposing && !exitRequested && generation != taskGeneration)
+                    SetHandoff(ConnectionStates.HandoffState.Blocked, "系统状态已变化，服务操作后续步骤已取消；请重新检查。", ToneWarn);
                 RefreshOperationPermissions();
             }
         }

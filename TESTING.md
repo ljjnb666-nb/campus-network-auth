@@ -118,3 +118,8 @@ APP_LIFECYCLE_PASS cycles=100 seed=20261125：一个真实 WinForms 窗口，通
 ## 独立真实消息循环生命周期门禁
 
 8b8bd74 Push 45553627347 / PR 45553634310 失败：pending=False、missing=True、phase=Idle，但按钮仍为 preflight 权限，随后 InvalidOperationException；不能证明 native probe 退出是原因。改为独立 --self-test-app-lifecycle 进程及 Application.Run，验证 WinForms 同步上下文与 UI 线程，直接等待与点击事件共用的 ConnectCommandAsync Task，事件通过 BeginInvoke 屏障排队，不轮询中间标志或嵌套 DoEvents。前置检查持有权限至同步启动结束，STOP ACK 在设置停止条件之前刷新。100轮及原断言、ready/ack/drain全部保留，独立CI步骤5分钟超时，失败阻断；最新CI待验证。
+
+
+## 电源变化与服务/连接交接组合
+
+POWER_TRANSITION_PASS：在100次真实离线应用循环中20次注入 Suspend/Resume，通过实际系统事件处理器验证活核心不重启、暂停时拒绝正向网络证据、唤醒后网络待确认、重新收到事件才恢复可达性；额外验证待连接、服务等待以及空闲状态电源变化取消后续动作且互斥保持。事件是软件注入，不是实际 Windows 休眠/网卡切换。旧事件以接收代次过滤，不能证明唤醒后收到的核心事件实际探测时间；真实验证仍需现场。取消已计划重试属于保守策略，不自动发起新认证。既有110/100/256门禁保留。
