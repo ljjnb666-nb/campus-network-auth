@@ -27,6 +27,14 @@
 - [ ] 独立核验归档签名与摘要锁、编译器依赖及完整二进制组成；unsigned build-evidence.json 仅作追溯索引，不能代替签名来源证明。
 - [ ] cJSON 公告适用性复审完成。CI #280 的 CJSON_BOUNDS_REGRESSION_PASS、CJSON_UNUSED_API_SOURCE_GATE_PASS 已通过，但完整 32 位构建、实际二进制可达性与所有公告覆盖仍需核实。
 
+### 历史验收基线（不是当前 HEAD 的验收声明）
+
+CI #302（45623785237，`64ed1b5`）Windows/Linux 均成功。已实测通过 PE 导入基线、三个官方 Schema blob 校验及正反例、cJSON 边界、加密 sanitizer、工具链版本与仓库声明摘要、构建证据索引。20 个包缓存均无实际归档字节可核查。
+
+同 runner 双重构建：核心 EXE FBF3D0DE / 5B74DABD，GUI EXE 10DBBAFA / 79F5FC4E，均不一致；配置 D2454CE8 / D2454CE8 一致。以上为摘要前缀，完整值见 CI 日志。复现性保持 BLOCKED。
+
+后续仅对 GNU PE 链接时间戳采用 --no-insert-timestamp，并增加只读 COFF 时间戳与原始节区哈希对比；不修改已生成产物，不把归一化比较当作真实字节一致。下一次 CI 必须确认实际效果，旧版 C# 编译器不预设支持确定性编译。
+
 ## 代码签名（当前 BLOCKED：无证书）
 
 - [ ] 取得代码签名证书后对两个 exe 做 Authenticode 签名（时间戳服务器启用）。
