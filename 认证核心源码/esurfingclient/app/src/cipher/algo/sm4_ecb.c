@@ -21,7 +21,8 @@ static uint8_t* sm4_encrypt_ecb(const uint8_t* key, const uint8_t* plaintext,
         sm4_encrypt_block(padded_data + i * SM4_BLOCK_SIZE, 
                           output + i * SM4_BLOCK_SIZE, rk);
     }
-    s_free(padded_data);
+    cipher_secure_zero(rk, sizeof(rk));
+    s_secure_free(padded_data, padded_len);
     *output_len = padded_len;
     return output;
 }
@@ -29,7 +30,7 @@ static uint8_t* sm4_encrypt_ecb(const uint8_t* key, const uint8_t* plaintext,
 static uint8_t* sm4_decrypt_ecb(const uint8_t* key, const uint8_t* ciphertext,
                                 const size_t ciphertext_len, size_t* output_len)
 {
-    if (ciphertext_len % SM4_BLOCK_SIZE != 0) return NULL;
+    if (ciphertext_len == 0 || ciphertext_len % SM4_BLOCK_SIZE != 0) return NULL;
     const size_t blocks = ciphertext_len / SM4_BLOCK_SIZE;
     uint8_t* output = s_malloc(ciphertext_len);
     uint32_t rk[32];
@@ -39,9 +40,10 @@ static uint8_t* sm4_decrypt_ecb(const uint8_t* key, const uint8_t* ciphertext,
         sm4_decrypt_block(ciphertext + i * SM4_BLOCK_SIZE, 
                           output + i * SM4_BLOCK_SIZE, rk);
     }
-    size_t unpadded_len;
+    cipher_secure_zero(rk, sizeof(rk));
+    size_t unpadded_len = 0;
     uint8_t* unpadded_data = rm_pkcs7_padding(output, ciphertext_len, &unpadded_len);
-    s_free(output);
+    s_secure_free(output, ciphertext_len);
     *output_len = unpadded_len;
     return unpadded_data;
 }
@@ -57,7 +59,7 @@ static char* sm4_ecb_encrypt(cipher_interface_t* self, const char* text)
                                          text_len, &output_len);
     if (!encrypted) return NULL;
     char* hex_result = bytes_2_hex(encrypted, output_len);
-    s_free(encrypted);
+    s_secure_free(encrypted, output_len);
     return hex_result;
 }
 
@@ -71,12 +73,12 @@ static char* sm4_ecb_decrypt(cipher_interface_t* self, const char* hex)
     if (!bytes) return NULL;
     size_t output_len;
     uint8_t* decrypted = sm4_decrypt_ecb(data->key, bytes, bytes_len, &output_len);
-    s_free(bytes);
+    s_secure_free(bytes, bytes_len);
     if (!decrypted) return NULL;
     char* result = s_malloc(output_len + 1);
     memcpy(result, decrypted, output_len);
     result[output_len] = '\0';
-    s_free(decrypted);
+    s_secure_free(decrypted, output_len);
     return result;
 }
 
@@ -84,7 +86,7 @@ static void sm4_ecb_destroy(cipher_interface_t* self)
 {
     if (self)
     {
-        s_free(self->private_data);
+        s_secure_free(self->private_data, sizeof(sm4_ecb_data_t));
         s_free(self);
     }
 }
