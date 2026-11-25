@@ -367,3 +367,8 @@ Push 45556011612 / PR 45556017456 success，NETWORK_CHANGE_PASS active_cycles=20
 ### 第十二批 UI 回归修正（基线 64f492a）
 
 Push 45556478832 / PR 45556488266 failure，构建、基础离线、110次核心均通过，UI_LAYOUT_COMBO_CLIPPED；后续测试/签名/漏洞核查/上传跳过。原生 ComboBox 未设置 FormattingEnabled，存在 .NET Framework 旧高度兼容计算与实际高度差异；启用修正路径，按实际/首选高度布置、实际高度居中、保留原断言并增加 itemHeight、文字与选择不变量，输出精确尺寸诊断；按钮布局模式使用固定目标间距。未确认唯一根因，最新 CI 待验证。滚动、GDI 压力尚未扩展，main 未修改。
+
+
+### 第十二批第二次 UI 回归修正（3ea40cd）
+
+Push 45557447103 / PR 45557455447 failure；构建与基础离线通过；两次均 UI_LAYOUT_COMBO_CLIPPED scale=2 size=500×430 variant=0 actual=40 preferred=43 itemHeight=32 textHeight=35 font=19 formatting=True dpi=96。其余UI后续门禁跳过。FormattingEnabled 不能单独修复原生高度差；采用 OwnerDrawFixed 及实际文本度量设置选项高度与下拉高度，CB_GETITEMHEIGHT 验证实际原生列表与选择区，保留原断言、选择不变量及36组合。新增绘制仍待 CI 与实机视觉/键盘验证；滚动和GDI压力未实施，main 未修改。

@@ -1265,7 +1265,7 @@ internal static class Program
 
         private readonly TextBox account = new TextBox();
         private readonly TextBox password = new TextBox();
-        private readonly ComboBox channel = new ComboBox();
+        private readonly AdaptiveDeviceCombo channel = new AdaptiveDeviceCombo();
         private readonly CheckBox remember = new CheckBox();
         private readonly ModernButton connect = new ModernButton();
         private readonly ModernButton stop = new ModernButton();
@@ -1430,10 +1430,9 @@ internal static class Program
             AddField(authLayout, "密码", passwordBox, 2);
 
             // Channel field
-            // FormattingEnabled selects the corrected native combo-height calculation
-            // in .NET Framework rather than the legacy Everett compatibility path.
-            channel.FormattingEnabled = true;
-            channel.DropDownStyle = ComboBoxStyle.DropDownList; channel.FlatStyle = FlatStyle.Flat; channel.Font = new Font("Microsoft YaHei UI", 9.5F);
+            // Keep native selection, keyboard and accessibility semantics. The fixed
+            // owner-drawn items have a measured height instead of OS default metrics.
+            channel.Font = new Font("Microsoft YaHei UI", 9.5F);
             channel.Items.AddRange(new object[] { "Windows", "Linux", "Android", "iOS", "macOS" }); channel.SelectedIndex = 0;
             var channelBox = new InputContainer(channel) { Dock = DockStyle.Fill, Height = 32, Margin = new Padding(0, 2, 0, 2), Padding = new Padding(6, 4, 6, 4), BackColor = CardBgColor };
             AddField(authLayout, "设备类型", channelBox, 3);
@@ -1563,6 +1562,7 @@ internal static class Program
                         authHeader.ColumnStyles[1].Width = authSubtitleWidth;
                         int authTitleHeight = Math.Max(MeasureWrapped(g, authTitle.Text, authTitle.Font, Math.Max(px(60), innerWidth - authSubtitleWidth)),
                             MeasureWrapped(g, authSubtitle.Text, authSubtitle.Font, Math.Max(px(60), authSubtitleWidth - authSubtitle.Margin.Horizontal))) + px(12);
+                        channel.ApplyItemMetrics(g);
                         int fieldHeight = Math.Max(px(44), Math.Max(account.PreferredHeight + accountBox.Padding.Vertical,
                             Math.Max(password.PreferredHeight + passwordBox.Padding.Vertical + px(8),
                             Math.Max(channel.PreferredHeight, channel.Height) + channelBox.Padding.Vertical)) + px(10));
@@ -1964,12 +1964,16 @@ internal static class Program
                         int textHeight = 0;
                         foreach (object item in combo.Items)
                             textHeight = Math.Max(textHeight, MeasureLine(g, combo.GetItemText(item), combo.Font).Height);
+                        var adaptive = combo as AdaptiveDeviceCombo;
+                        int nativeSelection = adaptive == null ? -1 : adaptive.ReadNativeItemHeight(-1);
+                        int nativeList = adaptive == null ? -1 : adaptive.ReadNativeItemHeight(0);
                         if (combo.Height < combo.PreferredHeight || combo.ClientSize.Height < textHeight ||
-                            combo.ItemHeight < textHeight)
+                            combo.ItemHeight < textHeight || nativeSelection < textHeight || nativeList < textHeight)
                         {
                             Console.WriteLine("UI_LAYOUT_COMBO_CLIPPED " + stage +
                                 " actual=" + combo.Height + " preferred=" + combo.PreferredHeight +
                                 " itemHeight=" + combo.ItemHeight + " textHeight=" + textHeight +
+                                " nativeSelection=" + nativeSelection + " nativeList=" + nativeList +
                                 " client=" + combo.ClientSize + " font=" + combo.Font.Size +
                                 " formatting=" + combo.FormattingEnabled + " dpi=" + g.DpiY);
                             return false;
@@ -2734,6 +2738,58 @@ internal static class Program
                     using (var brush = new SolidBrush(CardBgColor)) e.Graphics.FillPath(brush, path);
                     using (var pen = new Pen(Color.FromArgb(226, 232, 240), 1f)) e.Graphics.DrawPath(pen, path);
                 }
+            }
+        }
+
+        private sealed class AdaptiveDeviceCombo : ComboBox
+        {
+            private const int CB_GETITEMHEIGHT = 0x0154;
+
+            [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+            private static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
+
+            internal AdaptiveDeviceCombo()
+            {
+                FormattingEnabled = true;
+                DropDownStyle = ComboBoxStyle.DropDownList;
+                FlatStyle = FlatStyle.Standard;
+                DrawMode = DrawMode.OwnerDrawFixed;
+                AccessibleName = "设备类型";
+                MaxDropDownItems = 5;
+            }
+
+            internal void ApplyItemMetrics(Graphics graphics)
+            {
+                int textHeight = MeasureLine(graphics, "Windows", Font).Height;
+                foreach (object item in Items)
+                    textHeight = Math.Max(textHeight, MeasureLine(graphics, GetItemText(item), Font).Height);
+                int padding = Math.Max(4, (int)Math.Ceiling(6 * graphics.DpiY / 96F));
+                int needed = textHeight + padding;
+                if (ItemHeight != needed) ItemHeight = needed;
+                int dropHeight = needed * Math.Max(1, Math.Min(Items.Count, MaxDropDownItems)) + 4;
+                if (DropDownHeight != dropHeight) DropDownHeight = dropHeight;
+            }
+
+            internal int ReadNativeItemHeight(int index)
+            {
+                if (!IsHandleCreated) return -1;
+                return SendMessage(Handle, CB_GETITEMHEIGHT, new IntPtr(index), IntPtr.Zero).ToInt32();
+            }
+
+            protected override void OnDrawItem(DrawItemEventArgs e)
+            {
+                e.DrawBackground();
+                if (e.Index >= 0 && e.Index < Items.Count)
+                {
+                    Rectangle area = e.Bounds;
+                    int inset = Math.Max(2, (int)Math.Ceiling(4 * e.Graphics.DpiX / 96F));
+                    area.Inflate(-inset, 0);
+                    Color color = Enabled ? e.ForeColor : SystemColors.GrayText;
+                    TextRenderer.DrawText(e.Graphics, GetItemText(Items[e.Index]), Font, area, color,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+                }
+                e.DrawFocusRectangle();
+                base.OnDrawItem(e);
             }
         }
 
