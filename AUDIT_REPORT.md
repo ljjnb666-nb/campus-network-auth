@@ -337,3 +337,8 @@ Push 45552326254 / PR 45552334588 success；OPERATION_MATRIX_PASS cases=256、UI
 ### 第九批回归修复（74e9f5b）
 
 Push 45552962416 / PR 45552969825 failure，APP_CYCLE_START_FAIL cycle=0/1。原日志无法区分失败条件，不宣称已确定唯一根因。离线 probe 的 sleep_ms(...,true) 依赖生产状态标志，改为显式 probe_ready 与有界 STOP/EOF 等待，超时非零。测试增加握手、真实 STOP ACK、实际排空证据及脱敏细粒度失败输出，不取消任何门禁。新 CI 待验证；未执行真实服务/校园网，main 未修改。
+
+
+### 生命周期第二轮回归修复（基线 8b8bd74）
+
+两次 CI 45553627347 / 45553634310 failure，详细日志 APP_CYCLE_START_FAIL cycle=1/0：pending=False ready=False missing=True phase=Idle 而 connect=False stop=True prepare=False restore=False recover=False，随后 UI_TEST_ERROR InvalidOperationException。提示异步中间状态/上下文问题，但未证明唯一根因。新独立 STA WinForms 消息循环门禁，等待共享 ConnectCommandAsync，显式 UI 线程检查及回调屏障，前置占用至启动结束、STOP ACK 排序；不减轮次或断言，新 CI 待证实。未操作实际服务/校园网，main 未变。

@@ -56,6 +56,7 @@ internal static class Program
         if (args.Length == 1 && args[0] == "--self-test-observe") return ObserveTests();
         if (args.Length == 1 && args[0] == "--self-test-credentials") return CredentialTests();
         if (args.Length == 1 && args[0] == "--self-test-ui") return UiTests();
+        if (args.Length == 1 && args[0] == "--self-test-app-lifecycle") return ApplicationLifecycleTests();
         if (args.Length == 1 && args[0] == "--self-test-stub") return StubTestChild();
         if (args.Length == 2 && args[0] == "--self-test-credential-read") return CredentialReadTest(args[1]);
         if (args.Length != 0) return 2;
@@ -1159,11 +1160,6 @@ internal static class Program
                 fifth.Show(); Application.DoEvents();
                 if (!fifth.CheckServiceRecoveryForTest(dir)) return 1;
             }
-            using (var lifecycle = new MainWindow(dir, true))
-            {
-                lifecycle.Show(); Application.DoEvents();
-                if (!lifecycle.CheckRepeatedApplicationLifecycleForTest()) return 1;
-            }
             // Repeated direct Dispose must clean resources even without FormClosed.
             for (int i = 0; i < 5; i++)
             {
@@ -1182,6 +1178,42 @@ internal static class Program
         {
             CleanupCore(); // 崩溃注入测试释放过核心，统一清理
             try { if (File.Exists(store.FilePath)) File.Delete(store.FilePath); } catch { }
+            try { if (Directory.Exists(dir)) Directory.Delete(dir, false); } catch { }
+        }
+    }
+
+    private static int ApplicationLifecycleTests()
+    {
+        string dir = Path.Combine(Path.GetFullPath(Path.GetTempPath()), "ChezhiAppLifecycle-" + Guid.NewGuid().ToString("N"));
+        int result = 1;
+        try
+        {
+            Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
+            Control.CheckForIllegalCrossThreadCalls = true;
+            using (var window = new MainWindow(dir, true))
+            {
+                window.Shown += async delegate {
+                    try
+                    {
+                        // A dedicated, real WinForms message loop owns all UI continuations.
+                        if (!(System.Threading.SynchronizationContext.Current is WindowsFormsSynchronizationContext))
+                            throw new InvalidOperationException("Missing WinForms synchronization context.");
+                        result = await window.CheckRepeatedApplicationLifecycleForTestAsync() ? 0 : 1;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine("APP_LIFECYCLE_ERROR " + ex.GetType().Name + "\n" + ex.StackTrace);
+                    }
+                    finally { Application.ExitThread(); }
+                };
+                Application.Run(window);
+            }
+            return result;
+        }
+        catch (Exception ex) { Console.WriteLine("APP_LIFECYCLE_HOST_ERROR " + ex.GetType().Name + "\n" + ex.StackTrace); return 1; }
+        finally
+        {
+            CleanupCore();
             try { if (Directory.Exists(dir)) Directory.Delete(dir, false); } catch { }
         }
     }
@@ -1956,9 +1988,17 @@ internal static class Program
             }
         }
 
-        internal bool CheckRepeatedApplicationLifecycleForTest()
+        private Task FlushUiEventsForTest()
         {
-            if (!isSelfTest) return false;
+            var done = new TaskCompletionSource<bool>();
+            BeginInvoke((Action)delegate { done.SetResult(true); });
+            return done.Task;
+        }
+
+        internal async Task<bool> CheckRepeatedApplicationLifecycleForTestAsync()
+        {
+            if (!isSelfTest || InvokeRequired) return false;
+            int uiThread = System.Threading.Thread.CurrentThread.ManagedThreadId;
             ExtractCore();
             const int seed = 20261125, cycles = 100;
             var random = new Random(seed);
@@ -1980,16 +2020,20 @@ internal static class Program
                 {
                     int scenario = scenarios[cycle];
                     observeHandoff = delegate { return new HandoffObservation(ConnectionStates.ServiceState.Stopped, 0); };
-                    // Invoke the real UI command; injected observation never requests elevation.
-                    ConnectClicked(connect, EventArgs.Empty);
+                    // Same awaited command as the actual click handler, not a second test-only implementation.
+                    Task command = ConnectCommandAsync();
+                    if (await Task.WhenAny(command, Task.Delay(5000)) != command)
+                    { Console.WriteLine("APP_COMMAND_TIMEOUT cycle=" + cycle); return false; }
+                    await command; // observe the original exception, if any
+                    if (InvokeRequired || uiThread != System.Threading.Thread.CurrentThread.ManagedThreadId)
+                        throw new InvalidOperationException("Lifecycle continuation left UI thread.");
                     var clock = Stopwatch.StartNew();
-                    while ((connectCheckPending || !offlineProbeReady) && clock.ElapsedMilliseconds < 5000)
+                    while (!offlineProbeReady && clock.ElapsedMilliseconds < 5000)
                     {
-                        Application.DoEvents();
-                        if (!connectCheckPending && (running == null || Object.ReferenceEquals(running, completedProcess) || running.HasExited)) break;
-                        System.Threading.Thread.Sleep(5);
+                        if (running == null || Object.ReferenceEquals(running, completedProcess) || running.HasExited) break;
+                        await Task.Delay(10);
                     }
-                    Application.DoEvents();
+                    await FlushUiEventsForTest();
                     Process child = running;
                     if (connectCheckPending || !offlineProbeReady || child == null || Object.ReferenceEquals(child, completedProcess) ||
                         Object.ReferenceEquals(child, previous) || child.HasExited ||
@@ -2013,7 +2057,7 @@ internal static class Program
                         OnCoreStatus(previous, "auth_failed");
                         OnCoreStatus(previous, "network_online");
                         OnCoreExit(previous);
-                        Application.DoEvents();
+                        await FlushUiEventsForTest();
                         if (state.Auth != ConnectionStates.AuthState.Authenticating ||
                             state.Network != ConnectionStates.NetworkState.Unknown) return false;
                     }
@@ -2049,7 +2093,7 @@ internal static class Program
                             break;
                     }
                     foreach (string token in events) OnCoreStatus(child, token);
-                    Application.DoEvents();
+                    await FlushUiEventsForTest();
                     if (state.Auth != expected || state.Network != expectedNetwork ||
                         (scenario == 2 && state.Failure != ConnectionStates.FailureKind.Authentication) ||
                         (scenario == 3 && (state.Failure != ConnectionStates.FailureKind.Runtime || retryEligible)) ||
@@ -2060,8 +2104,8 @@ internal static class Program
                     // Exercise the real process Exited callback and reader drain, not a synthetic exit.
                     clock.Restart();
                     while (!Object.ReferenceEquals(completedProcess, child) && clock.ElapsedMilliseconds < 10000)
-                    { Application.DoEvents(); System.Threading.Thread.Sleep(5); }
-                    Application.DoEvents();
+                        await Task.Delay(10);
+                    await FlushUiEventsForTest();
                     if (!Object.ReferenceEquals(completedProcess, child) || !child.HasExited || child.ExitCode != 0 ||
                         !lastCoreReadersDrained || !offlineProbeStopAccepted ||
                         state.Auth != ConnectionStates.AuthState.Idle || state.Network != ConnectionStates.NetworkState.Unknown ||
@@ -2862,6 +2906,11 @@ internal static class Program
 
         private async void ConnectClicked(object sender, EventArgs e)
         {
+            await ConnectCommandAsync();
+        }
+
+        private async Task ConnectCommandAsync()
+        {
             if (!CurrentPermissions().CanConnect) return;
             string invalid = ValidateAuthInput(account.Text, password.Text, channel.SelectedIndex + 1);
             if (invalid != null) { SetStatus(invalid, ToneWarn); return; }
@@ -2963,22 +3012,26 @@ internal static class Program
                         ConnectionStates.HandoffState.PreparationRequired : ConnectionStates.HandoffState.Blocked, HandoffMessage(decision), ToneWarn);
                     return;
                 }
+                if (HandoffCancelled(generation, true)) return;
+                // Keep preflight ownership until the synchronous launch has returned.
+                state.SetHandoff(ConnectionStates.HandoffState.None);
+                StartAuthProcess(isSelfTest && offlineLifecycleProbe ? "--ephemeral-probe" : "--ephemeral-auth");
                 ready = true;
             }
-            catch { if (!HandoffCancelled(generation, true)) SetHandoff(ConnectionStates.HandoffState.Blocked, "无法检查天翼环境，请稍后重试。", ToneWarn); }
+            catch
+            {
+                if (isSelfTest) throw;
+                if (!HandoffCancelled(generation, true)) SetHandoff(ConnectionStates.HandoffState.Blocked, "无法检查天翼环境，请稍后重试。", ToneWarn);
+            }
             finally
             {
                 connectCheckPending = false;
                 if (!IsDisposed && !Disposing)
                 {
-                    if (!ready || HandoffCancelled(generation, true))
-                    { activeTask = null; RefreshOperationPermissions(); }
-                    // On success, do not briefly expose idle permissions before the synchronous launch.
+                    if (!ready || HandoffCancelled(generation, true)) activeTask = null;
+                    RefreshOperationPermissions();
                 }
             }
-            if (!ready || HandoffCancelled(generation, true)) return;
-            state.SetHandoff(ConnectionStates.HandoffState.None);
-            StartAuthProcess(isSelfTest && offlineLifecycleProbe ? "--ephemeral-probe" : "--ephemeral-auth");
         }
 
         // The actual process always uses the immutable, user-authorized task snapshot.

@@ -55,10 +55,12 @@ static int ephemeral_stop_reader(void* unused)
     {
         if (!discard && (strcmp(command, "STOP\n") == 0 || strcmp(command, "STOP\r\n") == 0))
         {
-            request_ephemeral_stop();
+            // Publish acceptance before releasing the stop condition; otherwise the
+            // probe can exit between setting the flag and flushing its ACK.
             fputs("EPHEMERAL_STOP_ACCEPTED\n", stderr);
             fflush(stderr);
             ephemeral_emit_event("stop_accepted", 0);
+            request_ephemeral_stop();
             return 0;
         }
         discard = strchr(command, '\n') == NULL;

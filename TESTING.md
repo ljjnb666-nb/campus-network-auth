@@ -113,3 +113,8 @@ APP_LIFECYCLE_PASS cycles=100 seed=20261125：一个真实 WinForms 窗口，通
 ## 离线探针握手回归修正
 
 74e9f5b Push 45552962416 / PR 45552969825 均在 APP_CYCLE_START_FAIL 失败（cycle=0/1），其余此前步骤成功；签名、漏洞扫描、上传均跳过。探针不再使用生产可中断休眠条件，新增 probe_ready，最多30秒等待 STOP/EOF，超时退出4。生命周期测试等待真实握手、逐轮要求 STOP ACK 与读任务排空，启动/停止失败打印非敏感状态字段。不是已确认唯一根因；保留100轮及全部原断言，待新 CI 证据。
+
+
+## 独立真实消息循环生命周期门禁
+
+8b8bd74 Push 45553627347 / PR 45553634310 失败：pending=False、missing=True、phase=Idle，但按钮仍为 preflight 权限，随后 InvalidOperationException；不能证明 native probe 退出是原因。改为独立 --self-test-app-lifecycle 进程及 Application.Run，验证 WinForms 同步上下文与 UI 线程，直接等待与点击事件共用的 ConnectCommandAsync Task，事件通过 BeginInvoke 屏障排队，不轮询中间标志或嵌套 DoEvents。前置检查持有权限至同步启动结束，STOP ACK 在设置停止条件之前刷新。100轮及原断言、ready/ack/drain全部保留，独立CI步骤5分钟超时，失败阻断；最新CI待验证。

@@ -99,6 +99,14 @@ jobs:
           Write-Host "UI test exit: $($p.ExitCode)"
           if ($p.ExitCode -ne 0) { throw "UI self-test failed: $($p.ExitCode)" }
 
+      - name: Offline application lifecycle (100 cycles, real message loop)
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath 'build-core\澈知科技-源码重建.exe' -ArgumentList '--self-test-app-lifecycle' -Wait -PassThru -NoNewWindow
+          Write-Host "Application lifecycle test exit: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "Application lifecycle self-test failed: $($p.ExitCode)" }
+
       - name: Authenticode regression (signed and tampered fixture)
         shell: pwsh
         run: |
