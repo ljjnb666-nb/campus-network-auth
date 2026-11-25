@@ -1328,7 +1328,7 @@ internal static class Program
         private readonly StatusCard statusCard = new StatusCard();
         private readonly TableLayoutPanel statusRow = new TableLayoutPanel();
         private Action reflowLayout;
-        private bool layoutBusy;
+        private bool layoutBusy, layoutRefreshQueued;
         private Panel scrollRoot;
         private TableLayoutPanel mainLayout;
 
@@ -1565,8 +1565,11 @@ internal static class Program
                             channel.PreferredHeight + channelBox.Padding.Vertical)) + px(10));
                         passInner.ColumnStyles[1].Width = Math.Max(px(62), MeasureLine(g, "隐藏", reveal.Font).Width + px(20));
                         int rememberHeight = Math.Max(px(32), MeasureWrapped(g, remember.Text, remember.Font, Math.Max(px(60), innerWidth - px(28))) + px(12));
-                        int actionHeight = Math.Max(px(54), Math.Max(MeasureLine(g, "立即连接", connect.Font).Height,
-                            MeasureLine(g, "强制结束", stop.Font).Height) + px(24));
+                        int actionButtonHeight = Math.Max(px(48), Math.Max(MeasureLine(g, "立即连接", connect.Font).Height,
+                            Math.Max(MeasureLine(g, "正在停止…", stop.Font).Height, MeasureLine(g, "保存账号", save.Font).Height)) + px(20));
+                        int actionHeight = ReflowButtonGroup(actionGrid, new[] { connect, stop, save },
+                            new[] { "立即连接", "正在停止…", "保存账号" }, new[] { 44F, 28F, 28F },
+                            g, innerWidth, actionButtonHeight, px(12)) + actionGrid.Margin.Vertical;
                         authLayout.RowStyles[0].Height = authTitleHeight;
                         for (int i = 1; i <= 3; i++) authLayout.RowStyles[i].Height = fieldHeight;
                         authLayout.RowStyles[4].Height = rememberHeight;
@@ -1578,7 +1581,11 @@ internal static class Program
                         toolHeader.ColumnStyles[1].Width = toolSubtitleWidth;
                         int toolTitleHeight = Math.Max(MeasureWrapped(g, toolTitle.Text, toolTitle.Font, Math.Max(px(60), toolInnerWidth - toolSubtitleWidth)),
                             MeasureWrapped(g, toolSubtitle.Text, toolSubtitle.Font, Math.Max(px(60), toolSubtitleWidth - toolSubtitle.Margin.Horizontal))) + px(12);
-                        int toolButtonHeight = Math.Max(px(46), MeasureLine(g, "准备连接", prepare.Font).Height + px(20));
+                        int toolButtonHeight = ReflowButtonGroup(toolGrid, new[] { prepare, restore, hotspot },
+                            new[] { "准备连接", "恢复天翼", "热点设置" }, new[] { 33.33F, 33.33F, 33.34F },
+                            g, toolInnerWidth, Math.Max(px(42), Math.Max(MeasureLine(g, "准备连接", prepare.Font).Height,
+                                Math.Max(MeasureLine(g, "恢复天翼", restore.Font).Height, MeasureLine(g, "热点设置", hotspot.Font).Height)) + px(16)),
+                            px(12)) + toolGrid.Margin.Vertical;
                         toolLayout.RowStyles[0].Height = toolTitleHeight;
                         toolLayout.RowStyles[1].Height = toolButtonHeight;
                         layout.RowStyles[4].Height = toolTitleHeight + toolButtonHeight + toolLayout.Padding.Vertical + toolCard.Margin.Vertical + px(4);
@@ -1587,8 +1594,10 @@ internal static class Program
                         layout.RowStyles[6].Height = Math.Max(px(52), MeasureWrapped(g, status.Text, status.Font,
                             Math.Max(px(80), available - statusRow.Padding.Horizontal - px(36))) + px(18) + statusCard.Margin.Vertical);
                         footer.ColumnStyles[1].Width = MeasureLine(g, exit.Text, exit.Font).Width + px(16);
-                        layout.RowStyles[8].Height = Math.Max(px(30), Math.Max(MeasureLine(g, about.Text, about.Font).Height,
-                            MeasureLine(g, exit.Text, exit.Font).Height) + px(12));
+                        layout.RowStyles[8].Height = Math.Max(px(30), Math.Max(
+                            MeasureWrapped(g, about.Text, about.Font, Math.Max(1, available - footer.Padding.Horizontal -
+                                (int)footer.ColumnStyles[1].Width - about.Margin.Horizontal)),
+                            MeasureWrapped(g, exit.Text, exit.Font, Math.Max(1, (int)footer.ColumnStyles[1].Width - exit.Margin.Horizontal))) + px(12));
                         for (int i = 1; i < 8; i += 2) layout.RowStyles[i].Height = px(12);
                         int total = 0;
                         foreach (RowStyle style in layout.RowStyles) total += (int)Math.Ceiling(style.Height);
@@ -1603,6 +1612,12 @@ internal static class Program
             };
             root.SizeChanged += delegate { RefreshAdaptiveLayout(); };
             status.TextChanged += delegate { RefreshAdaptiveLayout(); };
+            foreach (Control control in Descendants(layout))
+                if (control is Label || control is Button || control is CheckBox || control is TextBox ||
+                    control is ComboBox || control is StatusPill)
+                    control.FontChanged += delegate { QueueAdaptiveLayout(); };
+            connect.TextChanged += delegate { QueueAdaptiveLayout(); };
+            stop.TextChanged += delegate { QueueAdaptiveLayout(); };
             AcceptButton = connect;
 
             try
@@ -1740,9 +1755,51 @@ internal static class Program
                 TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix).Height;
         }
 
+        // Use a full-width vertical group only when the regular columns cannot
+        // fit the actual font metrics. No controls are recreated during reflow.
+        private static int ReflowButtonGroup(TableLayoutPanel grid, ModernButton[] buttons,
+            string[] longestLabels, float[] weights, Graphics graphics, int available, int height, int padding)
+        {
+            bool stacked = false;
+            for (int i = 0; i < buttons.Length; i++)
+            {
+                int needed = Math.Max(MeasureLine(graphics, buttons[i].Text, buttons[i].Font).Width,
+                    MeasureLine(graphics, longestLabels[i], buttons[i].Font).Width) + padding * 2 + buttons[i].Margin.Horizontal;
+                if (available * weights[i] / 100F < needed) stacked = true;
+            }
+            int rows = stacked ? buttons.Length : 1, columns = stacked ? 1 : buttons.Length;
+            if (grid.RowCount != rows || grid.ColumnCount != columns)
+            {
+                grid.SuspendLayout();
+                try
+                {
+                    grid.Controls.Clear();
+                    grid.RowStyles.Clear(); grid.ColumnStyles.Clear();
+                    grid.RowCount = rows; grid.ColumnCount = columns;
+                    for (int i = 0; i < rows; i++) grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100F / rows));
+                    for (int i = 0; i < columns; i++) grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, stacked ? 100F : weights[i]));
+                    for (int i = 0; i < buttons.Length; i++) grid.Controls.Add(buttons[i], stacked ? 0 : i, stacked ? i : 0);
+                }
+                finally { grid.ResumeLayout(true); }
+            }
+            // Include a vertical gap in stacked mode; retain a stable horizontal margin.
+            for (int i = 0; i < buttons.Length; i++)
+                buttons[i].Margin = stacked ? new Padding(0, 0, 0, i == buttons.Length - 1 ? 0 : padding / 2) :
+                    new Padding(0, 0, i == buttons.Length - 1 ? 0 : 8, 0);
+            return rows * (height + (stacked ? padding / 2 : 0));
+        }
+
+        private void QueueAdaptiveLayout()
+        {
+            if (layoutRefreshQueued || IsDisposed || Disposing || resourcesDisposed || !IsHandleCreated) return;
+            layoutRefreshQueued = true;
+            try { BeginInvoke((Action)delegate { layoutRefreshQueued = false; RefreshAdaptiveLayout(); }); }
+            catch (InvalidOperationException) { layoutRefreshQueued = false; }
+        }
+
         private void RefreshAdaptiveLayout()
         {
-            if (reflowLayout != null) reflowLayout();
+            if (!IsDisposed && !Disposing && !resourcesDisposed && reflowLayout != null) reflowLayout();
         }
 
         private void FitInitialWindow()
@@ -1786,24 +1843,47 @@ internal static class Program
             Size original = Size;
             var fonts = new Dictionary<Control, Font>();
             var enlarged = new List<Font>();
-            string oldStatus = status.Text;
+            string oldStatus = status.Text, oldConnect = connect.Text, oldStop = stop.Text;
+            int cases = 0;
             try
             {
                 RefreshAdaptiveLayout(); Application.DoEvents();
                 if (!CheckLayoutBounds(mainLayout, "normal")) return false;
-                // Exercise increased font metrics, not a claim of real monitor DPI.
                 foreach (Control c in Descendants(mainLayout))
                 {
                     if (!(c is Label || c is Button || c is CheckBox || c is TextBox || c is ComboBox || c is StatusPill)) continue;
                     fonts[c] = c.Font;
-                    var f = new Font(c.Font.FontFamily, c.Font.Size * 1.25F, c.Font.Style);
-                    enlarged.Add(f); c.Font = f;
                 }
-                Width = MinimumSize.Width;
-                Height = Math.Max(MinimumSize.Height, Math.Min(original.Height, 500));
-                status.Text = "正在等待接入校园网，请检查电脑的 Wi-Fi 或网线连接；如遇网络异常，可停止并重新连接。";
-                RefreshAdaptiveLayout(); Application.DoEvents();
-                if (!CheckLayoutBounds(mainLayout, "enlarged-narrow")) return false;
+                float[] scales = { 1F, 1.25F, 1.5F, 2F };
+                Size[] sizes = { MinimumSize, new Size(Math.Max(MinimumSize.Width, 620), Math.Max(MinimumSize.Height, 540)),
+                    new Size(Math.Max(MinimumSize.Width, 820), Math.Max(MinimumSize.Height, 720)) };
+                string[] messages = { "输入校园网账号和密码，点击“立即连接”即可。",
+                    "正在等待接入校园网，请检查电脑的 Wi-Fi 或网线连接；如遇网络异常，可停止并重新连接。",
+                    "系统服务正在切换。请不要关闭程序或重复连接，等待服务实际状态确认及事务记录保存完成后再重新选择操作。" };
+                foreach (float scale in scales)
+                {
+                    foreach (var item in fonts)
+                    {
+                        var f = new Font(item.Value.FontFamily, item.Value.Size * scale, item.Value.Style);
+                        enlarged.Add(f); item.Key.Font = f;
+                    }
+                    foreach (Size size in sizes)
+                    {
+                        Size = size;
+                        for (int variant = 0; variant < messages.Length; variant++)
+                        {
+                            status.Text = messages[variant];
+                            connect.Text = variant == 0 ? "立即连接" : "连接中…";
+                            stop.Text = variant == 0 ? "停止认证" : variant == 1 ? "正在停止…" : "强制结束";
+                            RefreshAdaptiveLayout(); Application.DoEvents();
+                            string stage = "scale=" + scale.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                                " size=" + Size + " variant=" + variant;
+                            if (!CheckLayoutBounds(mainLayout, stage) || !CheckTableOverlap(mainLayout, stage)) return false;
+                            cases++;
+                        }
+                    }
+                }
+                Console.WriteLine("UI_LAYOUT_MATRIX_PASS cases=" + cases + " font_scales=4 window_sizes=3 status_variants=3");
                 Console.WriteLine("UI_LAYOUT_PASS");
                 return true;
             }
@@ -1811,9 +1891,31 @@ internal static class Program
             {
                 foreach (var item in fonts) item.Key.Font = item.Value;
                 foreach (Font font in enlarged) font.Dispose();
-                status.Text = oldStatus; Size = original;
+                status.Text = oldStatus; connect.Text = oldConnect; stop.Text = oldStop; Size = original;
                 RefreshAdaptiveLayout(); Application.DoEvents();
             }
+        }
+
+        private static bool CheckTableOverlap(Control parent, string stage)
+        {
+            foreach (Control c in Descendants(parent))
+            {
+                var table = c as TableLayoutPanel;
+                if (table == null) continue;
+                for (int i = 0; i < table.Controls.Count; i++)
+                    for (int j = i + 1; j < table.Controls.Count; j++)
+                    {
+                        Control first = table.Controls[i], second = table.Controls[j];
+                        if (!first.Visible || !second.Visible) continue;
+                        Rectangle overlap = Rectangle.Intersect(first.Bounds, second.Bounds);
+                        if (overlap.Width > 2 && overlap.Height > 2)
+                        {
+                            Console.WriteLine("UI_LAYOUT_OVERLAP " + stage + " " + first.GetType().Name + " " + second.GetType().Name);
+                            return false;
+                        }
+                    }
+            }
+            return true;
         }
 
         private static IEnumerable<Control> Descendants(Control parent)
@@ -1852,6 +1954,10 @@ internal static class Program
                     var combo = c as ComboBox;
                     if (combo != null && combo.Height < combo.PreferredHeight)
                     { Console.WriteLine("UI_LAYOUT_COMBO_CLIPPED"); return false; }
+                    var pill = c as StatusPill;
+                    if (pill != null && (MeasureLine(g, "等待天翼退出", pill.Font).Width + (int)Math.Ceiling(30 * g.DpiX / 96F) > pill.ClientSize.Width ||
+                        MeasureLine(g, "等待天翼退出", pill.Font).Height > pill.ClientSize.Height))
+                    { Console.WriteLine("UI_LAYOUT_PILL_CLIPPED " + stage); return false; }
                     if (c.Parent != null && c.Parent != scrollRoot &&
                         (c.Left < -2 || c.Top < -2 || c.Right > c.Parent.ClientSize.Width + 2 || c.Bottom > c.Parent.ClientSize.Height + 2))
                     { Console.WriteLine("UI_LAYOUT_OUTSIDE " + stage + " " + c.GetType().Name + " child=" + c.Bounds + " parent=" + c.Parent.GetType().Name + " size=" + c.Parent.ClientSize); return false; }
