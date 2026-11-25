@@ -188,17 +188,27 @@ typedef struct
 
 typedef struct
 {
-    bool is_initialized;
-    bool is_running;
-    bool is_authed;
-    bool is_need_reauth;
-    bool is_time_disabled;
+    atomic_bool is_initialized;
+    atomic_bool is_running;
+    atomic_bool is_authed;
+    atomic_bool is_need_reauth;
+    atomic_bool is_time_disabled;
     uint8_t last_error_kind;
     uint64_t last_error_at;
     char last_error_code[AUTH_ERROR_CODE_LEN];
     char last_sub_error[AUTH_ERROR_CODE_LEN];
     char last_error_msg[AUTH_ERROR_MSG_LEN];
 } runtime_status_t;
+
+/* Only call for fresh, unpublished or fully quiescent account storage. */
+static inline void runtime_status_init(runtime_status_t* status)
+{
+    atomic_init(&status->is_initialized, false);
+    atomic_init(&status->is_running, false);
+    atomic_init(&status->is_authed, false);
+    atomic_init(&status->is_need_reauth, false);
+    atomic_init(&status->is_time_disabled, false);
+}
 
 typedef struct
 {
