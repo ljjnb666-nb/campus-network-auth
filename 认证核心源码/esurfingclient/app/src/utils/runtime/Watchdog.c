@@ -78,14 +78,18 @@ static bool claim_timeout(_Atomic uint64_t* state, uint64_t observed)
     return atomic_compare_exchange_strong(state, &observed, firing);
 }
 
+static bool try_publish_pet(_Atomic uint64_t* state, uint64_t observed, uint32_t budget)
+{
+    if (!snapshot_running(observed)) return false;
+    const uint64_t next = next_pet(observed, budget);
+    /* Never retry across a changed snapshot: a concurrent pet has already
+     * published progress, or a stop/restart invalidated this observation. */
+    return atomic_compare_exchange_strong(state, &observed, next);
+}
+
 static void publish_pet(_Atomic uint64_t* state, uint32_t budget)
 {
-    uint64_t old = atomic_load(state);
-    while (snapshot_running(old))
-    {
-        const uint64_t next = next_pet(old, budget);
-        if (atomic_compare_exchange_weak(state, &old, next)) return;
-    }
+    (void)try_publish_pet(state, atomic_load(state), budget);
 }
 
 static void request_watchdog_stop(_Atomic uint64_t* state)
@@ -203,7 +207,11 @@ static int watchdog_app(void* arg)
         const uint64_t now = pet_now;
         const uint64_t step = now - last_steady;
         const uint64_t wall_now = get_cur_tm_ms();
-        const uint64_t wall_step = wall_now - last_wall;
+        const bool wall_backwards = wall_now < last_wall;
+        const uint64_t wall_step = wall_backwards ? last_wall - wall_now : wall_now - last_wall;
+        const uint64_t clock_difference = wall_backwards
+            ? (wall_step > UINT64_MAX - step ? UINT64_MAX : wall_step + step)
+            : (wall_step > step ? wall_step - step : step - wall_step);
 
         /**
          * 判定开枪之前先看两个钟对不对得上。
@@ -213,12 +221,12 @@ static int watchdog_app(void* arg)
          * 真卡死时两个钟是一起走的, 这里不会成立, 该开枪还是开枪。
          * 顺带把墙钟为什么对不上记进日志, 否则下次还得靠人工拿两条时间戳相减去猜。
          */
-        if (step + WATCHDOG_CLOCK_JUMP_MS < wall_step || wall_step + WATCHDOG_CLOCK_JUMP_MS < step)
+        if (clock_difference > WATCHDOG_CLOCK_JUMP_MS)
         {
             char moved[64], elapsed[64];
-            format_duration(wall_step > step ? wall_step - step : step - wall_step, moved, sizeof(moved));
+            format_duration(clock_difference, moved, sizeof(moved));
             format_duration(step, elapsed, sizeof(elapsed));
-            LOG_WARN("检测到墙钟被调整 (跳变约 %s, 单调钟同期只走了 %s), 已重新计时; "
+            LOG_WARN("检测到墙钟被调整 (跳变约 %s, 单调钟同期只走了 %s), 继续使用单调时钟计时; "
                 "NTP 校时不算主循环卡死", moved, elapsed);
         }
 
@@ -345,7 +353,14 @@ bool watchdog_resource_self_test(void)
     if (snapshot_running(atomic_load(&local))) return false;
     atomic_store(&local, next_pet(atomic_load(&local), 1000));
     if (claim_timeout(&local, stale)) return false;
-    if (!claim_timeout(&local, atomic_load(&local))) return false;
+    /* A pet observed before stop/restart cannot update the replacement. */
+    const uint64_t replacement = atomic_load(&local);
+    if (try_publish_pet(&local, stale, 3000) || atomic_load(&local) != replacement) return false;
+    /* A losing concurrent pet must not overwrite the winning publication. */
+    if (!try_publish_pet(&local, replacement, 4000)) return false;
+    const uint64_t winner = atomic_load(&local);
+    if (try_publish_pet(&local, replacement, 5000) || atomic_load(&local) != winner) return false;
+    if (!claim_timeout(&local, winner)) return false;
     publish_pet(&local, 3000);
     request_watchdog_stop(&local);
     if ((atomic_load(&local) & WD_MODE_MASK) != WD_FIRING) return false;
