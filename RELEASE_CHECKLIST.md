@@ -35,6 +35,13 @@ CI #302（45623785237，`64ed1b5`）Windows/Linux 均成功。已实测通过 PE
 
 后续仅对 GNU PE 链接时间戳采用 --no-insert-timestamp，并增加只读 COFF 时间戳与原始节区哈希对比；不修改已生成产物，不把归一化比较当作真实字节一致。下一次 CI 必须确认实际效果，旧版 C# 编译器不预设支持确定性编译。
 
+### CI #314 更新（历史验收基线）
+
+- `3ed64a5` / [45627343926](https://github.com/ljjnb666-nb/campus-network-auth/actions/runs/45627343926)：Windows 与 Linux 全绿；NATIVE_NET_RESOURCE_PASS、APP_LIFECYCLE_PASS cycles=100、UI_STRESS_PASS measured=100、CYCLONEDX_SCHEMA_VERIFY_PASS、BUILD_EVIDENCE_INDEX_PASS。
+- 原生核心同 runner 两次完整 SHA-256 均为 2DD357146E74BBD2336E8B9196E65482F8A5DA5380F81C6DDBCD8DC0994717CC，COFF 时间戳均为 0，原始节区一致；链接时剥离整改获得验证。GUI C749D11F / 8D5BE4C0 不一致（.text、时间戳），配置一致。项目级可复现性仍 BLOCKED；不得用原生核心通过代替 GUI 或独立环境验证。
+- 统一复审：网速 JSON 构造原先未完整检查分配和所有权转移，并在采样锁内分配。已调整为锁内快照、锁外事务式构造、失败清理和 20 个合成失败点（macOS 21 个）；待新 CI 验证。合成短路故障不是实际内存分配器 OOM 注入或完整泄漏证明。
+- 原有发布阻断不变：签名证书、独立包归档与签名锁、完整第三方公告及动态依赖覆盖、独立复现、真实环境测试、长跑与升级卸载。不得以历史 CI 代替当前 HEAD 验收。
+
 ## 代码签名（当前 BLOCKED：无证书）
 
 - [ ] 取得代码签名证书后对两个 exe 做 Authenticode 签名（时间戳服务器启用）。
