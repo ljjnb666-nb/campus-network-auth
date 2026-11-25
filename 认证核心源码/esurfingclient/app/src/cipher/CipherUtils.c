@@ -98,12 +98,16 @@ uint8_t* pkcs7_padding(const uint8_t* data, const size_t data_len, const size_t 
 
 uint8_t* rm_pkcs7_padding(const uint8_t* data, const size_t data_len, size_t* out_len)
 {
-    if (!data || !out_len || data_len == 0) return NULL;
+    if (!out_len) return NULL;
+    *out_len = 0;
+    if (!data || data_len == 0) return NULL;
     const uint8_t padding = data[data_len - 1];
     if (padding == 0 || padding > data_len) return NULL;
     for (size_t i = data_len - padding; i < data_len; i++) if (data[i] != padding) return NULL;
     const size_t unpadded_len = data_len - padding;
-    uint8_t* unpadded = s_malloc(unpadded_len);
+    /* An all-padding block represents an empty but valid plaintext. */
+    uint8_t* unpadded = s_malloc(unpadded_len ? unpadded_len : 1);
+    if (unpadded_len == 0 && unpadded) unpadded[0] = 0;
     if (!unpadded) return NULL;
     memcpy(unpadded, data, unpadded_len);
     *out_len = unpadded_len;
