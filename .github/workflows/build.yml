@@ -238,6 +238,41 @@ jobs:
         shell: pwsh
         run: ./scripts/New-SourceSbom.ps1
 
+      - name: Diagnose existing CSharp compiler deterministic capability
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+          if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'Missing existing CSharp compiler' }
+          $temp = Join-Path $env:RUNNER_TEMP ('csc-probe-' + [Guid]::NewGuid().ToString('N'))
+          [void](New-Item -ItemType Directory -Path $temp)
+          try {
+            $source = Join-Path $temp 'Probe.cs'
+            [IO.File]::WriteAllText($source, 'public static class Probe { public static int Value() { return 42; } }')
+            $digests = @()
+            $exits = @()
+            foreach ($dir in @('one','two')) {
+              $dest = Join-Path $temp $dir
+              [void](New-Item -ItemType Directory -Path $dest)
+              $dll = Join-Path $dest 'Probe.dll'
+              $output = @(& $compiler '/nologo' '/target:library' '/optimize+' '/deterministic+' "/out:$dll" $source 2>&1)
+              $code = $LASTEXITCODE
+              $exits += $code
+              $output | ForEach-Object { Write-Host "$_" }
+              if ($code -eq 0) {
+                if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) { throw 'Compiler success without output' }
+                $digests += (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash
+              }
+            }
+            $identical = $digests.Count -eq 2 -and $digests[0] -ceq $digests[1]
+            Write-Host "CSC_DETERMINISM_PROBE exits=$($exits -join ',') outputs=$($digests.Count) byteIdentical=$identical"
+            # Diagnostic only: synthetic success does not prove GUI reproducibility.
+            # Unsupported flags or compilation errors leave the release blocker open.
+          } finally {
+            Remove-Item -LiteralPath $temp -Recurse -Force
+          }
+
       - name: Measure same-runner rebuild repeatability
         timeout-minutes: 10
         shell: pwsh
