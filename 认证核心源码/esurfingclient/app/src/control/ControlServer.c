@@ -548,12 +548,17 @@ static bool stop_locked(void)
     return true;
 }
 
-void control_server_stop(void)
+bool control_server_stop_checked(void)
 {
     lifecycle_lock();
     const bool ok = stop_locked();
     lifecycle_unlock();
-    if (!ok) LOG_ERROR("控制通道线程等待失败, 保留线程与套接字");
+    return ok;
+}
+
+void control_server_stop(void)
+{
+    if (!control_server_stop_checked()) LOG_ERROR("控制通道线程等待失败, 保留线程与套接字");
 }
 
 /* A kernel-assigned loopback port, no control command dispatch, no external
