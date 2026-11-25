@@ -362,3 +362,8 @@ Push 45555594052 / PR 45555600124 failure，实际日志 CS1984 (await in finall
 ### 主动审计第十二批（基线 1b55b05）
 
 Push 45556011612 / PR 45556017456 success，NETWORK_CHANGE_PASS active_cycles=20 burst_per_cycle=32 expiry_boundaries=40 service_wait=1 stale_idle=1；100次应用/110次核心（326→331）/256种权限/电源/签名回归/curl双源通过，artifact 14995069094。UI布局审计发现固定比例按钮列、工具按钮高度仅按单个按钮测量、字体变化不主动重排、布局测试只测单档放大。新增按度量切换纵排、最长文案度量、字体重排及36种布局矩阵（含重叠和状态胶囊断言）。新CI待验证；非真实多DPI/分辨率，滚动可达及UI长时间压力尚待实施，main未修改。
+
+
+### 第十二批 UI 回归修正（基线 64f492a）
+
+Push 45556478832 / PR 45556488266 failure，构建、基础离线、110次核心均通过，UI_LAYOUT_COMBO_CLIPPED；后续测试/签名/漏洞核查/上传跳过。原生 ComboBox 未设置 FormattingEnabled，存在 .NET Framework 旧高度兼容计算与实际高度差异；启用修正路径，按实际/首选高度布置、实际高度居中、保留原断言并增加 itemHeight、文字与选择不变量，输出精确尺寸诊断；按钮布局模式使用固定目标间距。未确认唯一根因，最新 CI 待验证。滚动、GDI 压力尚未扩展，main 未修改。

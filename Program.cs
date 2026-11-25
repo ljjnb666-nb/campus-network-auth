@@ -1430,7 +1430,10 @@ internal static class Program
             AddField(authLayout, "密码", passwordBox, 2);
 
             // Channel field
-            channel.DropDownStyle = ComboBoxStyle.DropDownList; channel.FlatStyle = FlatStyle.Flat; channel.Font = new Font("Microsoft YaHei UI", 9.5F); channel.Dock = DockStyle.Fill;
+            // FormattingEnabled selects the corrected native combo-height calculation
+            // in .NET Framework rather than the legacy Everett compatibility path.
+            channel.FormattingEnabled = true;
+            channel.DropDownStyle = ComboBoxStyle.DropDownList; channel.FlatStyle = FlatStyle.Flat; channel.Font = new Font("Microsoft YaHei UI", 9.5F);
             channel.Items.AddRange(new object[] { "Windows", "Linux", "Android", "iOS", "macOS" }); channel.SelectedIndex = 0;
             var channelBox = new InputContainer(channel) { Dock = DockStyle.Fill, Height = 32, Margin = new Padding(0, 2, 0, 2), Padding = new Padding(6, 4, 6, 4), BackColor = CardBgColor };
             AddField(authLayout, "设备类型", channelBox, 3);
@@ -1562,7 +1565,7 @@ internal static class Program
                             MeasureWrapped(g, authSubtitle.Text, authSubtitle.Font, Math.Max(px(60), authSubtitleWidth - authSubtitle.Margin.Horizontal))) + px(12);
                         int fieldHeight = Math.Max(px(44), Math.Max(account.PreferredHeight + accountBox.Padding.Vertical,
                             Math.Max(password.PreferredHeight + passwordBox.Padding.Vertical + px(8),
-                            channel.PreferredHeight + channelBox.Padding.Vertical)) + px(10));
+                            Math.Max(channel.PreferredHeight, channel.Height) + channelBox.Padding.Vertical)) + px(10));
                         passInner.ColumnStyles[1].Width = Math.Max(px(62), MeasureLine(g, "隐藏", reveal.Font).Width + px(20));
                         int rememberHeight = Math.Max(px(32), MeasureWrapped(g, remember.Text, remember.Font, Math.Max(px(60), innerWidth - px(28))) + px(12));
                         int actionButtonHeight = Math.Max(px(48), Math.Max(MeasureLine(g, "立即连接", connect.Font).Height,
@@ -1764,7 +1767,8 @@ internal static class Program
             for (int i = 0; i < buttons.Length; i++)
             {
                 int needed = Math.Max(MeasureLine(graphics, buttons[i].Text, buttons[i].Font).Width,
-                    MeasureLine(graphics, longestLabels[i], buttons[i].Font).Width) + padding * 2 + buttons[i].Margin.Horizontal;
+                    MeasureLine(graphics, longestLabels[i], buttons[i].Font).Width) + padding * 2 +
+                    (i == buttons.Length - 1 ? 0 : 8); // use the target horizontal margin, not the previous mode
                 if (available * weights[i] / 100F < needed) stacked = true;
             }
             int rows = stacked ? buttons.Length : 1, columns = stacked ? 1 : buttons.Length;
@@ -1844,6 +1848,7 @@ internal static class Program
             var fonts = new Dictionary<Control, Font>();
             var enlarged = new List<Font>();
             string oldStatus = status.Text, oldConnect = connect.Text, oldStop = stop.Text;
+            int oldChannel = channel.SelectedIndex;
             int cases = 0;
             try
             {
@@ -1879,6 +1884,8 @@ internal static class Program
                             string stage = "scale=" + scale.ToString(System.Globalization.CultureInfo.InvariantCulture) +
                                 " size=" + Size + " variant=" + variant;
                             if (!CheckLayoutBounds(mainLayout, stage) || !CheckTableOverlap(mainLayout, stage)) return false;
+                            if (channel.Items.Count != 5 || channel.SelectedIndex != oldChannel)
+                            { Console.WriteLine("UI_LAYOUT_CHANNEL_SELECTION_CHANGED " + stage); return false; }
                             cases++;
                         }
                     }
@@ -1952,8 +1959,22 @@ internal static class Program
                     if (input != null && input.Height < input.PreferredHeight)
                     { Console.WriteLine("UI_LAYOUT_INPUT_CLIPPED"); return false; }
                     var combo = c as ComboBox;
-                    if (combo != null && combo.Height < combo.PreferredHeight)
-                    { Console.WriteLine("UI_LAYOUT_COMBO_CLIPPED"); return false; }
+                    if (combo != null)
+                    {
+                        int textHeight = 0;
+                        foreach (object item in combo.Items)
+                            textHeight = Math.Max(textHeight, MeasureLine(g, combo.GetItemText(item), combo.Font).Height);
+                        if (combo.Height < combo.PreferredHeight || combo.ClientSize.Height < textHeight ||
+                            combo.ItemHeight < textHeight)
+                        {
+                            Console.WriteLine("UI_LAYOUT_COMBO_CLIPPED " + stage +
+                                " actual=" + combo.Height + " preferred=" + combo.PreferredHeight +
+                                " itemHeight=" + combo.ItemHeight + " textHeight=" + textHeight +
+                                " client=" + combo.ClientSize + " font=" + combo.Font.Size +
+                                " formatting=" + combo.FormattingEnabled + " dpi=" + g.DpiY);
+                            return false;
+                        }
+                    }
                     var pill = c as StatusPill;
                     if (pill != null && (MeasureLine(g, "等待天翼退出", pill.Font).Width + (int)Math.Ceiling(30 * g.DpiX / 96F) > pill.ClientSize.Width ||
                         MeasureLine(g, "等待天翼退出", pill.Font).Height > pill.ClientSize.Height))
@@ -2742,6 +2763,10 @@ internal static class Program
                 Rectangle bounds = new Rectangle(area.X, area.Y + Math.Max(0, (area.Height - height) / 2),
                     Math.Max(1, area.Width), height);
                 if (child.Bounds != bounds) child.Bounds = bounds;
+                // Native single-line inputs can impose their own actual height.
+                // Center the result after Windows applies that constraint.
+                int top = area.Y + Math.Max(0, (area.Height - child.Height) / 2);
+                if (child.Top != top) child.Top = top;
             }
 
             private void AttachEvents(Control c)
