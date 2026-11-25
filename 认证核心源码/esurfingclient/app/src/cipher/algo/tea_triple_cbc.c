@@ -2,6 +2,7 @@
 #include "cipher/CipherUtils.h"
 
 #include <stdint.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -70,7 +71,8 @@ static void tea_cbc_load_key_layers(const uint8_t key[48], uint32_t k[3][4])
 static uint8_t* tea_cbc_encrypt_raw(const uint8_t* key, const uint8_t* iv, const uint8_t* data,
                                     const size_t data_len, size_t* output_len)
 {
-    int total = (int)((data_len + 7) & ~7);
+    if (data_len > (size_t)INT_MAX - 7) return NULL;
+    int total = (int)((data_len + 7) & ~(size_t)7);
     if (total == 0) total = TEA_TRIPLE_CBC_BLOCK_SIZE;
     uint8_t *buf = s_calloc(1, (size_t)total);
     if (!buf) return NULL;
@@ -90,6 +92,8 @@ static uint8_t* tea_cbc_encrypt_raw(const uint8_t* key, const uint8_t* iv, const
         ((uint32_t *)buf)[off / 4 + 1] = tea_cbc_bswap32(v1);
         memcpy(prev, buf + off, TEA_TRIPLE_CBC_BLOCK_SIZE);
     }
+    cipher_secure_zero(k, sizeof(k));
+    cipher_secure_zero(prev, sizeof(prev));
     *output_len = (size_t)total;
     return buf;
 }
@@ -117,6 +121,8 @@ static uint8_t* tea_cbc_decrypt_raw(const uint8_t* key, const uint8_t* iv, const
         ((uint32_t *)buf)[off / 4 + 1] = tea_cbc_bswap32(v1 ^ tea_cbc_bswap32(((const uint32_t *)prev)[1]));
         memcpy(prev, data + off, TEA_TRIPLE_CBC_BLOCK_SIZE);
     }
+    cipher_secure_zero(k, sizeof(k));
+    cipher_secure_zero(prev, sizeof(prev));
     *output_len = data_len;
     return buf;
 }
@@ -129,7 +135,7 @@ static char* tea_triple_cbc_encrypt(cipher_interface_t* self, const char* text)
     size_t out_len=0; uint8_t* out = tea_cbc_encrypt_raw(d->key, d->iv, (const uint8_t*)text, text_len, &out_len);
     if(!out) return NULL;
     char* hex = bytes_2_hex(out, out_len);
-    s_free(out);
+    s_secure_free(out, out_len);
     return hex;
 }
 
@@ -140,13 +146,14 @@ static char* tea_triple_cbc_decrypt(cipher_interface_t* self, const char* hex)
     size_t bytes_len=0; uint8_t* bytes = hex_2_bytes(hex, &bytes_len);
     if(!bytes) return NULL;
     size_t out_len=0; uint8_t* out = tea_cbc_decrypt_raw(d->key, d->iv, bytes, bytes_len, &out_len);
-    s_free(bytes);
+    s_secure_free(bytes, bytes_len);
     if(!out) return NULL;
+    const size_t allocation_len = out_len;
     while(out_len > 0 && out[out_len - 1] == 0) out_len--;
     char* result = s_malloc(out_len + 1);
     memcpy(result, out, out_len);
     result[out_len] = '\0';
-    s_free(out);
+    s_secure_free(out, allocation_len);
     return result;
 }
 
@@ -154,7 +161,7 @@ static void tea_triple_cbc_destroy(cipher_interface_t* self)
 {
     if(self)
     {
-        s_free(self->private_data);
+        s_secure_free(self->private_data, sizeof(tea_triple_cbc_android_data_t));
         s_free(self);
     }
 }
