@@ -624,6 +624,7 @@ bool load_cfg(void)
             LOG_FATAL("分配内存失败");
             return false;
         }
+        runtime_status_init(&g_prog_status[0].runtime_status);
     }
 #ifdef __OPENWRT__
 
@@ -817,13 +818,16 @@ bool load_cfg(void)
         usable = false;
     }
 
-    // 账号数超 255 会把 uint8_t 计数回绕, 先按 int 校验再截断
+    // g_prog_cnt/valid_cnt are signed int8_t, not uint8_t.
     const int cnt_raw = cJSON_GetArraySize(accounts);
-    if (cnt_raw > 255)
-    {
-        LOG_WARN("账号数量 %d 超过 255, 仅加载前 255 个", cnt_raw);
-    }
-    const uint8_t cnt = (uint8_t)cnt_raw;
+#ifdef __OPENWRT__
+    const int max_accounts = INT8_MAX;
+#else
+    const int max_accounts = UINT8_MAX;
+#endif
+    if (cnt_raw > max_accounts)
+        LOG_WARN("账号数量 %d 超过 %d, 仅加载前 %d 个", cnt_raw, max_accounts, max_accounts);
+    const uint8_t cnt = (uint8_t)(cnt_raw > max_accounts ? max_accounts : cnt_raw);
 
     int8_t valid_cnt = 0;
 
@@ -837,15 +841,21 @@ bool load_cfg(void)
         LOG_DEBUG("OpenWRT 环境, 会尝试加载所有有效配置");
     }
 
-    prog_status_t* new_prog_status = realloc(g_prog_status, sizeof(prog_status_t) * cnt);
+    /* Keep a global configuration slot even for an empty account list.
+     * Allocation/initialization must occur with all readers quiescent. */
+    const size_t slots = cnt > 0 ? cnt : 1;
+    prog_status_t* new_prog_status = realloc(g_prog_status, sizeof(prog_status_t) * slots);
     if (new_prog_status)
     {
         g_prog_status = new_prog_status;
-        memset(g_prog_status, 0, sizeof(prog_status_t) * cnt);
+        memset(g_prog_status, 0, sizeof(prog_status_t) * slots);
+        for (size_t i = 0; i < slots; ++i)
+            runtime_status_init(&g_prog_status[i].runtime_status);
     }
     else
     {
         LOG_FATAL("重分配内存失败");
+        delete_cfg_json(cfg_json);
         return false;
     }
 
