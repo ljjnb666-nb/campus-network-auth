@@ -141,6 +141,8 @@ extern bool simssl_cipher_cleanup_self_test(void);
 extern bool aes_common_known_answer_self_test(void);
 extern bool des_known_answer_self_test(void);
 extern bool des_buffer_lifecycle_self_test(void);
+extern bool sm4_known_answer_self_test(void);
+extern bool remaining_cipher_lifecycle_self_test(void);
 #ifndef __OPENWRT__
 extern bool traffic_resource_self_test(void);
 extern bool control_resource_self_test(void);
@@ -166,7 +168,7 @@ bool net_resource_self_test(void)
 #ifdef _WIN32
         && sim_thread_budget_self_test()
 #endif
-         && time_control_resource_self_test() && shutdown_resource_self_test() && session_status_self_test() && simssl_cipher_cleanup_self_test() && aes_common_known_answer_self_test() && des_known_answer_self_test() && des_buffer_lifecycle_self_test()
+         && time_control_resource_self_test() && shutdown_resource_self_test() && session_status_self_test() && simssl_cipher_cleanup_self_test() && aes_common_known_answer_self_test() && des_known_answer_self_test() && des_buffer_lifecycle_self_test() && sm4_known_answer_self_test() && remaining_cipher_lifecycle_self_test()
 #ifndef __OPENWRT__
         && traffic_resource_self_test() && control_resource_self_test()
 #endif
