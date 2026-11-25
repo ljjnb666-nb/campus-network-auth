@@ -1,3 +1,4 @@
+#include "cipher/CipherUtils.h"
 #include "DialerInternal.h"
 
 #include "net/NetClient.h"
@@ -140,7 +141,9 @@ void clean(void)
         }
         clean_session(); // 清理会话
     }
-    memset(&g_prog_status[tl_thread_idx].auth_cfg, 0, sizeof(auth_cfg_t)); // 清除 auth_cfg 的内容, 并置零
+    /* A partially initialized session may also own a cipher. */
+    if (g_prog_status[tl_thread_idx].auth_cfg.cipher) destroy_cipher_factory();
+    cipher_secure_zero(&g_prog_status[tl_thread_idx].auth_cfg, sizeof(auth_cfg_t));
     clear_session_status(&g_prog_status[tl_thread_idx].runtime_status);
 }
 
