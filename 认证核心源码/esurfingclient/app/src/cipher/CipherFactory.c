@@ -828,17 +828,19 @@ bool init_cipher(const char* algo_id)
 
 char* session_encrypt(const char* text)
 {
-    if (strstr(text, "userid") == NULL)
-    {
-        LOG_TRACE("要加密的文本:\n%s", text);
-    }
+    if (text == NULL || g_prog_status == NULL || tl_thread_idx < 0 || tl_thread_idx >= g_prog_cnt) return NULL;
     cipher_interface_t* cipher = g_prog_status[tl_thread_idx].auth_cfg.cipher;
+    if (cipher == NULL || cipher->encrypt == NULL) return NULL;
+    /* Never log payload contents, even at TRACE. */
+    LOG_TRACE("加密会话数据 (内容不记录)");
     return cipher->encrypt(cipher, text);
 }
 
 char* session_decrypt(const char* text)
 {
-    LOG_TRACE("要解密的文本:\n%s", text);
+    if (text == NULL || g_prog_status == NULL || tl_thread_idx < 0 || tl_thread_idx >= g_prog_cnt) return NULL;
     cipher_interface_t* cipher = g_prog_status[tl_thread_idx].auth_cfg.cipher;
+    if (cipher == NULL || cipher->decrypt == NULL) return NULL;
+    LOG_TRACE("解密会话数据 (内容不记录)");
     return cipher->decrypt(cipher, text);
 }
