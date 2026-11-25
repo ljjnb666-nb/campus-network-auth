@@ -73,6 +73,7 @@ bool app_bootstrap(void)
     {
         g_prog_status = calloc(1, sizeof(prog_status_t));
         if (g_prog_status == NULL) return false;
+        runtime_status_init(&g_prog_status[0].runtime_status);
     }
 
     init_shutdown_hook();
