@@ -158,3 +158,110 @@ jobs:
             build-core/build-manifest.json
             build-core/澈知科技-源码重建.exe.config
           if-no-files-found: error
+
+  linux-crypto-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Optimized and sanitized offline cipher regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd '认证核心源码/esurfingclient/app'
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          cat > "$tmp/audit.c" <<'EOF'
+          #include "cipher/CipherUtils.h"
+          #include "SimEvpInternal.h"
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          extern bool aes_common_known_answer_self_test(void);
+          extern bool des_known_answer_self_test(void);
+          extern bool sm4_known_answer_self_test(void);
+          extern bool des_buffer_lifecycle_self_test(void);
+          extern bool remaining_cipher_lifecycle_self_test(void);
+          extern bool simssl_cipher_cleanup_self_test(void);
+          #ifdef CHECK_FREE
+          static void *expected_pointer;
+          static size_t expected_length;
+          static bool saw_release;
+          extern void __real_free(void*);
+          void __wrap_free(void *p)
+          {
+              if (p && p == expected_pointer)
+              {
+                  const unsigned char *bytes = p;
+                  for (size_t i = 0; i < expected_length; ++i)
+                      if (bytes[i] != 0) abort();
+                  saw_release = true;
+                  expected_pointer = NULL;
+              }
+              __real_free(p);
+          }
+          #endif
+          int main(void)
+          {
+              const unsigned char md5_expected[16] = {0x90,0x01,0x50,0x98,0x3c,0xd2,0x4f,0xb0,0xd6,0x96,0x3f,0x7d,0x28,0xe1,0x7f,0x72};
+              unsigned char digest[16] = {0};
+              simssl_md5((const unsigned char*)"abc", 3, digest);
+              if (memcmp(digest, md5_expected, sizeof(digest))) return 1;
+              simssl_secure_zero(digest, sizeof(digest));
+              size_t n = 99;
+              unsigned char padded[16];
+              memset(padded, 16, sizeof(padded));
+              unsigned char *empty = rm_pkcs7_padding(padded, sizeof(padded), &n);
+              if (!empty || n != 0) return 2;
+              s_secure_free(empty, 1);
+              unsigned char *secret = malloc(64);
+              if (!secret) return 3;
+              memset(secret, 0xa5, 64);
+          #ifdef CHECK_FREE
+              expected_pointer = secret;
+              expected_length = 64;
+          #endif
+              s_secure_free(secret, 64);
+          #ifdef CHECK_FREE
+              if (!saw_release) return 4;
+          #endif
+              if (!aes_common_known_answer_self_test() ||
+                  !des_known_answer_self_test() ||
+                  !sm4_known_answer_self_test() ||
+                  !simssl_cipher_cleanup_self_test() ||
+                  !des_buffer_lifecycle_self_test() ||
+                  !remaining_cipher_lifecycle_self_test()) return 5;
+              puts("CRYPTO_OFFLINE_AUDIT_PASS");
+              return 0;
+          }
+          EOF
+          sources=(src/cipher/CipherUtils.c src/cipher/algo/*.c src/utils/sim/SimEvp{Aes,Cipher,Des3,Md5}.c)
+          includes=(-Iinclude -Isrc/utils/sim)
+          gcc -std=c11 -O2 -DCHECK_FREE "${includes[@]}" "$tmp/audit.c" "${sources[@]}" -Wl,--wrap=free -o "$tmp/optimized"
+          "$tmp/optimized"
+          gcc -std=c11 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all "${includes[@]}" "$tmp/audit.c" "${sources[@]}" -o "$tmp/sanitized"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/sanitized"
+          # Observe dead-stack-buffer wiping in optimized compiler output.
+          # This is a narrow x86-64 GCC codegen gate, not an audit of every call site.
+          cat > "$tmp/wipe.c" <<'EOF'
+          #include "cipher/CipherUtils.h"
+          #include "SimEvpInternal.h"
+          __attribute__((noinline,used)) void cipher_wipe_probe(void)
+          {
+              unsigned char dead[32];
+              cipher_secure_zero(dead, sizeof(dead));
+          }
+          __attribute__((noinline,used)) void evp_wipe_probe(void)
+          {
+              unsigned char dead[32];
+              simssl_secure_zero(dead, sizeof(dead));
+          }
+          EOF
+          gcc -std=c11 -O2 "${includes[@]}" -S "$tmp/wipe.c" -o "$tmp/wipe.s"
+          for name in cipher_wipe_probe evp_wipe_probe; do
+            awk -v name="$name" '$0 == name ":" {show=1} show {print} show && /[.]size/ {exit}' "$tmp/wipe.s" > "$tmp/$name.s"
+            cat "$tmp/$name.s"
+            grep -Eq 'movb[[:space:]]+\$0,' "$tmp/$name.s"
+          done
+          echo CRYPTO_OPTIMIZED_WIPE_CODEGEN_PASS
