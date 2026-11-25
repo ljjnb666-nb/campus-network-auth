@@ -141,6 +141,10 @@ internal sealed class ServiceJournal
     internal void Complete(int? code, string actualState, bool cancelled)
     {
         if (Invalid || !HasPending || !ValidState(actualState)) throw new InvalidDataException();
+        string oldResult = Result, oldTime = TimeUtc;
+        bool oldRecovery = NeedsRecovery, oldUncertain = Uncertain;
+        try
+        {
         if (cancelled)
         {
             Result = "cancelled";
@@ -162,6 +166,12 @@ internal sealed class ServiceJournal
             if (actualState == "Running") NeedsRecovery = false;
         }
         Write();
+        }
+        catch
+        {
+            Result = oldResult; TimeUtc = oldTime; NeedsRecovery = oldRecovery; Uncertain = oldUncertain;
+            throw;
+        }
     }
 
     internal void ReconcileRunning()
@@ -179,7 +189,16 @@ internal sealed class ServiceJournal
         {
             var j = Load(path); j.Begin("prepare", "Running");
             j = Load(path); if (!j.HasPending || !j.Uncertain) return false;
+            // Hold the destination without delete sharing: atomic replacement must fail.
+            using (var locked = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                bool failed = false;
+                try { j.Complete(10, "Stopped", false); } catch (IOException) { failed = true; } catch (UnauthorizedAccessException) { failed = true; }
+                if (!failed || !j.HasPending || !j.Uncertain || j.NeedsRecovery) return false;
+            }
+            if (!Load(path).HasPending) return false;
             j.Complete(10, "Stopped", false);
+            Console.WriteLine("JOURNAL_RETRY_PASS");
             j = Load(path); if (!j.NeedsRecovery || j.HasPending) return false;
             j.Begin("restore", "Stopped"); j.Complete(null, "Stopped", true);
             j = Load(path); if (!j.NeedsRecovery) return false;

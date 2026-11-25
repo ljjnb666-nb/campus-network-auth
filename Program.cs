@@ -895,6 +895,16 @@ internal static class Program
                 third.Show(); Application.DoEvents();
                 if (!third.CheckAutoRetryForTest()) return 1;
             }
+            using (var fourth = new MainWindow(dir, true))
+            {
+                fourth.Show(); Application.DoEvents();
+                if (!fourth.CheckCoreEventLifecycleForTest()) return 1;
+            }
+            using (var fifth = new MainWindow(dir, true))
+            {
+                fifth.Show(); Application.DoEvents();
+                if (!fifth.CheckServiceRecoveryForTest(dir)) return 1;
+            }
             Console.WriteLine("UI_TRAY_PASS");
             return 0;
         }
@@ -1573,6 +1583,105 @@ internal static class Program
             finally { activeTask = null; rememberRevoked = false; savedAfterAuth = false; }
         }
 
+        private static Process StartOfflineStub()
+        {
+            return Process.Start(new ProcessStartInfo { FileName = Application.ExecutablePath,
+                Arguments = "--self-test-stub", UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true });
+        }
+
+        private static bool PumpTaskForTest(Task task, int timeoutMs)
+        {
+            var clock = Stopwatch.StartNew();
+            while (!task.IsCompleted && clock.ElapsedMilliseconds < timeoutMs)
+            { Application.DoEvents(); System.Threading.Thread.Sleep(10); }
+            Application.DoEvents();
+            return task.Status == TaskStatus.RanToCompletion;
+        }
+
+        internal bool CheckCoreEventLifecycleForTest()
+        {
+            Process stub = StartOfflineStub();
+            if (stub == null) return false;
+            try
+            {
+                running = stub; completedProcess = null;
+                activeTask = new AuthTask("dummy-user", "dummy-pass", 1, false);
+                userStopped = false; stopping = false; authFailureSeen = false; retryEligible = false;
+                state.SetCore(ConnectionStates.CoreState.Running);
+                SetAuthState(ConnectionStates.AuthState.Authenticating, "test", ToneInfo);
+                OnCoreStatus(stub, "stop_accepted"); Application.DoEvents();
+                bool ok = state.Auth == ConnectionStates.AuthState.Authenticating;
+                OnCoreStatus(stub, "auth_ok"); Application.DoEvents();
+                OnCoreStatus(stub, "network_online"); Application.DoEvents();
+                OnCoreStatus(stub, "auth_ok"); Application.DoEvents();
+                ok &= state.Auth == ConnectionStates.AuthState.Authenticated &&
+                    state.Network == ConnectionStates.NetworkState.InternetAvailable;
+                OnCoreStatus(stub, "auth_failed"); Application.DoEvents();
+                OnCoreStatus(stub, "network_online"); Application.DoEvents();
+                ok &= state.Auth == ConnectionStates.AuthState.Failed && state.Network == ConnectionStates.NetworkState.Unknown;
+                BeginStop();
+                ok &= userStopped && state.Auth == ConnectionStates.AuthState.LoggingOut;
+                OnCoreStatus(stub, "auth_ok"); Application.DoEvents();
+                ok &= state.Auth == ConnectionStates.AuthState.LoggingOut;
+                if (!stub.WaitForExit(5000)) return false;
+                OnCoreExit(stub);
+                OnCoreExit(stub);
+                OnCoreStatus(stub, "network_online"); Application.DoEvents();
+                ok &= state.Auth == ConnectionStates.AuthState.Idle && state.Network == ConnectionStates.NetworkState.Unknown &&
+                    activeTask == null && !retryTimer.Enabled && connect.Enabled && prepare.Enabled && restore.Enabled;
+                Console.WriteLine(ok ? "CORE_LIFECYCLE_PASS" : "CORE_LIFECYCLE_FAIL");
+                return ok;
+            }
+            finally
+            {
+                running = null; completedProcess = null;
+                try { if (!stub.HasExited) { RequestStop(stub); if (!stub.WaitForExit(5000)) stub.Kill(); } } catch { }
+                stub.Dispose();
+            }
+        }
+
+        internal bool CheckServiceRecoveryForTest(string dir)
+        {
+            string path = Path.Combine(dir, "service-test-" + Guid.NewGuid().ToString("N") + ".json");
+            Process stub = StartOfflineStub();
+            if (stub == null) return false;
+            try
+            {
+                var journal = ServiceJournal.Load(path);
+                journal.Begin("prepare", "Running");
+                // Inject the same ownership transfer state as a timed-out helper.
+                pendingServiceChild = stub; pendingServiceJournal = journal; serviceBusy = true;
+                connect.Enabled = false; prepare.Enabled = false; restore.Enabled = false;
+                readServiceState = delegate { return "StopPending"; };
+                if (!PumpTaskForTest(PollTimedOutServiceAsync(), 3000) || !serviceBusy) return false;
+                Task<bool> conflicting = RunServiceAction(false);
+                if (!PumpTaskForTest(conflicting, 3000) || conflicting.Result) return false;
+                if (!RequestStop(stub) || !stub.WaitForExit(5000)) return false;
+                if (!PumpTaskForTest(PollTimedOutServiceAsync(), 3000) || !serviceBusy || !ServiceJournal.Load(path).HasPending) return false;
+                readServiceState = delegate { return "Stopped"; };
+                using (var locked = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    if (!PumpTaskForTest(PollTimedOutServiceAsync(), 3000) || !serviceBusy || !journal.HasPending) return false;
+                }
+                if (!PumpTaskForTest(PollTimedOutServiceAsync(), 3000)) return false;
+                bool ok = !serviceBusy && pendingServiceChild == null && !ServiceJournal.Load(path).HasPending &&
+                    connect.Enabled && prepare.Enabled && restore.Enabled && running == null && activeTask == null;
+                Console.WriteLine(ok ? "SERVICE_RECOVERY_PASS" : "SERVICE_RECOVERY_FAIL");
+                return ok;
+            }
+            finally
+            {
+                if (Object.ReferenceEquals(pendingServiceChild, stub))
+                {
+                    pendingServiceChild = null; pendingServiceJournal = null; serviceBusy = false;
+                    try { if (!stub.HasExited) { RequestStop(stub); if (!stub.WaitForExit(5000)) stub.Kill(); } } catch { }
+                    stub.Dispose();
+                }
+                readServiceState = CurrentServiceState;
+                try { File.Delete(path); } catch { }
+            }
+        }
+
         internal bool CheckTrayAndSaveForTest()
         {
             SavedCredential dummy = DummyCredential();
@@ -2219,6 +2328,7 @@ internal static class Program
         private Process pendingServiceChild;
         private ServiceJournal pendingServiceJournal;
         private bool pollingService;
+        private Func<string> readServiceState = CurrentServiceState;
         private async void RunStartupChecksAsync()
         {
             int generation = taskGeneration;
@@ -2493,8 +2603,16 @@ internal static class Program
                 if (!Object.ReferenceEquals(running, sender) || Object.ReferenceEquals(completedProcess, sender)) return;
                 // ParseCoreEvent already validated the PID, schema, event and code; token is allowlisted.
                 ArchiveCoreEvent(token);
-                if (stopping && token != "stop_accepted" && token != "stop_channel_failed") return;
-                if (authFailureSeen && token != "stop_accepted" && token != "stop_channel_failed") return;
+                bool stopEvent = token == "stop_accepted" || token == "stop_channel_failed";
+                if (stopEvent && !stopping) return;
+                if ((stopping || userStopped || authFailureSeen || retryEligible) && !stopEvent) return;
+                if (token == "core_failed")
+                {
+                    state.Failure = ConnectionStates.FailureKind.Runtime;
+                    state.SetNetwork(ConnectionStates.NetworkState.Unknown);
+                    SetAuthState(ConnectionStates.AuthState.Failed, "认证核心运行中断，正在等待进程退出。", ToneFail);
+                    return;
+                }
                 if (token == "network_retry_exhausted" || (token == "test_crash" && isSelfTest))
                 {
                     retryEligible = true;
@@ -2528,7 +2646,7 @@ internal static class Program
                 if (token == "auth_ok")
                 {
                     if (state.Auth != ConnectionStates.AuthState.Authenticating && state.Auth != ConnectionStates.AuthState.WaitingForNetwork &&
-                        state.Auth != ConnectionStates.AuthState.Reauthenticating && state.Auth != ConnectionStates.AuthState.Authenticated) return;
+                        state.Auth != ConnectionStates.AuthState.Reauthenticating) return; // duplicate auth_ok cannot invalidate newer network evidence
                     connect.Text = "运行中…"; runSawProgress = true;
                     state.SetNetwork(ConnectionStates.NetworkState.Unknown); // authentication is not a reachability probe
                     SetAuthState(ConnectionStates.AuthState.Authenticated, "认证成功，互联网可达性待确认。", ToneOk);
@@ -2627,8 +2745,9 @@ internal static class Program
         {
             if (!stopping) { try { BeginStop(); } catch { SetStatus("停止请求发送失败，窗口将保持开启。", ToneFail); } return; }
             if (grace == null || grace.Elapsed.TotalSeconds < 100) return;
+            Process target = running;
             if (MessageBox.Show(this, "强制结束可能让服务器会话多保留一会儿，确定立即结束认证进程？", "强制结束", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-            try { if (running != null && !running.HasExited) running.Kill(); }
+            try { if (stopping && target != null && Object.ReferenceEquals(running, target) && !target.HasExited) target.Kill(); }
             catch { SetStatus("结束失败，请保持窗口开启稍后再试。", ToneFail); }
         }
 
@@ -2814,10 +2933,22 @@ internal static class Program
                         return false;
                     }
                     code = child.ExitCode;
+                    string observed = await Task.Run(readServiceState);
+                    if (MapServiceState(observed) == ConnectionStates.ServiceState.Unknown || MapServiceState(observed) == ConnectionStates.ServiceState.Transitioning)
+                    {
+                        pendingServiceChild = child; pendingServiceJournal = journal; transferred = true;
+                        SetHandoff(ConnectionStates.HandoffState.Blocked, "服务操作已退出，但实际服务状态仍待确认；不会自动继续。", ToneWarn);
+                        return false;
+                    }
+                    journal.Complete(code, observed, false);
+                }
+                catch
+                {
+                    pendingServiceChild = child; pendingServiceJournal = journal; transferred = true;
+                    throw;
                 }
                 finally { if (!transferred) child.Dispose(); }
-                string actual = await Task.Run((Func<string>)CurrentServiceState);
-                journal.Complete(code, actual, false);
+                string actual = await Task.Run(readServiceState);
                 if (HandoffCancelled(generation, fromConnect)) return false;
                 state.SetService(MapServiceState(actual));
                 bool expected = forPrepare ? actual == "Stopped" || actual == "NotInstalled" : actual == "Running";
@@ -2871,8 +3002,11 @@ internal static class Program
             {
                 if (!child.HasExited) return;
                 int code = child.ExitCode;
-                string actual = await Task.Run((Func<string>)CurrentServiceState);
+                string actual = await Task.Run(readServiceState);
                 if (IsDisposed || Disposing) return;
+                // A terminated helper is not proof that an SCM transition has settled.
+                var observed = MapServiceState(actual);
+                if (observed == ConnectionStates.ServiceState.Unknown || observed == ConnectionStates.ServiceState.Transitioning) return;
                 pendingServiceJournal.Complete(code, actual, false);
                 state.SetService(MapServiceState(actual));
                 SetHandoff(ConnectionStates.HandoffState.Blocked,
