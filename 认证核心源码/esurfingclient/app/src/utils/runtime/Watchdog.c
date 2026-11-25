@@ -234,7 +234,7 @@ static int watchdog_app(void* arg)
             {
                 if (g_need_exit || stop_requested())
                 {
-                    atomic_store(&s_snapshot, 0);
+                    atomic_store(&s_snapshot, observed & ~WD_MODE_MASK);
                     return 0;
                 }
                 watchdog_fire(budget_ms, now - expected_by);
@@ -255,10 +255,10 @@ static bool start_worker(sim_thread_func worker)
         return running;
     }
 
-    atomic_store(&s_snapshot, WD_RUNNING | WATCHDOG_START_GRACE_MS);
+    atomic_store(&s_snapshot, next_pet(atomic_load(&s_snapshot), WATCHDOG_START_GRACE_MS));
     s_thread = sim_thread_create(worker, NULL);
     const bool started = s_thread != NULL;
-    if (!started) atomic_store(&s_snapshot, 0);
+    if (!started) request_watchdog_stop(&s_snapshot);
     lifecycle_unlock();
     return started;
 }
@@ -288,7 +288,7 @@ static bool stop_worker(void)
         sim_thread_destroy(s_thread);
         s_thread = NULL;
     }
-    atomic_store(&s_snapshot, 0);
+    atomic_store(&s_snapshot, atomic_load(&s_snapshot) & ~WD_MODE_MASK);
     lifecycle_unlock();
     return true;
 }
@@ -338,7 +338,8 @@ bool watchdog_resource_self_test(void)
     if (claim_timeout(&local, stale)) return false;
     publish_pet(&local, 3000);
     if (snapshot_running(atomic_load(&local))) return false;
-    atomic_store(&local, WD_RUNNING | 1000);
+    atomic_store(&local, next_pet(atomic_load(&local), 1000));
+    if (claim_timeout(&local, stale)) return false;
     if (!claim_timeout(&local, atomic_load(&local))) return false;
     publish_pet(&local, 3000);
     request_watchdog_stop(&local);
@@ -367,7 +368,7 @@ bool watchdog_resource_self_test(void)
             sim_thread_destroy(two);
         }
         if (!stop_worker() || rc1 != 0 || rc2 != 0 || s_thread != NULL ||
-            atomic_load(&s_snapshot) != 0) return false;
+            (atomic_load(&s_snapshot) & WD_MODE_MASK) != 0) return false;
     }
     return true;
 }
