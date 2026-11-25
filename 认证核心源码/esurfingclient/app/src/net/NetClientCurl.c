@@ -1,3 +1,4 @@
+#include "cipher/CipherUtils.h"
 #include "NetClientInternal.h"
 
 #include "core/States.h"
@@ -250,7 +251,7 @@ size_t header_cb(const void* contents, const size_t size, const size_t nmemb, vo
         {
             if (!g_prog_status[tl_thread_idx].last_location_lock)
             {
-                LOG_TRACE("原始数据: %s", header);
+                LOG_TRACE("收到 Location 头 (内容不记录)");
 
                 const char* value = header + 9;
                 while (*value == ' ') value++;
@@ -273,9 +274,10 @@ size_t header_cb(const void* contents, const size_t size, const size_t nmemb, vo
                 resolve_url(resolved, sizeof(resolved), g_request_url, location);
                 snprintf(g_prog_status[tl_thread_idx].last_location, LAST_LOCATION_LEN, "%s", resolved);
 
-                LOG_TRACE("现在的 last_location: %s (长度: %zu)",
-                            g_prog_status[tl_thread_idx].last_location,
+                LOG_TRACE("已更新 last_location (长度: %zu)",
                             strlen(g_prog_status[tl_thread_idx].last_location));
+                cipher_secure_zero(location, sizeof(location));
+                cipher_secure_zero(resolved, sizeof(resolved));
             }
         }
     }
@@ -396,6 +398,7 @@ char* calc_md5(const char* data)
 
     if (EVP_DigestFinal_ex(mdctx, digest, &digest_len) != 1)
     {
+        cipher_secure_zero(digest, sizeof(digest));
         EVP_MD_CTX_free(mdctx);
         free(md5_str);
         return NULL;
@@ -405,6 +408,7 @@ char* calc_md5(const char* data)
     // md5_str 只有 33 字节 (32 字符 + 结尾), 摘要不是 16 字节就放不下, 直接拒绝
     if (digest_len != 16)
     {
+        cipher_secure_zero(digest, sizeof(digest));
         LOG_ERROR("MD5 摘要长度异常: %u", digest_len);
         free(md5_str);
         return NULL;
@@ -412,6 +416,7 @@ char* calc_md5(const char* data)
 
     for (unsigned int i = 0; i < digest_len; i++) snprintf(&md5_str[i*2], 3, "%02x", (unsigned int)digest[i]);
 
+    cipher_secure_zero(digest, sizeof(digest));
     return md5_str;
 }
 
@@ -455,7 +460,7 @@ network_status_t curl_err_msg_out(const CURLcode curl_code)
 void log_curl_error(CURL* curl, const CURLcode code, const char *errbuf, const char *url, const char *func_name)
 {
     LOG_ERROR("[%s] curl 请求失败: %s", func_name, curl_easy_strerror(code));
-    LOG_DEBUG("[%s] URL: %s", func_name, url ? url : "(null)");
+    LOG_DEBUG("[%s] URL 已%s (内容不记录)", func_name, url ? "设置" : "缺失");
     LOG_DEBUG("[%s] CURLcode: %d", func_name, code);
 
     if (errbuf && errbuf[0] != '\0')
