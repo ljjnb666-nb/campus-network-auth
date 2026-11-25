@@ -451,6 +451,134 @@ jobs:
           ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/json_audit"
           echo CJSON_UNUSED_API_SOURCE_GATE_PASS
 
+      - name: Sanitized local adapter list ownership and allocation failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd '认证核心源码/esurfingclient/app'
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          cat > "$tmp/adapter_audit.c" <<'EOF'
+          #include "utils/platform/NetAdapters.c"
+          #include <assert.h>
+          char g_school_network_symbol[SCHOOL_NETWORK_SYMBOL] = "test";
+          static struct ifaddrs entries[ADAPTER_LIST_MAX + 1];
+          static struct sockaddr_in address;
+          static size_t fake_count, acquisitions, releases;
+          static bool fail_enumeration;
+          int __wrap_getifaddrs(struct ifaddrs** out)
+          {
+              *out = NULL;
+              if (fail_enumeration) return -1;
+              assert(fake_count <= ADAPTER_LIST_MAX + 1);
+              memset(entries, 0, sizeof(entries));
+              address.sin_family = AF_INET;
+              address.sin_addr.s_addr = htonl(0xc0000201u);
+              for (size_t i = 0; i < fake_count; ++i) {
+                  entries[i].ifa_name = (char*)"synthetic";
+                  entries[i].ifa_addr = (struct sockaddr*)&address;
+                  entries[i].ifa_next = i + 1 < fake_count ? &entries[i+1] : NULL;
+              }
+              if (fake_count) *out = entries;
+              ++acquisitions;
+              return 0;
+          }
+          void __wrap_freeifaddrs(struct ifaddrs* ptr)
+          {
+              assert(ptr == NULL || ptr == entries);
+              ++releases;
+          }
+          static size_t realloc_calls, fail_realloc;
+          void* __real_realloc(void*, size_t);
+          void* __wrap_realloc(void* ptr, size_t size)
+          {
+              if (++realloc_calls == fail_realloc) return NULL;
+              return __real_realloc(ptr, size);
+          }
+          static size_t calls, fail_at, live;
+          static void* test_allocate(size_t size)
+          {
+              if (++calls == fail_at) return NULL;
+              void* p = malloc(size);
+              if (p) ++live;
+              return p;
+          }
+          static void test_release(void* p)
+          {
+              if (p) { assert(live > 0); --live; free(p); }
+          }
+          static void check_json(size_t count)
+          {
+              char* json = get_adapters_json();
+              assert(json);
+              cJSON* root = cJSON_Parse(json);
+              cJSON_free(json);
+              assert(root);
+              const cJSON* rows = cJSON_GetObjectItemCaseSensitive(root, "adapters");
+              assert(cJSON_IsArray(rows));
+              assert(cJSON_GetArraySize(rows) == (int)count);
+              cJSON_Delete(root);
+              assert(acquisitions == releases);
+          }
+          int main(void)
+          {
+              fake_count = 2;
+              check_json(2);
+              fail_enumeration = true;
+              assert(get_adapters_json() == NULL);
+              fail_enumeration = false;
+              fake_count = 0;
+              check_json(0);
+              fake_count = ADAPTER_LIST_MAX;
+              realloc_calls = 0;
+              check_json(ADAPTER_LIST_MAX);
+              const size_t growth = realloc_calls;
+              /* Count only collection growth; JSON uses custom hooks below. */
+              adapter_list_t list = {0};
+              realloc_calls = 0;
+              assert(get_adapters(&list));
+              const size_t growth_only = realloc_calls;
+              assert(growth_only > 0 && growth_only <= growth);
+              adapter_list_clear(&list);
+              for (size_t i = 1; i <= growth_only; ++i) {
+                  realloc_calls = 0;
+                  fail_realloc = i;
+                  assert(get_adapters_json() == NULL);
+                  assert(acquisitions == releases);
+              }
+              fail_realloc = 0;
+              fake_count = ADAPTER_LIST_MAX + 1;
+              assert(get_adapters_json() == NULL);
+              assert(acquisitions == releases);
+              fake_count = 2;
+              cJSON_Hooks hooks = {test_allocate, test_release};
+              cJSON_InitHooks(&hooks);
+              char* json = get_adapters_json();
+              assert(json);
+              cJSON_free(json);
+              assert(live == 0);
+              const size_t total = calls;
+              assert(total > 0 && total < 1000);
+              for (size_t i = 1; i <= total; ++i) {
+                  calls = 0;
+                  fail_at = i;
+                  json = get_adapters_json();
+                  assert(json == NULL);
+                  assert(live == 0 && acquisitions == releases);
+              }
+              fail_at = 0;
+              check_json(2);
+              assert(live == 0);
+              cJSON_InitHooks(NULL);
+              printf("ADAPTER_RESOURCE_AUDIT_PASS growthFailures=%zu jsonFailures=%zu maxRows=%u\n", growth_only, total, ADAPTER_LIST_MAX);
+              return 0;
+          }
+          EOF
+          gcc -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -Iinclude -Isrc -Ithird_party "$tmp/adapter_audit.c" third_party/cJSON/cJSON.c \
+            -Wl,--wrap=getifaddrs,--wrap=freeifaddrs,--wrap=realloc -lm -o "$tmp/adapter_audit"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/adapter_audit"
+
       - name: Sanitized traffic snapshot lifecycle and allocator failures
         shell: bash
         run: |
