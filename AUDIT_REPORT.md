@@ -352,3 +352,8 @@ Push 45554185087 / PR 45554192196 success；APP_LIFECYCLE_PASS cycles=100 seed=2
 ### 主动审计第十一批（基线 f41c292）
 
 Push 45554742785 / PR 45554750745 success；POWER_TRANSITION_PASS active_cycles=20 pending_connect=1 pending_service=1 idle=1，100次应用、110次核心（326→326）、256种权限、签名及curl双源通过，artifact 14995331373。发现无主动网卡变化失效通知、TTL在异步查询后检查、正向事件以UI处理时间计时、空闲观测可跨网络变化。新增 Windows NetworkChange 订阅/释放、合并通知及共享证据代次、接收时间TTL、先行过期检查、空闲观测代次校验、停止意图立即撤销证据；NETWORK_CHANGE_PASS 组合注入。网络通知不证明联网、不自动认证、不取消已授权服务操作。新 CI 待验证；真实网络/休眠/DPI/UAC/72h、正式签名仍未验证，main 未修改。
+
+
+### 第十一批编译兼容性修正（6741d9f）
+
+Push 45555594052 / PR 45555600124 failure，实际日志 CS1984 (await in finally) / CS0104 (TimeoutException ambiguity)，原生构建后 GUI 未完成，全部测试及签名/漏洞扫描/上传跳过。修复新增网络观测测试的 C#5 兼容性：任务门控代替可提前释放的事件句柄，finally 同步释放，外部等待原任务，显式异常类型。保留原全部测试条件，细化超时/旧观测/新观测诊断。新 CI 待验证；不宣称网络测试通过。布局专项仅源码复核，尚未扩展测试；main 未改。

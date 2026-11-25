@@ -2233,33 +2233,60 @@ internal static class Program
         {
             // Deterministically delay the idle observation across an interface change.
             if (!isSelfTest || !CurrentPermissions().CanConnect) return false;
-            using (var entered = new System.Threading.ManualResetEvent(false))
-            using (var release = new System.Threading.ManualResetEvent(false))
+            // Task gates have no disposable handles that could be closed while
+            // the observer is still using them. Keep cleanup C# 5 compatible.
+            var entered = new TaskCompletionSource<bool>();
+            var release = new TaskCompletionSource<bool>();
+            state.SetService(ConnectionStates.ServiceState.Stopped);
+            observeHandoff = delegate {
+                entered.TrySetResult(true);
+                if (!release.Task.Wait(5000)) throw new System.TimeoutException();
+                return new HandoffObservation(ConnectionStates.ServiceState.Running, 1);
+            };
+            try
             {
-                state.SetService(ConnectionStates.ServiceState.Stopped);
-                observeHandoff = delegate {
-                    entered.Set();
-                    if (!release.WaitOne(5000)) throw new TimeoutException();
-                    return new HandoffObservation(ConnectionStates.ServiceState.Running, 1);
-                };
                 Task work = RunPreConnectCheckAsync(false, true);
+                bool enteredInTime = false;
                 try
                 {
-                    var clock = Stopwatch.StartNew();
-                    while (!entered.WaitOne(0) && clock.ElapsedMilliseconds < 3000) await Task.Delay(10);
-                    if (!entered.WaitOne(0)) return false;
-                    OnNetworkAddressChanged(this, EventArgs.Empty);
-                    await FlushUiEventsForTest();
-                    release.Set();
-                    if (await Task.WhenAny(work, Task.Delay(5000)) != work) return false;
-                    await work;
-                    if (state.Service != ConnectionStates.ServiceState.Stopped || lastIdleObservation != null || checkingBlocked) return false;
-                    observeHandoff = delegate { return new HandoffObservation(ConnectionStates.ServiceState.Running, 1); };
-                    await RunPreConnectCheckAsync(false, true);
-                    return state.Service == ConnectionStates.ServiceState.Running && lastIdleObservation != null &&
-                        !checkingBlocked && CurrentPermissions().CanConnect;
+                    enteredInTime = await Task.WhenAny(entered.Task, Task.Delay(3000)) == entered.Task;
+                    if (enteredInTime)
+                    {
+                        OnNetworkAddressChanged(this, EventArgs.Empty);
+                        await FlushUiEventsForTest();
+                    }
                 }
-                finally { release.Set(); await work; observeHandoff = ObserveHandoff; }
+                finally
+                {
+                    // Signal on every path. Awaiting in finally is unsupported
+                    // by the .NET Framework C# 5 compiler used by this project.
+                    release.TrySetResult(true);
+                }
+                if (await Task.WhenAny(work, Task.Delay(5000)) != work)
+                {
+                    Console.WriteLine("NETWORK_OBSERVATION_TIMEOUT");
+                    return false;
+                }
+                await work;
+                if (!enteredInTime || state.Service != ConnectionStates.ServiceState.Stopped ||
+                    lastIdleObservation != null || checkingBlocked)
+                {
+                    Console.WriteLine("NETWORK_STALE_OBSERVATION_FAIL entered=" + enteredInTime +
+                        " service=" + state.Service + " cached=" + (lastIdleObservation != null) + " busy=" + checkingBlocked);
+                    return false;
+                }
+                observeHandoff = delegate { return new HandoffObservation(ConnectionStates.ServiceState.Running, 1); };
+                await RunPreConnectCheckAsync(false, true);
+                bool ok = state.Service == ConnectionStates.ServiceState.Running && lastIdleObservation != null &&
+                    !checkingBlocked && CurrentPermissions().CanConnect;
+                if (!ok) Console.WriteLine("NETWORK_FRESH_OBSERVATION_FAIL service=" + state.Service +
+                    " cached=" + (lastIdleObservation != null) + " busy=" + checkingBlocked);
+                return ok;
+            }
+            finally
+            {
+                release.TrySetResult(true);
+                observeHandoff = ObserveHandoff;
             }
         }
 
