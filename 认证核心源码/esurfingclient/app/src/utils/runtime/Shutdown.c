@@ -7,6 +7,7 @@
 #include "utils/log/Logger.h"
 
 #include <stdatomic.h>
+#include <stdlib.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -25,6 +26,40 @@ extern void restart_process(void);
 #endif
 #endif
 
+/* Ownership is transferred only after a confirmed successful join. */
+static bool reap_auth_thread(sim_thread_t** owner, int* code)
+{
+    if (*owner == NULL) return true;
+    if (sim_thread_join(*owner, code) != 0) return false;
+    sim_thread_destroy(*owner);
+    *owner = NULL;
+    return true;
+}
+
+static int shutdown_test_worker(void* arg)
+{
+    (void)arg;
+    return 23;
+}
+
+bool shutdown_resource_self_test(void)
+{
+    int code = -1;
+    sim_thread_t* owner = NULL;
+    if (!reap_auth_thread(&owner, &code) || code != -1) return false;
+    owner = sim_thread_create(shutdown_test_worker, NULL);
+    if (owner == NULL) return false;
+    if (!reap_auth_thread(&owner, &code)) abort();
+    if (owner != NULL || code != 23 || !reap_auth_thread(&owner, NULL)) return false;
+    owner = sim_thread_create(shutdown_test_worker, NULL);
+    if (owner == NULL) return false;
+    if (sim_thread_join(owner, NULL) != 0) abort();
+    sim_thread_t* saved = owner;
+    const bool rejected = !reap_auth_thread(&owner, NULL) && owner == saved;
+    sim_thread_destroy(saved);
+    return rejected;
+}
+
 void shut(const int8_t exit_code)
 {
     /**
@@ -36,12 +71,11 @@ void shut(const int8_t exit_code)
     static atomic_bool shutting_down = false;
     if (atomic_exchange(&shutting_down, true))
     {
-        LOG_WARN("程序已在关闭流程中, 忽略重复的关闭请求");
-        return;
+        return; // logger may already have been finalized by the owner
     }
 
-    /* 结构化事件：退出码随事件上报（崩溃=非 0），供桌面端区分正常退出/异常退出 */
-    ephemeral_emit_event("exit", exit_code);
+    /* Publish shutdown before any join or potentially blocking event output. */
+    atomic_store(&g_need_exit, true);
 
     /**
      * 关闭流程一开始就停掉看门狗: 接下来主循环不再打卡,
@@ -50,7 +84,6 @@ void shut(const int8_t exit_code)
     watchdog_stop();
 
     LOG_DEBUG("主程序正在关闭");
-    g_need_exit = true;
 
     /**
      * 监管进程的收尾是"先停子进程再退出", 而且它自己装了信号处理,
@@ -59,7 +92,16 @@ void shut(const int8_t exit_code)
      */
     if (g_prog_role == ROLE_SUPERVISOR)
     {
+        ephemeral_emit_event("exit", exit_code);
         return;
+    }
+
+    atomic_store(&g_thread_keep_alive, false);
+    /* Request all account workers to stop before waiting for any of them. */
+    if (g_prog_status != NULL)
+    {
+        for (int i = 0; i < g_prog_cnt; ++i)
+            g_prog_status[i].runtime_status.is_running = false;
     }
 
 #ifndef __OPENWRT__
@@ -74,26 +116,29 @@ void shut(const int8_t exit_code)
     control_server_stop(); // 先停止接受控制请求
 #endif
 
-    if (g_thread_keep_alive)
-    {
-        LOG_DEBUG("关闭线程守护");
-        g_thread_keep_alive = false;
-    }
     time_control_stop(); // 等待时间控制定时线程退出
 
     LOG_DEBUG("清理资源中");
     LOG_DEBUG("关闭线程");
-    for (uint8_t i = 0; i < g_prog_cnt; i++)
+    if (g_prog_status != NULL)
     {
-        int result_code = 0;
-        g_prog_status[i].runtime_status.is_running = false;
-        if (g_prog_status[i].thread != NULL)
+        for (int i = 0; i < g_prog_cnt; ++i)
         {
-            sim_thread_join(g_prog_status[i].thread, &result_code);
-            LOG_DEBUG("认证线程 %" PRIu8 " 退出, 退出码: %d", i, result_code);
+            if (g_prog_status[i].thread == NULL) continue;
+            int result_code = 0;
+            if (!reap_auth_thread(&g_prog_status[i].thread, &result_code))
+            {
+                /* The worker may still access credentials/logging. Never wipe
+                 * shared state, restart, or report graceful completion here. */
+                fputs("[ERROR] authentication worker join failed; shutdown incomplete\n", stderr);
+                fflush(stderr);
+                _Exit(EXIT_FAILURE);
+            }
+            LOG_DEBUG("认证线程 %d 退出, 退出码: %d", i, result_code);
         }
     }
 
+    ephemeral_emit_event("exit", exit_code);
     LOG_INFO("退出程序, 退出码: %" PRIu8, exit_code);
     clean_logger();
     // 退出前擦除内存里的凭据 (账号/密码/票据), 不留给崩溃转储与换页文件
@@ -128,6 +173,8 @@ void shut(const int8_t exit_code)
  */
 static BOOL WINAPI console_handler(const DWORD ctrlType)
 {
+    if (ctrlType == CTRL_CLOSE_EVENT || ctrlType == CTRL_LOGOFF_EVENT || ctrlType == CTRL_SHUTDOWN_EVENT)
+        g_console_closed = 1;
     g_stop_requested = 1;
 
     /**
