@@ -398,7 +398,7 @@ uint8_t get_adapters_stats(adapter_stats_t* out, const uint8_t max, char* defaul
     uint8_t count = 0;
     for (struct ifaddrs* ifa = list; ifa != NULL && count < max; ifa = ifa->ifa_next)
     {
-        if (ifa->ifa_addr == NULL) continue;
+        if (ifa->ifa_name == NULL || ifa->ifa_addr == NULL) continue;
         if (ifa->ifa_addr->sa_family != AF_INET && ifa->ifa_addr->sa_family != AF_INET6) continue;
         if (adapter_is_loopback(ifa->ifa_name)) continue;
 
@@ -463,39 +463,63 @@ static void adapter_default_route(char* out, const size_t out_len)
 
     int mib[6] = {CTL_NET, PF_ROUTE, 0, 0, NET_RT_DUMP, 0};
     size_t needed = 0;
-    if (sysctl(mib, 6, NULL, &needed, NULL, 0) != 0 || needed == 0) return;
+    if (sysctl(mib, 6, NULL, &needed, NULL, 0) != 0 ||
+        needed == 0 || needed > ADAPTER_INFO_MAX_BYTES) return;
 
-    char* buffer = malloc(needed);
+    const size_t capacity = needed;
+    char* buffer = malloc(capacity);
     if (buffer == NULL) return;
-    if (sysctl(mib, 6, buffer, &needed, NULL, 0) != 0)
+    if (sysctl(mib, 6, buffer, &needed, NULL, 0) != 0 || needed > capacity)
     {
         free(buffer);
         return;
     }
 
-    for (char* cursor = buffer; cursor < buffer + needed;)
+    /* This is a local UI sampling buffer. Do not dereference a partial
+     * kernel record or an unaligned sockaddr in the variable-length dump. */
+    for (size_t offset = 0; offset < needed;)
     {
-        const struct rt_msghdr* route = (const struct rt_msghdr*)cursor;
-        if (route->rtm_msglen <= 0) break;
-        // 默认路由 = 目标地址是全零的那条 (macOS 的 rt_msghdr 没有"前缀长度"字段,
-        // 前缀长度藏在 RTA_DST 那个 sockaddr 里; 默认路由的地址本身就是 0)
-        if ((route->rtm_flags & RTF_UP) != 0 && route->rtm_index != 0 && (route->rtm_addrs & RTA_DST) != 0)
+        const size_t remaining = needed - offset;
+        if (remaining < sizeof(struct rt_msghdr)) break;
+        struct rt_msghdr route;
+        memcpy(&route, buffer + offset, sizeof(route));
+        const size_t length = route.rtm_msglen;
+        if (length < sizeof(route) || length > remaining) break;
+        const size_t payload = length - sizeof(route);
+        const char* dst = buffer + offset + sizeof(route);
+        if (route.rtm_version == RTM_VERSION && (route.rtm_flags & RTF_UP) != 0 &&
+            route.rtm_index != 0 && (route.rtm_addrs & RTA_DST) != 0 &&
+            payload >= offsetof(struct sockaddr, sa_data))
         {
-            const struct sockaddr* dst = (const struct sockaddr*)(route + 1);
-            const bool is_default =
-                (dst->sa_family == AF_INET && ((const struct sockaddr_in*)dst)->sin_addr.s_addr == 0) ||
-                (dst->sa_family == AF_INET6 && IN6_IS_ADDR_UNSPECIFIED(&((const struct sockaddr_in6*)dst)->sin6_addr));
+            struct sockaddr head = {0};
+            memcpy(&head, dst, offsetof(struct sockaddr, sa_data));
+            bool is_default = false;
+            if (head.sa_len <= payload)
+            {
+                if (head.sa_family == AF_INET && head.sa_len >= sizeof(struct sockaddr_in))
+                {
+                    struct sockaddr_in addr;
+                    memcpy(&addr, dst, sizeof(addr));
+                    is_default = addr.sin_addr.s_addr == 0;
+                }
+                else if (head.sa_family == AF_INET6 && head.sa_len >= sizeof(struct sockaddr_in6))
+                {
+                    struct sockaddr_in6 addr;
+                    memcpy(&addr, dst, sizeof(addr));
+                    is_default = IN6_IS_ADDR_UNSPECIFIED(&addr.sin6_addr);
+                }
+            }
             if (is_default)
             {
                 char name[IFNAMSIZ] = {0};
-                if (if_indextoname(route->rtm_index, name) != NULL)
+                if (if_indextoname(route.rtm_index, name) != NULL)
                 {
                     snprintf(out, out_len, "%s", name);
                     break;
                 }
             }
         }
-        cursor += route->rtm_msglen;
+        offset += length;
     }
     free(buffer);
 }
@@ -517,7 +541,7 @@ uint8_t get_adapters_stats(adapter_stats_t* out, const uint8_t max, char* defaul
     uint8_t count = 0;
     for (struct ifaddrs* ifa = list; ifa != NULL && count < max; ifa = ifa->ifa_next)
     {
-        if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_LINK) continue;
+        if (ifa->ifa_name == NULL || ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_LINK) continue;
         if ((ifa->ifa_flags & IFF_LOOPBACK) != 0) continue;
         if ((ifa->ifa_flags & IFF_UP) == 0) continue;
         if (adapter_is_virtual_name(ifa->ifa_name)) continue;
