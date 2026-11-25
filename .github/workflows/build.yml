@@ -406,6 +406,28 @@ jobs:
             build-core/build-toolchain-evidence.json
           if-no-files-found: ignore
 
+  macos-local-resource-audit:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Offline local sampling buffer regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          root='认证核心源码/esurfingclient/app'
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          clang -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -I"$root/include" -I"$root/src/utils/platform" -I"$root/third_party" \
+            scripts/tests/adapter_macos_audit.c "$root/third_party/cJSON/cJSON.c" \
+            -o "$tmp/adapter_audit"
+          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 "$tmp/adapter_audit" | tee "$tmp/result"
+          grep -Fx 'MACOS_LOCAL_ADAPTER_RESOURCE_PASS cases=12' "$tmp/result"
+
   linux-crypto-audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
