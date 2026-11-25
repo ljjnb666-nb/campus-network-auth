@@ -3,7 +3,8 @@
     [string]$Ninja = '',
     [string]$Gcc = '',
     [string]$Gxx = '',
-    [string]$WorkDirectory = ''
+    [string]$WorkDirectory = '',
+    [string]$OutputDirectory = ''
 )
 $ErrorActionPreference = 'Stop'
 
@@ -74,7 +75,7 @@ $toolVersions = @{
     tar      = Get-FirstLine $tar @('--version')
 }
 
-$build = Join-Path $PSScriptRoot 'build-core'
+$build = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $PSScriptRoot 'build-core' }
 if (Test-Path -LiteralPath $build) { throw "构建目录已存在：$build。为保护已有文件，请先自行选择其他目录保存旧结果。" }
 $tempRoot = if ($WorkDirectory) { [IO.Path]::GetFullPath($WorkDirectory) } else { [IO.Path]::GetFullPath([IO.Path]::GetTempPath()) }
 if (-not (Test-Path -LiteralPath $tempRoot -PathType Container)) { throw "临时目录不存在：$tempRoot" }
@@ -120,7 +121,7 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'app.config') -Destination (Join
 
 # 构建清单：版本 / 提交 / 工具链 / 依赖 / 产物哈希（可复现性证据，随产物一起归档）
 $gitSha = 'unknown'
-try { $gitSha = (& git rev-parse HEAD 2>$null | Select-Object -First 1).Trim() } catch { }
+try { $gitSha = (& git -C $PSScriptRoot rev-parse HEAD 2>$null | Select-Object -First 1).Trim() } catch { }
 $appVersion = 'unknown'
 try {
     $m = [regex]::Match((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Program.cs') -Raw -Encoding UTF8), 'AssemblyVersion\("([0-9.]+)"\)')
