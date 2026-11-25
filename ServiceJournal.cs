@@ -9,6 +9,7 @@ using System.Collections.Generic;
 internal sealed class ServiceJournal
 {
     private readonly string filePath;
+    private string expectedSnapshot;
     private ServiceJournal(string path) { filePath = path; }
 
     internal string Action { get; private set; }
@@ -86,7 +87,7 @@ internal sealed class ServiceJournal
             {
                 // Migrate legacy journals conservatively: successful prepare with a
                 // previously running service is a possible outstanding restoration.
-                j.OperationId = Guid.NewGuid().ToString("N");
+                j.OperationId = null; // legacy snapshot must be stable across independent readers
                 j.NeedsRecovery = j.Action == "prepare" && j.StateBefore == "Running" && j.Result == "ok";
                 j.Uncertain = j.Result == "pending" || (j.Action == "prepare" && j.Result.StartsWith("failed:", StringComparison.Ordinal));
             }
@@ -96,7 +97,13 @@ internal sealed class ServiceJournal
             j.Invalid = true; j.Uncertain = true;
             j.Action = null; j.StateBefore = null; j.Result = null; j.TimeUtc = null;
         }
+        j.expectedSnapshot = j.Snapshot();
         return j;
+    }
+
+    private string Snapshot()
+    {
+        return new JavaScriptSerializer().Serialize(new { Action, StateBefore, Result, TimeUtc, OperationId, NeedsRecovery, Uncertain, PriorUncertain });
     }
 
     private void Write()
@@ -105,7 +112,16 @@ internal sealed class ServiceJournal
         string dir = Path.GetDirectoryName(filePath);
         Directory.CreateDirectory(dir);
         RejectReparsePoint(dir);
+        string lockPath = filePath + ".lock";
+        if (File.Exists(lockPath)) RejectReparsePoint(lockPath);
+        // All cooperating writers serialize the compare-and-replace operation.
+        using (var writerLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+        {
+        var latest = Load(filePath);
+        if (latest.Invalid || !String.Equals(latest.expectedSnapshot, expectedSnapshot, StringComparison.Ordinal))
+            throw new IOException("Service journal changed since it was read.");
         if (File.Exists(filePath)) RejectReparsePoint(filePath);
+        if (OperationId == null) OperationId = Guid.NewGuid().ToString("N");
         TimeUtc = DateTime.UtcNow.ToString("o");
         var json = new JavaScriptSerializer().Serialize(new
         {
@@ -124,18 +140,30 @@ internal sealed class ServiceJournal
             else File.Move(temp, filePath);
         }
         finally { if (File.Exists(temp)) try { File.Delete(temp); } catch { } }
+        expectedSnapshot = Snapshot();
+        }
     }
 
     // The caller records explicit user consent before invoking this method.
     internal void Begin(string action, string stateBefore)
     {
-        if (Invalid || (action != "prepare" && action != "restore") || !ValidState(stateBefore)) throw new InvalidDataException();
+        if (Invalid || HasPending || (action != "prepare" && action != "restore") || !ValidState(stateBefore)) throw new InvalidDataException();
+        string oldAction = Action, oldState = StateBefore, oldResult = Result, oldId = OperationId, oldTime = TimeUtc;
+        bool oldPrior = PriorUncertain, oldUncertain = Uncertain;
+        try
+        {
         PriorUncertain = Uncertain;
         Action = action; StateBefore = stateBefore; Result = "pending";
         OperationId = Guid.NewGuid().ToString("N");
         // Once written, interruption is an uncertain outcome, not a no-op.
         Uncertain = true;
         Write();
+        }
+        catch
+        {
+            Action = oldAction; StateBefore = oldState; Result = oldResult; OperationId = oldId; TimeUtc = oldTime;
+            PriorUncertain = oldPrior; Uncertain = oldUncertain; throw;
+        }
     }
 
     internal void Complete(int? code, string actualState, bool cancelled)
@@ -176,9 +204,12 @@ internal sealed class ServiceJournal
 
     internal void ReconcileRunning()
     {
-        if (Invalid) return;
-        if (!NeedsRecovery && !Uncertain && !HasPending) return;
-        NeedsRecovery = false; Uncertain = false; Result = "ok"; Write();
+        if (Invalid || HasPending) return; // observation alone cannot resolve an unfinished helper
+        if (!NeedsRecovery && !Uncertain) return;
+        bool oldRecovery = NeedsRecovery, oldUncertain = Uncertain;
+        string oldResult = Result, oldTime = TimeUtc, oldId = OperationId;
+        try { NeedsRecovery = false; Uncertain = false; Result = "ok"; Write(); }
+        catch { NeedsRecovery = oldRecovery; Uncertain = oldUncertain; Result = oldResult; TimeUtc = oldTime; OperationId = oldId; throw; }
     }
 
     internal static bool SelfTest()
@@ -206,6 +237,21 @@ internal sealed class ServiceJournal
             j = Load(path); if (j.NeedsRecovery || j.Uncertain) return false;
             j.Begin("prepare", "Stopped"); j.Complete(0, "Stopped", false);
             j = Load(path); if (j.NeedsRecovery || j.Uncertain) return false;
+            var stale = Load(path);
+            j.Begin("prepare", "Running");
+            bool rejected = false;
+            try { stale.Begin("restore", "Stopped"); } catch (IOException) { rejected = true; }
+            if (!rejected || stale.HasPending || !Load(path).HasPending) return false;
+            var pending = Load(path); pending.ReconcileRunning();
+            if (!pending.HasPending || !Load(path).HasPending) return false;
+            rejected = false;
+            try { pending.Begin("restore", "Stopped"); } catch (InvalidDataException) { rejected = true; }
+            if (!rejected) return false;
+            j.Complete(10, "Stopped", false);
+            rejected = false;
+            try { pending.Complete(0, "Running", false); } catch (IOException) { rejected = true; }
+            if (!rejected || !pending.HasPending || !Load(path).NeedsRecovery) return false;
+            Console.WriteLine("JOURNAL_CONCURRENCY_PASS");
             File.WriteAllText(path, "{broken");
             return Load(path).Invalid;
         }

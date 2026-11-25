@@ -43,6 +43,12 @@ internal static class Program
         if (args.Length == 1 && args[0] == "--admin-prepare") return ChangeService(true);
         if (args.Length == 1 && args[0] == "--admin-restore") return ChangeService(false);
         if (args.Length == 1 && args[0] == "--self-test-logic") return LogicTests();
+        if (args.Length == 2 && args[0] == "--self-test-service-gate")
+        {
+            Guid id;
+            if (!Guid.TryParse(args[1], out id)) return 2;
+            return WithServiceMutationGate(@"Local\CheZhiTest-" + id.ToString("N"), delegate { return 0; });
+        }
         if (args.Length == 2 && args[0] == "--self-test-signature") return SignatureTests(args[1]);
         if (args.Length == 1 && args[0] == "--self-test-core") return CoreTest(false);
         if (args.Length == 1 && args[0] == "--self-test-stop") return CoreTest(true);
@@ -440,6 +446,53 @@ internal static class Program
         {
             var principal = new WindowsPrincipal(WindowsIdentity.GetCurrent());
             if (!principal.IsInRole(WindowsBuiltInRole.Administrator)) return 20;
+            return WithServiceMutationGate(@"Global\CheZhiCampus-ServiceMutation-v1", delegate { return ChangeServiceUnderGate(prepare); });
+        }
+        catch { return 25; }
+    }
+
+    private static int WithServiceMutationGate(string name, Func<int> operation)
+    {
+        try
+        {
+            using (var gate = new System.Threading.Mutex(false, name))
+            {
+                bool owned = false;
+                try
+                {
+                    try { owned = gate.WaitOne(0); }
+                    catch (System.Threading.AbandonedMutexException) { owned = true; return 27; }
+                    if (!owned) return 27;
+                    return operation();
+                }
+                finally { if (owned) gate.ReleaseMutex(); }
+            }
+        }
+        catch { return 27; }
+    }
+
+    private static bool ServiceGateInvariants()
+    {
+        Guid id = Guid.NewGuid();
+        string name = @"Local\CheZhiTest-" + id.ToString("N");
+        Func<int> launch = delegate {
+            using (Process child = Process.Start(new ProcessStartInfo { FileName = Application.ExecutablePath,
+                Arguments = "--self-test-service-gate " + id.ToString("N"), UseShellExecute = false, CreateNoWindow = true }))
+            {
+                if (child == null) return -1;
+                if (!child.WaitForExit(5000)) { child.Kill(); child.WaitForExit(5000); return -1; }
+                return child.ExitCode;
+            }
+        };
+        bool ok = WithServiceMutationGate(name, launch) == 27 && launch() == 0;
+        Console.WriteLine(ok ? "SERVICE_GATE_PASS" : "SERVICE_GATE_FAIL");
+        return ok;
+    }
+
+    private static int ChangeServiceUnderGate(bool prepare)
+    {
+        try
+        {
             if (!ServiceInstalled())
             {
                 // 没装天翼客户端就没有后台服务: “准备连接”无事可做直接成功, “恢复天翼”无从恢复
@@ -488,6 +541,7 @@ internal static class Program
                 case 20: return "未获得管理员权限，操作已取消。";
                 case 21: return "天翼服务文件路径或数字签名身份未通过验证；未执行切换。请核对官方客户端。";
                 case 26: return "未安装天翼后台服务，请检查官方客户端安装。";
+                case 27: return "另一个服务切换正在执行，或无法确认切换互斥状态；未执行新的服务修改。";
                 case 22: return "仍有天翼客户端或认证进程在运行，请先断开并完全退出。";
                 case 23: return "移动热点或 Wi-Fi Direct 仍在使用（或状态未知），请先关闭热点。";
                 case 24: return "天翼服务正在切换中，请稍后再试。";
@@ -779,7 +833,7 @@ internal static class Program
             && ValidateAuthInput("a", new string('b', 128), 1) != null
             && ValidateAuthInput("a", "b", 0) != null
             && ValidateAuthInput("a", "b\0", 1) != null
-            && CleanupScopeInvariants() && ServicePathInvariants() && HandoffInvariants() && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && ServiceIdentity.NativeLayoutIsValid() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
+            && ServiceGateInvariants() && CleanupScopeInvariants() && ServicePathInvariants() && HandoffInvariants() && StateMachineInvariants() && CoreEventInvariants() && ServiceJournal.SelfTest() && ServiceIdentity.NativeLayoutIsValid() && ServiceIdentity.IsKnownPublisher("中数通信息有限公司", "")
             && !ServiceIdentity.IsKnownPublisher("fake telecom", "CN=fake telecom");
         Console.WriteLine(ok ? "LOGIC_PASS" : "LOGIC_FAIL");
         return ok ? 0 : 1;
@@ -1855,7 +1909,7 @@ internal static class Program
                     stub.Dispose();
                 }
                 readServiceState = CurrentServiceState;
-                try { File.Delete(path); } catch { }
+                try { File.Delete(path); File.Delete(path + ".lock"); } catch { }
             }
         }
 
@@ -2534,6 +2588,7 @@ internal static class Program
                     lastIdleObservation.Clients != observation.Clients || lastIdleObservation.VisibleClient != observation.VisibleClient;
                 lastIdleObservation = observation;
                 if (quiet && (!changed || state.Auth != ConnectionStates.AuthState.Idle)) return;
+                if (!JournalAllowsNewAction()) return;
                 var decision = observation.Decide(ConnectionStates.HandoffIntent.Connect);
                 if (observation.VisibleClient && observation.Service == ConnectionStates.ServiceState.Running)
                 {
@@ -2567,9 +2622,28 @@ internal static class Program
             await CheckAndStartAsync(taskGeneration);
         }
 
+        private bool JournalAllowsNewAction()
+        {
+            if (isSelfTest) return true;
+            var journal = ServiceJournal.Load(ServiceJournal.DefaultPath());
+            if (!journal.Invalid && !journal.HasPending) return true;
+            SetHandoff(ConnectionStates.HandoffState.Blocked,
+                journal.Invalid ? "服务事务记录损坏，请先核对诊断。" :
+                "存在上次尚未确认的服务操作；请先核对天翼服务和管理员操作是否结束，避免重复切换。", ToneWarn);
+            return false;
+        }
+
         private async Task CheckAndStartAsync(int generation)
         {
             if (activeTask == null || userStopped || serviceBusy || exitRequested || connectCheckPending) return;
+            if (!JournalAllowsNewAction())
+            {
+                activeTask = null; retryTimer.Stop();
+                state.TrySetAuth(ConnectionStates.AuthState.Idle, "unresolved journal");
+                UpdateConnectionPill();
+                connect.Enabled = true; prepare.Enabled = true; restore.Enabled = true; stop.Enabled = false; stop.Text = "停止认证";
+                return;
+            }
             bool automaticRetry = autoRetryCount > 0;
             connectCheckPending = true;
             connect.Enabled = false; stop.Enabled = true; stop.Text = "取消连接";
@@ -2972,7 +3046,12 @@ internal static class Program
                     SetStatus("服务事务记录损坏，请手动核对天翼服务状态。", ToneWarn);
                     return;
                 }
-                if (!journal.HasPending && !journal.NeedsRecovery && !journal.Uncertain) return;
+                if (journal.HasPending)
+                {
+                    SetHandoff(ConnectionStates.HandoffState.Blocked, "上次服务事务未完成；不能仅凭当前服务状态判定结果，请核对诊断。", ToneWarn);
+                    return;
+                }
+                if (!journal.NeedsRecovery && !journal.Uncertain) return;
                 string actual = await Task.Run((Func<string>)CurrentServiceState);
                 if (HandoffCancelled(generation, false) || serviceBusy || connectCheckPending || activeTask != null) return;
                 if (actual == "Running") { journal.ReconcileRunning(); return; }
@@ -3055,6 +3134,7 @@ internal static class Program
             if (running != null && !Object.ReferenceEquals(running, completedProcess))
             { MessageBox.Show(this, "请先停止本程序的认证，再执行切换。", Text, MessageBoxButtons.OK, MessageBoxIcon.Information); return false; }
             if (!fromConnect) { taskGeneration++; state.TrySetAuth(ConnectionStates.AuthState.Idle, "handoff request"); }
+            if (!JournalAllowsNewAction()) return false;
             int generation = taskGeneration;
             serviceBusy = true; prepare.Enabled = false; restore.Enabled = false; connect.Enabled = false;
             if (fromConnect) stop.Enabled = false;

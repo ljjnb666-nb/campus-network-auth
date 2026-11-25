@@ -312,3 +312,8 @@ Push 45547797875 / PR 45547803893 success；CLEANUP_SCOPE_PASS / CORE_RESOURCE_P
 ### 主动审计第五批（基线 816a05f）
 
 Push 45550140241 / PR 45550145561 success；CURL_RANGE_TEST_PASS、CURL_FEED_CROSSCHECK_PASS，官方双源 8.23.0 公告数 0。30 次资源测试仍为 243→326。源码发现重定向流主动获取后未统一显式关闭、FormClosed 清理遗漏直接 Dispose。新增读者 using、退出后 stdin 释放、统一 Process 和窗口 Dispose 入口、10 次预热+100 次分段采样及 32 句柄预算、逐轮流关闭断言、5 次直接窗口释放回归。新 CI 待核实，不推定 83 个句柄均为泄漏，不推定无泄漏。真实环境、72h、跨进程服务事务和签名发布仍未验收。
+
+
+### 主动审计第六批（基线 ce047fd）
+
+Push 45550721734 / PR 45550731789 success；110 次循环，预热后 handles 326→326，threads 18→18，private bytes 27803648→28823552；UI_DISPOSE_PASS，curl 双源公告 0。发现管理员子进程缺乏跨进程互斥、旧事务实例可覆盖新记录、启动时仅 Running 即清除 pending。新增机器范围 helper 互斥、事务独占写锁及快照版本检查、保留遗留 pending，并新增 SERVICE_GATE_PASS / JOURNAL_CONCURRENCY_PASS。新 CI 未验证。遗留 pending 需人工核对，自动解除尚未实现；Global 权限/跨会话实机未验，外部 SCM 竞争仍存在。未修改 main、未执行实际校园网或系统服务操作。
