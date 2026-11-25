@@ -24,6 +24,7 @@ internal sealed class ServiceJournal
     internal bool Invalid { get; private set; }
     private bool PriorUncertain { get; set; }
     internal bool HasPending { get { return Result == "pending"; } }
+    internal bool HasConfirmedOutcome { get { return !Invalid && Result == "ok" && !Uncertain; } }
 
     internal static string DefaultPath()
     {
@@ -202,10 +203,26 @@ internal sealed class ServiceJournal
         }
         else if (code == 0 || code == 10)
         {
-            Result = "ok";
-            if (Action == "prepare" && code == 10) NeedsRecovery = true; // elevated child actually stopped a running service
-            if (actualState == "Running") { NeedsRecovery = false; Uncertain = false; }
-            else Uncertain = Action == "restore" || (code == 0 && PriorUncertain) || (actualState != "Stopped" && actualState != "NotInstalled");
+            bool targetReached = Action == "prepare" ? actualState == "Stopped" || actualState == "NotInstalled" :
+                actualState == "Running";
+            // Code 10 describes an actual service change, not removal.
+            // A no-op cannot establish who stopped a previously running service.
+            bool contradictory = !targetReached || (code == 10 && actualState == "NotInstalled") ||
+                (Action == "prepare" && code == 0 && StateBefore == "Running");
+            if (contradictory)
+            {
+                Result = "failed:unknown";
+                Uncertain = true;
+                if (actualState == "Running") NeedsRecovery = false;
+                else if (Action == "prepare" && (StateBefore == "Running" || code == 10)) NeedsRecovery = true;
+            }
+            else
+            {
+                Result = "ok";
+                if (Action == "prepare" && code == 10) NeedsRecovery = true;
+                if (actualState == "Running") { NeedsRecovery = false; Uncertain = false; }
+                else Uncertain = code == 0 && PriorUncertain;
+            }
         }
         else
         {
@@ -254,8 +271,55 @@ internal sealed class ServiceJournal
         if (!NeedsRecovery && !Uncertain) return;
         bool oldRecovery = NeedsRecovery, oldUncertain = Uncertain;
         string oldResult = Result, oldTime = TimeUtc, oldId = OperationId;
-        try { NeedsRecovery = false; Uncertain = false; Result = "ok"; Write(); }
+        // Current running state settles restoration responsibility, not the
+        // historical helper outcome. Never rewrite a failed/cancelled result.
+        try { NeedsRecovery = false; Uncertain = false; Write(); }
         catch { NeedsRecovery = oldRecovery; Uncertain = oldUncertain; Result = oldResult; TimeUtc = oldTime; OperationId = oldId; throw; }
+    }
+
+    private static bool OutcomeSelfTest(string dir)
+    {
+        // A separate file for each case prevents earlier recovery flags from
+        // masking a false-positive result.
+        int cases = 0;
+        foreach (string action in new[] { "prepare", "restore" })
+        foreach (string before in new[] { "Running", "Stopped" })
+        foreach (int code in new[] { 0, 10 })
+        foreach (string actual in new[] { "Running", "Stopped", "NotInstalled", "unknown" })
+        {
+            string path = Path.Combine(dir, "outcome-" + cases + ".json");
+            var record = Load(path);
+            record.Begin(action, before);
+            record.Complete(code, actual, false);
+            record = Load(path);
+            bool expected = action == "restore" ? actual == "Running" :
+                (actual == "Stopped" || (actual == "NotInstalled" && code == 0)) &&
+                !(before == "Running" && code == 0);
+            if (record.HasPending || record.Invalid || record.HasConfirmedOutcome != expected ||
+                (expected ? record.Result != "ok" : record.Result != "failed:unknown") ||
+                (!expected && !record.Uncertain))
+            {
+                Console.WriteLine("JOURNAL_OUTCOME_FAIL action=" + action + " before=" + before +
+                    " code=" + code + " actual=" + actual + " result=" + record.Result);
+                return false;
+            }
+            if (!expected)
+            {
+                record.ReconcileRunning();
+                record = Load(path);
+                if (record.Result != "failed:unknown" || record.HasConfirmedOutcome ||
+                    record.NeedsRecovery || record.Uncertain) return false;
+            }
+            cases++;
+        }
+        string failurePath = Path.Combine(dir, "failed-outcome.json");
+        var failure = Load(failurePath);
+        failure.Begin("prepare", "Running");
+        failure.Complete(25, "Stopped", false);
+        failure.ReconcileRunning();
+        if (Load(failurePath).Result != "failed:25" || Load(failurePath).HasConfirmedOutcome) return false;
+        Console.WriteLine("JOURNAL_OUTCOME_PASS cases=" + cases + " failure_history=1");
+        return true;
     }
 
     internal static bool SelfTest()
@@ -338,7 +402,7 @@ internal sealed class ServiceJournal
             missing.Begin("prepare", "Running");
             if (!Load(path).HasPending) return false;
             Console.WriteLine("JOURNAL_BOUNDED_READ_PASS");
-            return true;
+            return OutcomeSelfTest(dir);
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
     }

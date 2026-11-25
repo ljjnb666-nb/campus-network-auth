@@ -307,7 +307,8 @@ internal static class Program
             query.Options.Timeout = TimeSpan.FromSeconds(5); // WMI 冷启动可达数秒, 不设限会卡 UI 线程
             using (ManagementObjectCollection rows = query.Get())
             {
-                foreach (ManagementObject row in rows) { count++; path = Convert.ToString(row["PathName"]); }
+                foreach (ManagementObject row in rows)
+                    using (row) { count++; path = Convert.ToString(row["PathName"]); }
             }
         }
     }
@@ -2706,7 +2707,8 @@ internal static class Program
                 }
                 if (!PumpTaskForTest(PollTimedOutServiceAsync(), 3000)) return false;
                 bool ok = !serviceBusy && pendingServiceChild == null && !ServiceJournal.Load(path).HasPending &&
-                    connect.Enabled && prepare.Enabled && restore.Enabled && running == null && activeTask == null;
+                    connect.Enabled && prepare.Enabled && restore.Enabled && running == null && activeTask == null &&
+                    ServiceJournal.Load(path).Result == "failed:unknown" && !ServiceJournal.Load(path).HasConfirmedOutcome;
                 Console.WriteLine(ok ? "SERVICE_RECOVERY_PASS" : "SERVICE_RECOVERY_FAIL");
                 return ok;
             }
@@ -4295,13 +4297,13 @@ internal static class Program
                 if (HandoffCancelled(generation, fromConnect)) return false;
                 state.SetService(MapServiceState(actual));
                 bool expected = forPrepare ? actual == "Stopped" || actual == "NotInstalled" : actual == "Running";
-                if ((code == 0 || code == 10) && expected)
+                if (journal.HasConfirmedOutcome && expected)
                 {
                     if (forPrepare)
                     { SetHandoff(ConnectionStates.HandoffState.Ready, "准备完成，可以连接校园网。", ToneOk); return true; }
                     return await LaunchOfficialAsync(generation);
                 }
-                string failure = code == 0 || code == 10 ? "服务结果未得到确认，请核对实际状态。" : ServiceError(code ?? 25);
+                string failure = code == 0 || code == 10 ? "服务操作返回成功，但事务结果或实际状态未得到确认，请核对后重新选择操作。" : ServiceError(code ?? 25);
                 if (code == 21)
                 {
                     string reason = await Task.Run((Func<string>)ServiceVerificationReason);

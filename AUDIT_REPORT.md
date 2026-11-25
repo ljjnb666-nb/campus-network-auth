@@ -392,3 +392,8 @@ Push 45575904810 / PR 45575919612 failure，实际日志显示新增三项文件
 ### 发布安全复审第二批（57c2868）
 
 Push 45576570837 / PR 45576580976 success，新增 bounded read / integrity handle、UI/应用/资源/签名回归、敏感信息扫描、curl 双源均通过，artifact 15004183600。复审 v3 以 WMI 启动时间单证据判定重启不足，未采用可能表示 BCD 启动项的 BootIdentifier GUID。v4 增加 Windows 内核 BootId（公开 WDK 定义为 OS loader 启动序列，Win10+共享页偏移0x2c4；ReadProcessMemory 安全读取），双证据严格递增、稳定服务、用户确认及二次核验；旧 pending 缺序号保持阻断，非 pending 兼容。新增 JOURNAL_BOOT_SEQUENCE_PASS/BOOT_SEQUENCE_PASS，当前仅同启动跨进程及模拟变化，真实重启/快速启动/休眠和兼容性待现场，不能证明无其他风险。新 CI 待验证，main 未修改。
+
+
+### 发布安全复审第三批（3ae0fab）
+
+Push 45577413944 / PR 45577426560 success；JOURNAL_BOOT_SEQUENCE_PASS/BOOT_SEQUENCE_PASS、既有全部门禁通过，artifact 15004064735。复审发现 helper 成功码与实际服务状态矛盾时 journal 仍可能写 ok，ReconcileRunning 抹去历史失败。改为目标及返回码一致性校验、保留历史结果、GUI 后续动作须明确确认结果，新增32种组合与超时离线子进程断言，WMI 对象显式释放。新 CI 待验证；管理员真实服务操作、外部 SCM 竞态、原生协议安全、真实重启/72h仍待验收。main 未修改。

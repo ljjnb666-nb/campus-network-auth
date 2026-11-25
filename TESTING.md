@@ -168,3 +168,8 @@ CREDENTIAL_BOUNDED_READ_PASS / JOURNAL_BOUNDED_READ_PASS：凭据和事务记录
 ## 服务事务双重启动证据
 
 JOURNAL_BOOT_SEQUENCE_PASS：事务 v4 保存 WMI 启动时间及内核 KUSER_SHARED_DATA.BootId，必须同时严格递增且服务实际状态稳定才允许用户确认中断；同序号/回退/超界/缺失、仅时间变化、仅序号变化、过渡服务及 v3 旧 pending 均拒绝。原 CAS/中断不确定及恢复责任测试保留。BOOT_SEQUENCE_PASS 使用 ReadProcessMemory 读取 Windows 10+ 只读共享页的 0x2c4 字段，跨进程同启动稳定性及 WMI 双证据测试；不是 BCD GUID。不支持/读取失败保守阻断服务变更与遗留核对，不影响无服务变更的正常连接。实际重启/休眠/快速启动、不同 Windows build 尚未现场验证；共享页布局虽有公开定义但固定偏移依赖系统版本，不能保证未来兼容。新CI待验证。
+
+
+## 服务事务结果一致性回归
+
+JOURNAL_OUTCOME_PASS cases=32 failure_history=1：prepare/restore、原始 Running/Stopped、返回0/10、实际 Running/Stopped/NotInstalled/unknown 全组合；返回成功但目标不符、实际变更码与服务缺失矛盾、原本运行而 no-op 停止等记录 failed:unknown 而不是 ok，保留不确定性。观察到 Running 可解除恢复责任但不重写历史失败。GUI 自动后续动作要求 HasConfirmedOutcome 且目标状态吻合。旧超时恢复测试使用实际离线子进程返回0并注入原本运行/最终停止，确认不虚报成功。WMI 查询释放 ManagementObject。无真实服务操作，新 CI 待验证。
