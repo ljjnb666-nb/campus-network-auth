@@ -14,6 +14,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define GENERATE_URL "http://connectivitycheck.platform.hicloud.com/generate_204"
@@ -387,8 +388,40 @@ static network_status_t probe_drain(CURLM* multi, probe_t* probes, size_t count)
 
 /* No external requests. Exercise immediate completion with an invalid URL,
  * plus the exact classification boundary used in production. */
+static int probe_test_thread(void* arg)
+{
+    int* value = arg;
+    *value = 42;
+    return 17;
+}
+
+static bool probe_thread_resource_self_test(void)
+{
+    if (sim_thread_create(NULL, NULL) != NULL || sim_thread_join(NULL, NULL) == 0 ||
+        sim_thread_detach(NULL) == 0) return false;
+    for (int i = 0; i < 64; ++i)
+    {
+        int value = 0;
+        int code = -1;
+        sim_thread_t* thread = sim_thread_create(probe_test_thread, &value);
+        if (thread == NULL) return false;
+        if (sim_thread_join(thread, &code) != 0)
+        {
+            /* A failed wait does not establish that the stack argument is safe
+             * to reclaim. This offline executable must stop immediately. */
+            abort();
+        }
+        const bool ok = value == 42 && code == 17 &&
+            sim_thread_join(thread, NULL) != 0 && sim_thread_detach(thread) != 0;
+        sim_thread_destroy(thread);
+        if (!ok) return false;
+    }
+    return true;
+}
+
 bool probe_resource_self_test(void)
 {
+    if (!probe_thread_resource_self_test()) return false;
     if (probe_sink(NULL, SIZE_MAX, 2, NULL) != 0 ||
         probe_sink(NULL, 4, 8, NULL) != 32 ||
         probe_classify(CURLE_OK, CURLE_OK, 204) != STATUS_OK ||
@@ -676,7 +709,12 @@ void net_probe_stop(void)
 
     atomic_store(&s_probe_running, false);
     int result_code = 0;
-    sim_thread_join(s_probe_thread, &result_code);
+    if (sim_thread_join(s_probe_thread, &result_code) != 0)
+    {
+        LOG_ERROR("联网状态探测线程等待失败, 保留线程对象");
+        return;
+    }
+    sim_thread_destroy(s_probe_thread);
     s_probe_thread = NULL;
     atomic_store(&s_probe_cached, STATUS_ERROR);
 
