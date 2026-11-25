@@ -45,3 +45,23 @@
 5. 实机 DPI、升级/卸载和许可缺失等事项依 RELEASE_CHECKLIST.md 逐项关闭。
 
 当前结论：DEFINED_OFFLINE_GATES_VERIFIED（仅指定基线）；FULL_RELEASE_ACCEPTANCE_BLOCKED。
+
+
+## 专项一集中复审补充：本地网卡枚举与流量资源
+
+历史验收基线 e28d0c4c4bd707548a276db484cc1f3b9db10f26：[CI #338](https://github.com/ljjnb666-nb/campus-network-auth/actions/runs/45632351246)，Linux 139268618601、Windows 139268619027 均成功。
+
+实际日志 ADAPTER_RESOURCE_AUDIT_PASS growthFailures=6 jsonFailures=22 maxRows=255；TRAFFIC_ALLOCATOR_FAILURE_PASS cases=36；TRAFFIC_SNAPSHOT_LIFECYCLE_PASS；NATIVE_NET_RESOURCE_PASS。合计64个实际分配故障位置，限于定义的合成列表及快照路径。此基线原生核心同runner两次摘要 59BB59E8BEBFC316E7F4197E905717A73FC58F0B4DFBEB494E03215661D0A443 一致，GUI 不一致。
+
+| 范围 | 验收状态 |
+| --- | --- |
+| 本地列表每次调用独占堆缓冲、255项边界、失败清理 | #338 PASS |
+| 网速快照生命周期、JSON失败清理 | #338 PASS |
+| Windows本地枚举与流量采样 API 合成故障、内存分配故障 | 770002a / 1b1c71a，22个定义用例，等待最新CI |
+| macOS 本地采样 sysctl 缓冲容量、变长记录与地址边界检查 | 49656c2，源码已修改，未取得macOS编译/运行证据 |
+| 实际系统API阻塞、真实网卡热插拔、长期资源趋势 | BLOCKED：需授权实机验证 |
+| 其余原生网络资源路径全覆盖 | 不以本地列表和采样覆盖代替，仍有未验收范围 |
+
+4MiB 枚举缓冲上限、3次分配尝试和255行上限是工程保护初值，不宣称适合全部拓扑。Windows测试替换API及分配函数，核对返回状态、活跃分配和输出边界；不调用真实网卡查询，不代表Windows系统API自身资源释放证明。未修改认证、网关获取、网络访问控制、服务切换或协议。
+
+专项结论：LOCAL_ADAPTER_OFFLINE_REGRESSION_VERIFIED（#338已覆盖部分）；LATEST_RESOURCE_GATE_PENDING；FULL_NATIVE_NETWORK_RESOURCE_ACCEPTANCE_BLOCKED。最新提交的CI尚未确认前不关闭专项，不合并、不发布。
