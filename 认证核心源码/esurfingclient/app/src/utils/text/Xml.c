@@ -1,3 +1,4 @@
+#include "cipher/CipherUtils.h"
 #include "utils/text/TextUtils.h"
 #include "utils/time/TimeUtils.h"
 
@@ -125,23 +126,23 @@ char* create_xml_payload(const XmlChoose choose)
         break;
     default:
         LOG_ERROR("XML 选择代码错误");
+        s_secure_free(xml, XML_BUFFER_SIZE);
         return NULL;
     }
     if (xml_len <= 0)
     {
         LOG_ERROR("XML 创建失败");
+        s_secure_free(xml, XML_BUFFER_SIZE);
         return NULL;
     }
     if (xml_len >= XML_BUFFER_SIZE)
     {
         LOG_ERROR("XML 内容过长 (需要 %d 字节，但缓冲区只有 %d 字节)", xml_len + 1, XML_BUFFER_SIZE);
+        s_secure_free(xml, XML_BUFFER_SIZE);
         return NULL;
     }
     LOG_DEBUG("创建 XML 完成");
-    if (choose != LOGIN)
-    {
-        LOG_DEBUG("XML 内容为:\n%s", xml);
-    }
+    /* Never persist XML payloads, including tickets and credentials. */
     return xml;
 }
 
