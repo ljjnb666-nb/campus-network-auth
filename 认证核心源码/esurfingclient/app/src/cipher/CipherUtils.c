@@ -16,7 +16,9 @@ char* bytes_2_hex(const uint8_t* bytes, const size_t len)
 
 uint8_t* hex_2_bytes(const char* hex, size_t* out_len)
 {
-    if (!hex || !out_len) return NULL;
+    if (!out_len) return NULL;
+    *out_len = 0;
+    if (!hex) return NULL;
     const size_t hex_len = strlen(hex);
     if (hex_len % 2 != 0) return NULL;
     const size_t byte_len = hex_len / 2;
@@ -24,8 +26,16 @@ uint8_t* hex_2_bytes(const char* hex, size_t* out_len)
     if (!bytes) return NULL;
     for (size_t i = 0; i < byte_len; i++)
     {
-        const char byte_str[3] = {hex[i * 2], hex[i * 2 + 1], '\0'};
+        const unsigned char hi = (unsigned char)hex[i * 2];
+        const unsigned char lo = (unsigned char)hex[i * 2 + 1];
+        if (!isxdigit(hi) || !isxdigit(lo))
+        {
+            s_secure_free(bytes, byte_len);
+            return NULL;
+        }
+        char byte_str[3] = {(char)hi, (char)lo, '\0'};
         bytes[i] = (uint8_t)strtol(byte_str, NULL, 16);
+        cipher_secure_zero(byte_str, sizeof(byte_str));
     }
     *out_len = byte_len;
     return bytes;
@@ -203,5 +213,59 @@ bool des_buffer_lifecycle_self_test(void)
     }
     cipher_secure_zero(key, sizeof(key));
     cipher_secure_zero(iv, sizeof(iv));
+    return ok;
+}
+
+
+/* Remaining algorithm families: exercise only public synthetic keys and text. */
+bool remaining_cipher_lifecycle_self_test(void)
+{
+    uint8_t key[48], iv[16];
+    uint32_t words[12], iv_words[2] = {UINT32_C(0x12345678), UINT32_C(0x89abcdef)};
+    for (size_t i = 0; i < sizeof(key); ++i) key[i] = (uint8_t)(i + 1);
+    for (size_t i = 0; i < 12; ++i) words[i] = (uint32_t)(i + 1);
+    memset(iv, 0x5a, sizeof(iv));
+    const char* messages[] = {"a","1234567","12345678","123456789","123456789012345","1234567890123456","12345678901234567","1234567890123456789012345678901"};
+    bool ok = true;
+    for (unsigned mode = 0; mode < 16 && ok; ++mode)
+    {
+        cipher_interface_t* ci = NULL;
+        switch (mode)
+        {
+        case 0: ci = create_aes_ecb_cipher(key, key + 16); break;
+        case 1: ci = create_aes_cbc_cipher(key, key + 16, iv); break;
+        case 2: ci = create_aes_double_ecb_cipher(key); break;
+        case 3: ci = create_aes_double_cbc_cipher(key, iv); break;
+        case 4: ci = create_sm4_ecb_cipher(key); break;
+        case 5: ci = create_sm4_cbc_cipher(key, iv); break;
+        case 6: ci = create_sm4_variant_ecb_cipher(key); break;
+        case 7: ci = create_sm4_variant_cbc_cipher(key, iv); break;
+        case 8: ci = create_mod_xtea_cipher(words, words + 4, words + 8, false); break;
+        case 9: ci = create_mod_xtea_cipher(words, words + 4, words + 8, true); break;
+        case 10: ci = create_mod_xtea_iv_cipher(words, words + 4, words + 8, iv_words); break;
+        case 11: ci = create_mod_xtea_cbc_triple_cipher(words, words + 4, words + 8, iv_words); break;
+        case 12: ci = create_tea_triple_ecb_cipher(key); break;
+        case 13: ci = create_tea_triple_cbc_cipher(key, iv); break;
+        case 14: ci = create_zuc_cipher(key, iv); break;
+        case 15: ci = create_snow3g_variant_cipher(key, iv); break;
+        }
+        if (!ci) { ok = false; break; }
+        for (size_t i = 0; i < sizeof(messages) / sizeof(messages[0]); ++i)
+        {
+            char* enc = ci->encrypt(ci, messages[i]);
+            char* dec = enc ? ci->decrypt(ci, enc) : NULL;
+            if (!enc || !dec || strcmp(dec, messages[i]) != 0) ok = false;
+            s_secure_free_string(enc);
+            s_secure_free_string(dec);
+            if (!ok) break;
+        }
+        char* invalid = ci->decrypt(ci, "0G");
+        if (invalid) { s_secure_free_string(invalid); ok = false; }
+        ci->destroy(ci);
+    }
+    cipher_secure_zero(key, sizeof(key));
+    cipher_secure_zero(iv, sizeof(iv));
+    cipher_secure_zero(words, sizeof(words));
+    cipher_secure_zero(iv_words, sizeof(iv_words));
     return ok;
 }
