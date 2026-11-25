@@ -421,16 +421,13 @@ int work_auth(void)
             if (wait_result == WAIT_EXIT) break;
             if (wait_result == WAIT_TIME_CLOSED) continue;
 
-            /**
-             * Web 端请求"应用新配置": 还会在等网络的时候把配置重新读一遍 ——
-             * 配置里若已经没有本实例负责的账号, load_cfg 会失败, 进程退出交给
-             * 外部监管者 (与下面认证线程跑完那一轮的处置一致)
-             */
+            /* Never replace account storage while scheduler/control readers
+             * may still hold references. Managed auth processes restart. */
             if (wait_result == WAIT_CFG_CHANGED)
             {
-                LOG_INFO("配置已变更, 重新加载");
-                if (load_cfg() == false) shut(1);
-                continue;
+                LOG_INFO("配置已变更, 结束本实例并由监管者重新加载");
+                shut(0);
+                return 0;
             }
 
             network_ready = true;
@@ -457,18 +454,12 @@ int work_auth(void)
             return auth_code;
         }
 
-        /**
-         * 兜底: 配置只在启动时读取 (网页上的"保存并应用"已改为重启进程),
-         * 所以这里正常情况下不会命中; 若将来有别的路径把 g_cfg_loaded 置假,
-         * 重新加载失败就退出, 由监管者按 respawn 策略处理
-         */
-        if (g_cfg_loaded == false)
+        /* Same lifetime rule for the fallback configuration-invalid path. */
+        if (!g_cfg_loaded)
         {
-            LOG_INFO("配置已变更, 重新加载");
-            if (load_cfg() == false) shut(1);
-
-            network_ready = false; // 换过配置后重新做网络检测
-            continue;
+            LOG_INFO("配置已变更, 结束本实例并由监管者重新加载");
+            shut(0);
+            return 0;
         }
 
         LOG_DEBUG("配置 %" PRIu8 " 需要重新认证, 重新开始认证流程", g_prog_status[0].cfg.idx);
