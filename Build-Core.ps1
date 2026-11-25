@@ -69,6 +69,9 @@ $toolVersions = @{
     cmake    = Get-FirstLine $CMake @('--version')
     ninja    = Get-FirstLine $Ninja @('--version')
     gcc      = Get-FirstLine $Gcc @('--version')
+    gxx      = Get-FirstLine $Gxx @('--version')
+    csc      = (Get-Item -LiteralPath $compiler).VersionInfo.FileVersion
+    tar      = Get-FirstLine $tar @('--version')
 }
 
 $build = Join-Path $PSScriptRoot 'build-core'
@@ -85,7 +88,13 @@ $prefix = Join-Path $work 'curl-prefix'
 $coreBuild = Join-Path $work 'auth-build'
 $env:PATH = (Split-Path -Parent $Gcc) + ';' + (Split-Path -Parent $Ninja) + ';' + $env:PATH
 
-Invoke-BuildTool $tar @('-xzf', $curlArchive, '-C', $work)
+# Snapshot into our own build directory; re-check the bytes actually extracted.
+$lockedCurlHash = 'E3DE77CFA6367083C776A26647FC9F633B538C06C3BAA73D931A252AC8F72B49'
+$verifiedArchive = Join-Path $work "curl-$curlVersion.tar.gz"
+[IO.File]::Copy($curlArchive, $verifiedArchive, $false)
+$actualCurlHash = (Get-FileHash -LiteralPath $verifiedArchive -Algorithm SHA256).Hash
+if ($actualCurlHash -cne $lockedCurlHash) { throw 'Build snapshot of curl failed SHA-256 verification.' }
+Invoke-BuildTool $tar @('-xzf', $verifiedArchive, '-C', $work)
 Invoke-BuildTool $CMake @('-S', $curlSource, '-B', $curlBuild, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', "-DCMAKE_MAKE_PROGRAM=$Ninja", "-DCMAKE_C_COMPILER=$Gcc", "-DCMAKE_CXX_COMPILER=$Gxx", "-DCMAKE_INSTALL_PREFIX=$prefix", '-DBUILD_SHARED_LIBS=OFF', '-DBUILD_STATIC_LIBS=ON', '-DBUILD_CURL_EXE=OFF', '-DBUILD_TESTING=OFF', '-DBUILD_EXAMPLES=OFF', '-DBUILD_LIBCURL_DOCS=OFF', '-DBUILD_MISC_DOCS=OFF', '-DENABLE_CURL_MANUAL=OFF', '-DCURL_USE_SCHANNEL=ON', '-DCURL_USE_OPENSSL=OFF', '-DCURL_USE_LIBPSL=OFF', '-DCURL_USE_LIBSSH2=OFF', '-DCURL_ZLIB=OFF', '-DCURL_BROTLI=OFF', '-DCURL_ZSTD=OFF')
 Invoke-BuildTool $CMake @('--build', $curlBuild, '--parallel', '4')
 Invoke-BuildTool $CMake @('--install', $curlBuild)
@@ -119,7 +128,13 @@ try {
 } catch { }
 $guiOut = Join-Path $build '澈知科技-源码重建.exe'
 $coreCopy = Join-Path $build '认证核心-源码重建.exe'
+$configCopy = Join-Path $build '澈知科技-源码重建.exe.config'
+$cjsonRoot = Join-Path $project 'third_party\cJSON'
+$cjsonFiles = @('cJSON.c', 'cJSON.h') | ForEach-Object {
+    [ordered]@{ file = $_; sha256 = (Get-FileHash -LiteralPath (Join-Path $cjsonRoot $_) -Algorithm SHA256).Hash }
+}
 $manifest = [ordered]@{
+    schemaVersion = 2
     appVersion = $appVersion
     gitCommit  = $gitSha
     builtAtUtc = (Get-Date).ToUniversalTime().ToString('o')
@@ -128,17 +143,23 @@ $manifest = [ordered]@{
     dependencies = [ordered]@{
         curl = [ordered]@{
             version = $curlVersion
-            sha256  = 'E3DE77CFA6367083C776A26647FC9F633B538C06C3BAA73D931A252AC8F72B49'
+            sha256  = $actualCurlHash
             source  = "https://curl.se/download/curl-$curlVersion.tar.gz"
-            archive = $curlArchive
+            archive = [IO.Path]::GetFileName($verifiedArchive)
+        }
+        cJSON = [ordered]@{
+            version = '1.7.19'
+            source = 'vendored source at gitCommit'
+            files = @($cjsonFiles)
         }
     }
     outputs = @(
         [ordered]@{ file = '认证核心-源码重建.exe'; sha256 = $coreHash; bytes = (Get-Item -LiteralPath $coreCopy).Length },
-        [ordered]@{ file = '澈知科技-源码重建.exe'; sha256 = (Get-FileHash -LiteralPath $guiOut -Algorithm SHA256).Hash; bytes = (Get-Item -LiteralPath $guiOut).Length }
+        [ordered]@{ file = '澈知科技-源码重建.exe'; sha256 = (Get-FileHash -LiteralPath $guiOut -Algorithm SHA256).Hash; bytes = (Get-Item -LiteralPath $guiOut).Length },
+        [ordered]@{ file = '澈知科技-源码重建.exe.config'; sha256 = (Get-FileHash -LiteralPath $configCopy -Algorithm SHA256).Hash; bytes = (Get-Item -LiteralPath $configCopy).Length }
     )
 }
-$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $build 'build-manifest.json') -Encoding UTF8
+$manifest | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath (Join-Path $build 'build-manifest.json') -Encoding UTF8
 
 Write-Host "源码重建完成：$result"
 Write-Host "认证核心 SHA-256：$coreHash"
