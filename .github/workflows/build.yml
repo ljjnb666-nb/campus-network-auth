@@ -234,6 +234,59 @@ jobs:
         shell: pwsh
         run: ./scripts/Test-SourceSbomSchema.ps1
 
+      - name: Measure same-runner rebuild repeatability
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $baseline = 'build-core'
+          $repeat = Join-Path $env:RUNNER_TEMP ('rebuild-' + [Guid]::NewGuid().ToString('N'))
+          $argsMap = @{
+            OutputDirectory = $repeat
+            CMake = (Get-Command cmake.exe).Source
+            Ninja = (Join-Path $env:MSYS2_ROOT 'ucrt64/bin/ninja.exe')
+            Gcc = (Join-Path $env:MSYS2_ROOT 'ucrt64/bin/gcc.exe')
+            Gxx = (Join-Path $env:MSYS2_ROOT 'ucrt64/bin/g++.exe')
+          }
+          try {
+            ./Build-Core.ps1 @argsMap
+            $first = Get-Content -LiteralPath (Join-Path $baseline 'build-manifest.json') -Raw | ConvertFrom-Json
+            $second = Get-Content -LiteralPath (Join-Path $repeat 'build-manifest.json') -Raw | ConvertFrom-Json
+            if ($first.gitCommit -cne $second.gitCommit -or $first.gitCommit -cne (git rev-parse HEAD).Trim()) { throw 'Rebuild checkout mismatch' }
+            $results = @()
+            foreach ($name in @('认证核心-源码重建.exe','澈知科技-源码重建.exe','澈知科技-源码重建.exe.config')) {
+              $a = (Get-FileHash -LiteralPath (Join-Path $baseline $name) -Algorithm SHA256).Hash
+              $b = (Get-FileHash -LiteralPath (Join-Path $repeat $name) -Algorithm SHA256).Hash
+              $am = @($first.outputs | Where-Object { $_.file -ceq $name })
+              $bm = @($second.outputs | Where-Object { $_.file -ceq $name })
+              if ($am.Count -ne 1 -or $bm.Count -ne 1 -or $a -cne $am[0].sha256 -or $b -cne $bm[0].sha256) { throw "Rebuild manifest mismatch: $name" }
+              $results += [ordered]@{file=$name;firstSha256=$a;secondSha256=$b;byteIdentical=($a -ceq $b)}
+            }
+            $identical = @($results | Where-Object { -not $_.byteIdentical }).Count -eq 0
+            [ordered]@{schemaVersion=1;scope='two builds on one runner, distinct temporary directories; not independent reproducibility';gitCommit=$first.gitCommit;allByteIdentical=$identical;outputs=$results} |
+              ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $baseline 'repeatability.json') -Encoding utf8
+            if ($identical) { Write-Host 'SAME_RUNNER_REBUILD_BYTE_IDENTICAL' }
+            else { Write-Host '::warning::Same-runner rebuild differs; release reproducibility remains blocked' }
+            Write-Host 'REBUILD_MEASUREMENT_COMPLETE'
+          } finally {
+            if (Test-Path -LiteralPath $repeat -PathType Container) { Remove-Item -LiteralPath $repeat -Recurse -Force }
+          }
+
+      - name: Bind unsigned build evidence to artifact digests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = 'build-core'
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'build-toolchain-evidence.json') -Destination (Join-Path $dir 'build-toolchain-evidence.json')
+          $files = @('认证核心-源码重建.exe','澈知科技-源码重建.exe','澈知科技-源码重建.exe.config','build-manifest.json','sbom.cdx.json','pe-imports.json','repeatability.json','build-toolchain-evidence.json')
+          $entries = @(foreach ($name in $files) {
+            $file = Join-Path $dir $name
+            [ordered]@{file=$name;sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash;bytes=(Get-Item -LiteralPath $file).Length}
+          })
+          [ordered]@{schemaVersion=1;scope='unsigned CI build evidence, not a cryptographic attestation';repository=$env:GITHUB_REPOSITORY;runId=$env:GITHUB_RUN_ID;runAttempt=$env:GITHUB_RUN_ATTEMPT;checkout=(git rev-parse HEAD).Trim();files=$entries} |
+            ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $dir 'build-evidence.json') -Encoding utf8
+          Write-Host 'BUILD_EVIDENCE_INDEX_PASS'
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -244,6 +297,9 @@ jobs:
             build-core/build-manifest.json
             build-core/sbom.cdx.json
             build-core/pe-imports.json
+            build-core/repeatability.json
+            build-core/build-toolchain-evidence.json
+            build-core/build-evidence.json
             build-core/澈知科技-源码重建.exe.config
           if-no-files-found: error
 
