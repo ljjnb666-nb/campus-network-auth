@@ -95,6 +95,17 @@ static struct curl_slist* fixed_host_resolve(const fixed_host_t* host, const cha
 /* curl_slist_append returns NULL on allocation failure without freeing
  * the existing list. Keep ownership until the full header set is built. */
 typedef struct curl_slist* (*append_header_fn)(struct curl_slist*, const char*);
+/* Header strings are writable libcurl-owned copies; wipe while the list
+ * is alive, then let libcurl use its own allocator to release it. */
+static void secure_slist_free(struct curl_slist* list)
+{
+    for (struct curl_slist* n = list; n != NULL; n = n->next)
+    {
+        if (n->data) cipher_secure_zero(n->data, strlen(n->data));
+    }
+    curl_slist_free_all(list);
+}
+
 static bool build_headers(struct curl_slist** out, const char* const* values, size_t count, append_header_fn append)
 {
     struct curl_slist* list = NULL;
@@ -104,7 +115,7 @@ static bool build_headers(struct curl_slist** out, const char* const* values, si
         struct curl_slist* next = append(list, values[i]);
         if (next == NULL)
         {
-            curl_slist_free_all(list);
+            secure_slist_free(list);
             return false;
         }
         list = next;
@@ -155,7 +166,7 @@ bool net_resource_self_test(void)
     if (build_headers(&headers, values, 2, fail_second_header) || headers != NULL) return false;
     if (!build_headers(&headers, values, 2, curl_slist_append)) return false;
     bool ok = headers != NULL && headers->next != NULL && headers->next->next == NULL;
-    curl_slist_free_all(headers);
+    secure_slist_free(headers);
     curl_resp_t resp = {0};
     ok = ok && can_retry_connect(CURLE_COULDNT_CONNECT, 0, 0, &resp) &&
         can_retry_connect(CURLE_OPERATION_TIMEDOUT, 0, 0, &resp) &&
@@ -230,7 +241,10 @@ curl_resp_t post(const char* url, const char* data)
 
     const char* const values[] = { md5_hash_str, REQ_CONTENT_TYPE, ua, REQ_ACCEPT,
         c_id, a_id, cdc_sid, cdc_d, cdc_a };
-    if (!build_headers(&headers, values, sizeof(values) / sizeof(values[0]), curl_slist_append))
+    const bool headers_ok = build_headers(&headers, values, sizeof(values) / sizeof(values[0]), curl_slist_append);
+    cipher_secure_zero(md5_hash_str, sizeof(md5_hash_str));
+    cipher_secure_zero(c_id, sizeof(c_id));
+    if (!headers_ok)
     {
         resp.status = STATUS_INIT_ERROR;
         return resp;
@@ -241,7 +255,7 @@ curl_resp_t post(const char* url, const char* data)
     {
         LOG_ERROR("curl 初始化失败");
         resp.status = STATUS_INIT_ERROR;
-        curl_slist_free_all(headers);
+        secure_slist_free(headers);
         return resp;
     }
     LOG_TRACE("curl 初始化完成, curl: %p", curl);
@@ -278,7 +292,7 @@ curl_resp_t post(const char* url, const char* data)
         log_curl_error(curl, curl_code, errbuf, url, "post");
         // 再清理资源
         curl_easy_cleanup(curl);
-        curl_slist_free_all(headers);
+        secure_slist_free(headers);
         curl_resp_free(&resp);
         resp.error_code[0] = '\0'; resp.sub_error[0] = '\0';
         resp.status = curl_err_msg_out(curl_code);
@@ -291,7 +305,7 @@ curl_resp_t post(const char* url, const char* data)
     if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp_code) != CURLE_OK) goto post_setup_failed;
 
     curl_easy_cleanup(curl);
-    curl_slist_free_all(headers);
+    secure_slist_free(headers);
 
     if (resp_code == 200)
     {
@@ -323,7 +337,7 @@ curl_resp_t post(const char* url, const char* data)
 
 post_setup_failed:
     curl_easy_cleanup(curl);
-    curl_slist_free_all(headers);
+    secure_slist_free(headers);
     curl_resp_free(&resp);
     resp.error_code[0] = '\0'; resp.sub_error[0] = '\0';
     resp.status = STATUS_INIT_ERROR;
@@ -382,7 +396,7 @@ curl_resp_t get(const char* url)
     {
         LOG_ERROR("curl 初始化失败");
         resp.status = STATUS_INIT_ERROR;
-        curl_slist_free_all(headers);
+        secure_slist_free(headers);
         return resp;
     }
     LOG_TRACE("curl 初始化完成, curl = %p", curl);
@@ -467,7 +481,7 @@ curl_resp_t get(const char* url)
         log_curl_error(curl, curl_code, errbuf, url, "get");
         // 再清理资源
         curl_easy_cleanup(curl);
-        curl_slist_free_all(headers);
+        secure_slist_free(headers);
         curl_slist_free_all(resolve);
         curl_slist_free_all(retry_resolve);
         curl_resp_free(&resp);
@@ -482,7 +496,7 @@ curl_resp_t get(const char* url)
     if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp_code) != CURLE_OK) goto get_setup_failed;
 
     curl_easy_cleanup(curl);
-    curl_slist_free_all(headers);
+    secure_slist_free(headers);
     curl_slist_free_all(resolve);
         curl_slist_free_all(retry_resolve);
 
@@ -523,7 +537,7 @@ curl_resp_t get(const char* url)
 
 get_setup_failed:
     curl_easy_cleanup(curl);
-    curl_slist_free_all(headers);
+    secure_slist_free(headers);
     curl_slist_free_all(resolve);
     curl_slist_free_all(retry_resolve);
     curl_resp_free(&resp);
