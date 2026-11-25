@@ -61,11 +61,13 @@ internal sealed class ServiceJournal
         var j = new ServiceJournal(path);
         try
         {
-            if (!File.Exists(path)) return j;
-            RejectReparsePoint(path);
-            if (new FileInfo(path).Length > 4096) throw new InvalidDataException();
+            byte[] bytes = CredentialStore.ReadBoundedRecord(path, 4096);
+            if (bytes == null) { j.expectedSnapshot = j.Snapshot(); return j; }
+            // Preserve compatibility with legacy UTF-8 BOM files; reject invalid UTF-8.
+            string json = new UTF8Encoding(false, true).GetString(bytes);
+            if (json.Length > 0 && json[0] == '\uFEFF') json = json.Substring(1);
             var obj = new JavaScriptSerializer { MaxJsonLength = 4096, RecursionLimit = 4 }
-                .DeserializeObject(File.ReadAllText(path, Encoding.UTF8)) as Dictionary<string, object>;
+                .DeserializeObject(json) as Dictionary<string, object>;
             if (obj == null) throw new InvalidDataException();
             j.Action = StringField(obj, "action");
             j.StateBefore = StringField(obj, "state");
@@ -298,7 +300,21 @@ internal sealed class ServiceJournal
             if (Load(path).CanResolveAfterRestart(2000, "Running")) return false; // missing boot evidence
             Console.WriteLine("JOURNAL_RESTART_PASS");
             File.WriteAllText(path, "{broken");
-            return Load(path).Invalid;
+            if (!Load(path).Invalid) return false;
+            File.WriteAllBytes(path, new byte[4097]);
+            if (!Load(path).Invalid) return false;
+            File.WriteAllBytes(path, new byte[] { 0xFF, 0xFE, 0xFF });
+            if (!Load(path).Invalid) return false;
+            // Existing but unreadable must never become a missing/clean journal.
+            using (var locked = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                if (!Load(path).Invalid) return false;
+            File.Delete(path);
+            if (Load(path).Invalid || Load(path).HasPending) return false;
+            var missing = Load(path);
+            missing.Begin("prepare", "Running");
+            if (!Load(path).HasPending) return false;
+            Console.WriteLine("JOURNAL_BOUNDED_READ_PASS");
+            return true;
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
     }

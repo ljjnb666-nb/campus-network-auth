@@ -65,17 +65,39 @@ internal sealed class CredentialStore
     {
         if (value == null || String.IsNullOrEmpty(value.Username) || String.IsNullOrEmpty(value.Password) ||
             Utf8.GetByteCount(value.Username) >= 16 || Utf8.GetByteCount(value.Password) >= 128 ||
+            value.Username.IndexOf('\0') >= 0 || value.Password.IndexOf('\0') >= 0 ||
             value.Channel < 1 || value.Channel > 5)
             throw new InvalidDataException("Credential values are invalid.");
     }
 
+    // File.Exists suppresses access failures. Distinguish a missing record
+    // from one that exists but cannot be read; never treat the latter as empty.
+    // Bound the read on the same open handle, not a separate FileInfo check.
+    internal static byte[] ReadBoundedRecord(string path, int maximum)
+    {
+        string parent = Path.GetDirectoryName(Path.GetFullPath(path));
+        try { RejectReparsePoint(parent); }
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
+        try { RejectReparsePoint(path); }
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
+        // Allow a cooperating atomic replacement, but not in-place writers.
+        using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete))
+        using (var reader = new BinaryReader(input))
+        {
+            if (input.Length > maximum) throw new InvalidDataException("Record exceeds size limit.");
+            byte[] record = reader.ReadBytes(maximum + 1);
+            if (record.Length > maximum) throw new InvalidDataException("Record exceeds size limit.");
+            return record;
+        }
+    }
+
     private static byte[] ReadCipher(string path)
     {
-        RejectReparsePoint(path);
-        var info = new FileInfo(path);
-        if (info.Length < 20 || info.Length > 65536) throw new InvalidDataException("Credential record size is invalid.");
-        byte[] record = File.ReadAllBytes(path);
-        if (record.Length < Magic.Length) throw new InvalidDataException("Credential record is invalid.");
+        byte[] record = ReadBoundedRecord(path, 65536);
+        if (record == null) return null;
+        if (record.Length < 20) throw new InvalidDataException("Credential record size is invalid.");
         for (int i = 0; i < Magic.Length; i++)
             if (record[i] != Magic[i]) throw new InvalidDataException("Credential record is not recognized.");
         var cipher = new byte[record.Length - Magic.Length];
@@ -86,13 +108,11 @@ internal sealed class CredentialStore
 
     internal SavedCredential Load()
     {
-        if (!File.Exists(filePath)) return null;
-        if (!Directory.Exists(directory)) throw new IOException("Credential directory is unavailable.");
-        RejectReparsePoint(directory);
         byte[] cipher = null, plain = null;
         try
         {
             cipher = ReadCipher(filePath);
+            if (cipher == null) return null;
             plain = ProtectedData.Unprotect(cipher, Entropy, DataProtectionScope.CurrentUser);
             string json = Utf8.GetString(plain);
             var value = new JavaScriptSerializer().Deserialize<SavedCredential>(json);
@@ -111,7 +131,7 @@ internal sealed class CredentialStore
         Validate(value);
         EnsureDirectory();
         // Never replace an unknown, corrupted, or undecryptable existing record.
-        if (File.Exists(filePath)) Load();
+        bool replacing = Load() != null;
         byte[] plain = null, cipher = null;
         string temp = Path.Combine(directory, ".credential-" + Guid.NewGuid().ToString("N") + ".tmp");
         bool created = false;
@@ -132,7 +152,7 @@ internal sealed class CredentialStore
                 output.Write(cipher, 0, cipher.Length);
                 output.Flush(true);
             }
-            if (File.Exists(filePath)) { RejectReparsePoint(filePath); File.Replace(temp, filePath, null); }
+            if (replacing) { RejectReparsePoint(filePath); File.Replace(temp, filePath, null); }
             else File.Move(temp, filePath);
             created = false;
         }

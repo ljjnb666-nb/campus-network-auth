@@ -145,14 +145,28 @@ internal static class Program
         VerifyCore();
     }
 
+    private static FileStream OpenVerifiedCore()
+    {
+        if ((File.GetAttributes(tempDir) & FileAttributes.ReparsePoint) != 0 ||
+            (File.GetAttributes(corePath) & FileAttributes.ReparsePoint) != 0)
+            throw new IOException("Unexpected core reparse point.");
+        var stream = new FileStream(corePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        try
+        {
+            using (var sha = SHA256.Create())
+            {
+                string actual = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "");
+                if (!String.Equals(actual, CoreHash, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Core integrity check failed.");
+            }
+            return stream;
+        }
+        catch { stream.Dispose(); throw; }
+    }
+
     private static void VerifyCore()
     {
-        using (var stream = new FileStream(corePath, FileMode.Open, FileAccess.Read, FileShare.Read))
-        using (var sha = SHA256.Create())
-        {
-            string actual = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "");
-            if (!String.Equals(actual, CoreHash, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Core integrity check failed.");
-        }
+        using (OpenVerifiedCore()) { }
     }
 
     private static void CleanupCore()
@@ -679,7 +693,6 @@ internal static class Program
         if (invalid != null) throw new ArgumentException(invalid);
         string json = new JavaScriptSerializer().Serialize(new { username = username, password = password, channel = channel });
         if (Utf8.GetByteCount(json) + 1 >= 4096) throw new ArgumentException("输入过长，请检查账号和密码。");
-        VerifyCore();
         var si = new ProcessStartInfo {
             FileName = corePath, Arguments = mode, WorkingDirectory = tempDir,
             UseShellExecute = false, CreateNoWindow = true,
@@ -690,8 +703,13 @@ internal static class Program
         bool started = false;
         try
         {
-        if (!p.Start()) throw new InvalidOperationException("Core failed to start.");
-        started = true;
+        // Hold the verified file open without write/delete sharing until
+        // CreateProcess returns; do not release it between hashing and launch.
+        using (OpenVerifiedCore())
+        {
+            if (!p.Start()) throw new InvalidOperationException("Core failed to start.");
+            started = true;
+        }
         int pid = p.Id;
         StreamReader errors = p.StandardError;
         StreamReader output = p.StandardOutput;
@@ -790,6 +808,19 @@ internal static class Program
         try
         {
             ExtractCore();
+            using (OpenVerifiedCore())
+            {
+                bool writeDenied = false, deleteDenied = false;
+                try { using (var writer = new FileStream(corePath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) { } }
+                catch (IOException) { writeDenied = true; }
+                catch (UnauthorizedAccessException) { writeDenied = true; }
+                try { File.Move(corePath, corePath + ".moved"); }
+                catch (IOException) { deleteDenied = true; }
+                catch (UnauthorizedAccessException) { deleteDenied = true; }
+                if (!deleteDenied) File.Move(corePath + ".moved", corePath);
+                if (!writeDenied || !deleteDenied) return 1;
+            }
+            Console.WriteLine("CORE_INTEGRITY_HANDLE_PASS");
             const int warmup = 10, measured = 100, budget = 32;
             int baseline = SampleHandles(-warmup), warm = 0, high = 0, finalCount = 0;
             int completed = 0;
@@ -1114,6 +1145,23 @@ internal static class Program
             bool refused = false;
             try { store.Save(value); } catch { refused = true; }
             if (!refused || !File.ReadAllBytes(store.FilePath).SequenceEqual(invalid)) return 1;
+            File.WriteAllBytes(store.FilePath, new byte[65537]);
+            refused = false;
+            try { store.Load(); } catch (InvalidDataException) { refused = true; }
+            if (!refused || new FileInfo(store.FilePath).Length != 65537) return 1;
+            using (var locked = new FileStream(store.FilePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                refused = false;
+                try { store.Load(); } catch (IOException) { refused = true; }
+                if (!refused) return 1;
+            }
+            File.Delete(store.FilePath);
+            if (store.Load() != null) return 1;
+            value.Password = "invalid\0password";
+            refused = false;
+            try { store.Save(value); } catch (InvalidDataException) { refused = true; }
+            if (!refused || File.Exists(store.FilePath)) return 1;
+            Console.WriteLine("CREDENTIAL_BOUNDED_READ_PASS");
             Console.WriteLine("CREDENTIALS_PASS");
             return 0;
         }
