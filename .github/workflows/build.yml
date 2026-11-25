@@ -398,6 +398,89 @@ jobs:
           ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/json_audit"
           echo CJSON_UNUSED_API_SOURCE_GATE_PASS
 
+      - name: Sanitized traffic snapshot lifecycle and allocator failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd '认证核心源码/esurfingclient/app'
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          cat > "$tmp/traffic_audit.c" <<'EOF'
+          #include "net/NetTraffic.c"
+          #include <assert.h>
+          /* No actual adapter queries or production logger in this harness. */
+          uint8_t get_adapters_stats(adapter_stats_t* out, uint8_t max, char* id, size_t len)
+          {
+              (void)out; (void)max; (void)id; (void)len;
+              abort();
+          }
+          uint64_t get_steady_tm_ms(void) { abort(); }
+          void log_out(log_level_t level, const char* file, uint32_t line, const char* fmt, ...)
+          {
+              (void)level; (void)file; (void)line; (void)fmt;
+          }
+          static size_t calls, fail_at, live;
+          static void* test_allocate(size_t size)
+          {
+              if (++calls == fail_at) return NULL;
+              void* p = malloc(size);
+              if (p) ++live;
+              return p;
+          }
+          static void test_release(void* p)
+          {
+              if (p) {
+                  assert(live > 0);
+                  --live;
+                  free(p);
+              }
+          }
+          int main(void)
+          {
+              assert(traffic_resource_self_test());
+              /* The isolated self-test workers have been joined. Only
+               * this test process changes cJSON's process-global hooks. */
+              traffic_snapshot_t sample = {0};
+              sample.count = 2;
+              sample.timestamp = 1234;
+              strcpy(sample.rows[0].id, "test0");
+              sample.rows[0].has_rate = true;
+              sample.rows[0].down = 12;
+              sample.rows[0].up = 34;
+              strcpy(sample.rows[1].id, "test1");
+              cJSON_Hooks hooks = {test_allocate, test_release};
+              cJSON_InitHooks(&hooks);
+              char* json = render_snapshot(&sample, 0);
+              assert(json != NULL);
+              cJSON_free(json);
+              assert(live == 0);
+              const size_t total = calls;
+              assert(total > 0 && total < 1000);
+              for (size_t i = 1; i <= total; ++i) {
+                  calls = 0;
+                  fail_at = i;
+                  json = render_snapshot(&sample, 0);
+                  assert(json == NULL);
+                  assert(live == 0);
+                  assert(calls >= i);
+              }
+              calls = 0;
+              fail_at = 0;
+              json = render_snapshot(&sample, 0);
+              assert(json != NULL);
+              cJSON_free(json);
+              assert(live == 0);
+              cJSON_InitHooks(NULL);
+              printf("TRAFFIC_ALLOCATOR_FAILURE_PASS cases=%zu\n", total);
+              puts("TRAFFIC_SNAPSHOT_LIFECYCLE_PASS");
+              return 0;
+          }
+          EOF
+          gcc -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -Iinclude -Isrc -Ithird_party "$tmp/traffic_audit.c" \
+            src/utils/sim/SimThread.c third_party/cJSON/cJSON.c -pthread -lm -o "$tmp/traffic_audit"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/traffic_audit"
+
       - name: Optimized and sanitized offline cipher regression
         shell: bash
         run: |
