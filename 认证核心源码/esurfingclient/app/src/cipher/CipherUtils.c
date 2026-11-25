@@ -6,7 +6,7 @@
 
 char* bytes_2_hex(const uint8_t* bytes, const size_t len)
 {
-    if (!bytes || len == 0) return NULL;
+    if (!bytes || len == 0 || len > (SIZE_MAX - 1) / 2) return NULL;
     char* hex = s_malloc(len * 2 + 1);
     if (!hex) return NULL;
     for (size_t i = 0; i < len; i++) sprintf(hex + i * 2, "%02X", bytes[i]);
@@ -60,6 +60,13 @@ void s_free(void* ptr)
     if (ptr) free(ptr);
 }
 
+void s_secure_free(void* ptr, size_t len)
+{
+    if (!ptr) return;
+    cipher_secure_zero(ptr, len);
+    free(ptr);
+}
+
 size_t s_strlen(const char* str)
 {
     return str ? strlen(str) : 0;
@@ -67,9 +74,10 @@ size_t s_strlen(const char* str)
 
 uint8_t* pkcs7_padding(const uint8_t* data, const size_t data_len, const size_t block_size, size_t* out_len)
 {
-    if (!data || !out_len || block_size == 0) return NULL;
+    if (!data || !out_len || block_size == 0 || block_size > UINT8_MAX) return NULL;
     size_t padding = block_size - data_len % block_size;
     if (padding == 0) padding = block_size;
+    if (padding > SIZE_MAX - data_len) return NULL;
     const size_t padded_len = data_len + padding;
     uint8_t* padded = s_malloc(padded_len);
     memcpy(padded, data, data_len);
@@ -86,6 +94,7 @@ uint8_t* rm_pkcs7_padding(const uint8_t* data, const size_t data_len, size_t* ou
     for (size_t i = data_len - padding; i < data_len; i++) if (data[i] != padding) return NULL;
     const size_t unpadded_len = data_len - padding;
     uint8_t* unpadded = s_malloc(unpadded_len);
+    if (!unpadded) return NULL;
     memcpy(unpadded, data, unpadded_len);
     *out_len = unpadded_len;
     return unpadded;
@@ -95,8 +104,10 @@ uint8_t* pad_2_multiple(const uint8_t* data, const size_t data_len, const size_t
 {
     if (!data || !out_len || multiple == 0) return NULL;
     const size_t padding = (multiple - data_len % multiple) % multiple;
+    if (padding > SIZE_MAX - data_len) return NULL;
     const size_t padded_len = data_len + padding;
     uint8_t* padded = s_calloc(padded_len, 1);
+    if (!padded) return NULL;
     memcpy(padded, data, data_len);
     *out_len = padded_len;
     return padded;
