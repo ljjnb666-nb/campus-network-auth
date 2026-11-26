@@ -69,3 +69,36 @@
 SBOM：dc517ca / 1f599e7 / 1400689 为源码级清单增加 CycloneDX 标准 compositions aggregate=incomplete，覆盖已声明的应用、核心及依赖关系；验证器拒绝缺失或错误 complete 声明。新门禁尚未取得 CI 成功证据。独立包归档、动态/传递依赖、签名及独立环境复现仍未关闭。
 
 CI #364 的 scanner self-test 四项通过，但正式敏感信息扫描失败，保留阻断。未修改扫描规则、未增加例外或绕过步骤。真实环境验收按既有决定延期，不等于通过。
+
+
+## 2026-11-26 冻结基线的源码与公告适用性复核
+
+固定对象：\`716ab3193bf26c2d2ad34fad5e07e8220be4b121\`，CI #443。以下是源码组成与公开公告的初步适用性判断，不是正式 VEX 声明、法律意见或“全部漏洞已修复”的结论。
+
+### cJSON 1.7.19 本地修订
+
+- 上游 \`v1.7.19\` 的 \`cJSON.h\` Git blob 与本仓库一致：\`cab5feb427725f8e5c82287f7fe59481b609b9b5\`。
+- 上游 \`cJSON.c\` blob：\`6e4fb0dd369cd905923da515be87ab06db6c1ee0\`；本地 blob：\`021b5c1fa7fe4871c03caf2568ce400f5ab7d01a\`。
+- 逐行核对确认 7 处本地差异：SetNumberHelper 空指针保护、ensure 长度累加边界、转义字符计数边界、打印字符串总长度上限、两个输出嵌套深度门禁。其余行与上游顺序一致；不能据此宣称所有公告均修复。
+- vendored 目录只有 \`cJSON.c\`、\`cJSON.h\`；CMakeLists.txt 编译 \`cJSON.c\`，未列入 \`cJSON_Utils.c\`。Linux CI #443 实际日志含 \`CJSON_BOUNDS_REGRESSION_PASS\`、\`CJSON_UNUSED_API_SOURCE_GATE_PASS\`。源码门禁不能替代最终链接成员、动态可达性或 32 位构建证据。
+
+### 六项公开公告的初步适用性
+
+| 公告 | 上游风险 | 当前源码证据 | 未关闭事项 |
+|---|---|---|---|
+| [CVE-2026-16554](https://cert.pl/en/posts/2026/07/CVE-2026-16554/) | 32 位字符串打印长度整数溢出 | 本地打印长度边界修订；冻结 Windows 核心为 x86-64 | 32 位 harness/支持范围与边界实测；不能仅凭 x64 排除所有调用 |
+| [CVE-2026-67215](https://security-tracker.debian.org/tracker/CVE-2026-67215) | JSON Patch 递归资源耗尽 | 当前源码树未见 \`cJSON_Utils.c\`，CMake 未编译 utilities | 最终链接成员和完整调用路径核验 |
+| [CVE-2026-67216](https://security-tracker.debian.org/tracker/CVE-2026-67216) | \`cJSON_Compare\` 递归比较复杂度 | CI 源码门禁未发现业务源码引用 | 最终二进制可达性及外部调用路径 |
+| [CVE-2026-67217](https://security-tracker.debian.org/tracker/CVE-2026-67217) | JSON Patch 失败时非原子修改 | utilities 未见入库/编译 | 最终链接成员核验 |
+| [CVE-2026-29036](https://osv.dev/vulnerability/CVE-2026-29036) | JSON Pointer 解析/目标修改 | utilities 未见入库/编译 | 最终链接成员核验 |
+| [CVE-2026-87933](https://security-tracker.debian.org/tracker/CVE-2026-87933) | MergePatch 内存生命周期 | utilities 未见入库/编译 | 最终链接成员核验 |
+
+### 其他依赖与许可范围
+
+- libcurl 固定 8.23.0；2026-11-26 查询官方版本公告页时，该版本页列出的已发布安全问题为 0。发布时仍需重查；0 条不表示无未知漏洞或其他依赖安全。
+- 当前 Windows CMake 使用 \`-static -static-libgcc -static-libstdc++\`，工具链版本锁含 GCC、libgcc、libstdc++、MinGW-w64 headers/CRT、libwinpthread、binutils 等包。当前 PE 直接导入报告不能证明这些静态成员的实际链接组成。
+- 20 项依赖版本锁是版本漂移门禁，不是包归档字节锁。实际 MSYS2 包归档字节/签名没有完整独立证据；应通过最终 link map、归档成员及可信包签名核验实际分发组件。
+- 当前 Licenses.txt 已包含 ESurfingClient Apache-2.0、cJSON MIT、curl license 文本；固定上游文本核对通过。GCC Runtime Library Exception、MinGW-w64、winpthreads 等具体许可/NOTICE 义务须在实际链接成员确认后逐项核验，不能因当前未发现某段文字就断言违法，也不能默认无需补充。
+- 桌面 GUI 源码目前没有对外分发许可；权利人授权确认前，不对外分发源代码或二进制。
+
+当前状态：\`SOURCE_LEVEL_CJSON_TRIAGE_COMPLETE\`；\`FINAL_LINK_COMPOSITION_AND_LICENSE_REVIEW_PENDING\`；\`FULL_RELEASE_ACCEPTANCE_BLOCKED\`。
