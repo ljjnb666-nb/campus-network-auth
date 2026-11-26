@@ -1,4 +1,5 @@
 #include "LoggerInternal.h"
+#include "LogArchiveFile.h"
 
 #include "core/States.h"
 
@@ -41,7 +42,7 @@ bool init_logger(void)
     }
     if (open_log_file() == false)
     {
-        fprintf(stderr, "[ERROR] 无法打开日志文件 %s, 如果是 Linux 系统请使用 sudo 运行程序\n", g_logger_cfg.log_file);
+        fprintf(stderr, "[ERROR] 无法打开日志文件 %s, 请检查日志目录和访问权限\n", g_logger_cfg.log_file);
         return false;
     }
     LOG_DEBUG("日志系统初始化完成");
@@ -108,7 +109,7 @@ void clean_logger(void)
         fprintf(stderr, "[ERROR] 日志归档路径无效，保留原文件\n");
         return;
     }
-    if (rename(g_logger_cfg.log_file, new_file_name) != 0)
+    if (!archive_log_without_replace(g_logger_cfg.log_file, new_file_name))
         fprintf(stderr, "[ERROR] 日志归档失败，未确认归档成功\n");
 
     logger_unlock();
