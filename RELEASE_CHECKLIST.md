@@ -79,11 +79,11 @@ CI #302（45623785237，`64ed1b5`）Windows/Linux 均成功。已实测通过 PE
 
 ## 当前内部 RC 基线复核（2026-11-26；不是正式发布批准）
 
-- 冻结提交：\`716ab3193bf26c2d2ad34fad5e07e8220be4b121\`；[CI #443](https://github.com/ljjnb666-nb/campus-network-auth/actions/runs/45780131488)，4/4 jobs 成功。
+- 冻结提交：`716ab3193bf26c2d2ad34fad5e07e8220be4b121`；[CI #443](https://github.com/ljjnb666-nb/campus-network-auth/actions/runs/45780131488)，4/4 jobs 成功。
 - Roslyn 隔离候选双编译字节一致，既有离线候选测试 11/11 通过；候选 EXE 不在 RC 归档，默认 Framework csc 未迁移。
-- 内部归档 artifact \`15098745397\`，1,281,572 bytes，SHA-256 \`8b72eee0dba9e385350e8e619e499e14592812e97902d203e68d7b6cc5a812a9\`；14 个文件、证据索引 13/13、产物摘要 3/3 独立核对一致。无数字签名。
+- 内部归档 artifact `15098745397`，1,281,572 bytes，SHA-256 `8b72eee0dba9e385350e8e619e499e14592812e97902d203e68d7b6cc5a812a9`；14 个文件、证据索引 13/13、产物摘要 3/3 独立核对一致。无数字签名。
 - cJSON 六项公告已有初步源码分类；32 位边界、最终静态链接成员与公告可达性尚未完成，不标记为全部已修复或 not_affected。
 - 20 项工具链包版本锁通过，但实际归档字节/签名缺失；静态链接的 GCC/MinGW/winpthreads 等实际组成和许可义务待独立 link map/归档成员核验。
 - 桌面源码及权利人授权确认、Authenticode 证书、独立环境复现、实机服务切换、真实 DPI、升级/卸载、24/72 小时长跑仍为发布阻断。
 
-当前结论：\`INTERNAL_RC_BASELINE_FROZEN\`，不是 \`RELEASE_APPROVED\`。
+当前结论：`INTERNAL_RC_BASELINE_FROZEN`，不是 `RELEASE_APPROVED`。

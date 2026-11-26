@@ -129,14 +129,14 @@ flowchart TD
 
 ## 6. 开发进度与验收证据
 
-**当前内部 RC 冻结基线：2026-11-26，分支提交 \`716ab3193bf26c2d2ad34fad5e07e8220be4b121\`，CI #443。** 这是指定提交的离线验收状态，不代表正式发布或真实校园网功能已经验收。
+**当前内部 RC 冻结基线：2026-11-26，分支提交 `716ab3193bf26c2d2ad34fad5e07e8220be4b121`，CI #443。** 这是指定提交的离线验收状态，不代表正式发布或真实校园网功能已经验收。
 
 ### 6.1 最新 CI 与内部归档
 
 - [CI #443](https://github.com/ljjnb666-nb/campus-network-auth/actions/runs/45780131488)：Windows 构建/测试、Linux 安全审计、macOS 资源审计、SBOM 审计共 **4/4 jobs 成功**。
 - Roslyn 候选 GUI 在同一 runner 两次完整编译字节一致；随后实际执行既有离线自测 **11/11 通过**（logic、credentials、core、native-input、native-net、stop、resources、ui、app-lifecycle、ui-stress、signature）。这证明定义的候选离线测试通过，不等于默认构建工具链已经迁移。
-- 候选 GUI 的两次构建大小均为 1,394,176 字节，SHA-256 均为 \`30C9E8CB8349E7D9EF249666E990530A4740D40AD1244132042F9D1B82A6FFB4\`。候选 EXE 不包含在内部 RC 归档中，不能将其当作当前发布产物。
-- 内部归档 artifact ID \`15098745397\`，ZIP 1,281,572 bytes，SHA-256 \`8b72eee0dba9e385350e8e619e499e14592812e97902d203e68d7b6cc5a812a9\`。独立下载核验：14 个唯一文件、CRC 通过、证据索引 13/13、构建产物摘要 3/3 一致。该归档未签名。
+- 候选 GUI 的两次构建大小均为 1,394,176 字节，SHA-256 均为 `30C9E8CB8349E7D9EF249666E990530A4740D40AD1244132042F9D1B82A6FFB4`。候选 EXE 不包含在内部 RC 归档中，不能将其当作当前发布产物。
+- 内部归档 artifact ID `15098745397`，ZIP 1,281,572 bytes，SHA-256 `8b72eee0dba9e385350e8e619e499e14592812e97902d203e68d7b6cc5a812a9`。独立下载核验：14 个唯一文件、CRC 通过、证据索引 13/13、构建产物摘要 3/3 一致。该归档未签名。
 - PR #1 仍为 Draft；main 未修改。最新验证只适用于上述冻结提交及其对应 CI。
 
 ### 6.2 已通过的定义离线范围
@@ -161,7 +161,7 @@ flowchart TD
 - 桌面源码许可、代码签名证书、独立 Windows 环境复现、升级/卸载、真实环境、DPI、服务交接及 24/72 小时长跑仍未完成。
 - 正式敏感信息扫描在 CI #443 的指定提交中通过，但扫描器是启发式工具，不证明整个 Git 历史、所有文件类型或所有秘密形式均无泄漏。
 
-当前结论：\`INTERNAL_RC_BASELINE_FROZEN\`；\`ROSLYN_DEFINED_OFFLINE_SUITE_VERIFIED\`；\`FULL_RELEASE_ACCEPTANCE_BLOCKED\`。详细证据及 Codex 最终任务见 [FINAL_AUDIT.md](FINAL_AUDIT.md)、[RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) 和 [CODEX_HANDOFF.md](CODEX_HANDOFF.md)。
+当前结论：`INTERNAL_RC_BASELINE_FROZEN`；`ROSLYN_DEFINED_OFFLINE_SUITE_VERIFIED`；`FULL_RELEASE_ACCEPTANCE_BLOCKED`。详细证据及 Codex 最终任务见 [FINAL_AUDIT.md](FINAL_AUDIT.md)、[RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) 和 [CODEX_HANDOFF.md](CODEX_HANDOFF.md)。
 
 ## 7. 测试与质量管理
 

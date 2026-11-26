@@ -6,17 +6,17 @@
 
 | 入口 | 覆盖范围 | 当前证据 |
 |---|---|---|
-| \`--self-test-logic\` | 服务门控、状态机不变量、操作权限矩阵 | CI #443 候选通过 |
-| \`--self-test-credentials\` | DPAPI 存储、明文不落盘、损坏记录拒绝覆盖 | CI #443 候选通过 |
-| \`--self-test-core\` | 核心哈希、管道协议、配置解析 | CI #443 候选通过 |
-| \`--self-test-native-input\` | 原生凭据帧边界、JSON/UTF-8/字段校验 | CI #443 候选通过 |
-| \`--self-test-native-net\` | GET/POST 缓冲与资源边界、分配失败清理 | CI #443 候选通过 |
-| \`--self-test-stop\` | STOP 握手、结构化事件及退出排空 | CI #443 候选通过 |
-| \`--self-test-resources\` | 核心资源、句柄及完整性句柄测试 | CI #443 候选通过 |
-| \`--self-test-ui\` | UI 布局、托盘、控件及资源行为 | CI #443 候选通过 |
-| \`--self-test-app-lifecycle\` | 100 轮 WinForms 消息循环及生命周期故障注入 | CI #443 候选通过 |
-| \`--self-test-ui-stress\` | 100 轮 UI 压力、715 次滚动可达性检查 | CI #443 候选通过 |
-| \`--self-test-signature\` | 签名校验逻辑的正反例 | CI #443 候选通过；不表示产品 EXE 已签名 |
+| `--self-test-logic` | 服务门控、状态机不变量、操作权限矩阵 | CI #443 候选通过 |
+| `--self-test-credentials` | DPAPI 存储、明文不落盘、损坏记录拒绝覆盖 | CI #443 候选通过 |
+| `--self-test-core` | 核心哈希、管道协议、配置解析 | CI #443 候选通过 |
+| `--self-test-native-input` | 原生凭据帧边界、JSON/UTF-8/字段校验 | CI #443 候选通过 |
+| `--self-test-native-net` | GET/POST 缓冲与资源边界、分配失败清理 | CI #443 候选通过 |
+| `--self-test-stop` | STOP 握手、结构化事件及退出排空 | CI #443 候选通过 |
+| `--self-test-resources` | 核心资源、句柄及完整性句柄测试 | CI #443 候选通过 |
+| `--self-test-ui` | UI 布局、托盘、控件及资源行为 | CI #443 候选通过 |
+| `--self-test-app-lifecycle` | 100 轮 WinForms 消息循环及生命周期故障注入 | CI #443 候选通过 |
+| `--self-test-ui-stress` | 100 轮 UI 压力、715 次滚动可达性检查 | CI #443 候选通过 |
+| `--self-test-signature` | 签名校验逻辑的正反例 | CI #443 候选通过；不表示产品 EXE 已签名 |
 
 CI #443 的 Windows、Linux、macOS、SBOM 四个 job 均成功。Roslyn 候选 GUI 两次编译字节一致并实际执行上述离线入口；候选 EXE 不在内部 RC 归档中，默认 Framework csc 仍未迁移。
 
