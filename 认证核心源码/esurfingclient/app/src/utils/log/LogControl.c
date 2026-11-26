@@ -33,8 +33,8 @@ bool init_logger(void)
         fprintf(stderr, "[ERROR] 无法准备日志目录\n");
         return false;
     }
-    const uint16_t len = snprintf(g_logger_cfg.log_file, sizeof(g_logger_cfg.log_file), "%s%c%s", safe_str(g_logger_cfg.log_dir), SEP, g_log_file_name);
-    if ((size_t)len >= sizeof(g_logger_cfg.log_file))
+    const int len = snprintf(g_logger_cfg.log_file, sizeof(g_logger_cfg.log_file), "%s%c%s", safe_str(g_logger_cfg.log_dir), SEP, g_log_file_name);
+    if (len < 0 || (size_t)len >= sizeof(g_logger_cfg.log_file))
     {
         fprintf(stderr, "[ERROR] 日志文件路径太长 (最大 %zu)\n", sizeof(g_logger_cfg.log_file));
         return false;
@@ -101,8 +101,15 @@ void clean_logger(void)
     char cur_tm[32];
     get_fmt_time(cur_tm, FILE_FORMAT);
     char new_file_name[LOG_PATH_MAX];
-    snprintf(new_file_name, sizeof(new_file_name), "%s%c%s.log", safe_str(g_logger_cfg.log_dir), SEP, safe_str(cur_tm));
-    rename(g_logger_cfg.log_file, new_file_name);
+    const int archive_len = snprintf(new_file_name, sizeof(new_file_name), "%s%c%s.log", safe_str(g_logger_cfg.log_dir), SEP, safe_str(cur_tm));
+    if (archive_len < 0 || (size_t)archive_len >= sizeof(new_file_name))
+    {
+        logger_unlock();
+        fprintf(stderr, "[ERROR] 日志归档路径无效，保留原文件\n");
+        return;
+    }
+    if (rename(g_logger_cfg.log_file, new_file_name) != 0)
+        fprintf(stderr, "[ERROR] 日志归档失败，未确认归档成功\n");
 
     logger_unlock();
 }
