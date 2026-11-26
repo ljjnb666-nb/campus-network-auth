@@ -105,6 +105,34 @@ jobs:
             } finally { Pop-Location }
           } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
 
+      - name: Offline Windows local log archive regression
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $temp = Join-Path $env:RUNNER_TEMP ('log-archive-audit-' + [Guid]::NewGuid().ToString('N'))
+          [void](New-Item -ItemType Directory -Path $temp)
+          try {
+            $root = '认证核心源码/esurfingclient/app/src/utils/log'
+            Copy-Item -LiteralPath (Join-Path $root 'LogArchiveFile.h') -Destination $temp
+            Copy-Item -LiteralPath 'scripts/tests/log_archive_audit.c' -Destination $temp
+            Push-Location -LiteralPath $temp
+            try {
+              $bin = Join-Path $env:MSYS2_ROOT 'ucrt64/bin'
+              $env:PATH = "$bin;$env:PATH"
+              $gcc = Join-Path $bin 'gcc.exe'
+              $PSNativeCommandUseErrorActionPreference = $false
+              $output = @(& $gcc -std=gnu11 -Wall -Wextra -Werror -O1 -I. log_archive_audit.c -o archive_audit.exe 2>&1)
+              $code = $LASTEXITCODE
+              $output | ForEach-Object { Write-Host "$_" }
+              if ($code -ne 0 -or -not (Test-Path -LiteralPath 'archive_audit.exe' -PathType Leaf)) { throw "Windows archive audit compile failed: exit=$code" }
+              $result = @(& ./archive_audit.exe $temp 2>&1)
+              $code = $LASTEXITCODE
+              $result | ForEach-Object { Write-Host "$_" }
+              if ($code -ne 0 -or -not ($result -ccontains 'LOCAL_LOG_ARCHIVE_NO_REPLACE_PASS cases=4')) { throw "Windows archive audit failed: exit=$code" }
+            } finally { Pop-Location }
+          } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
+
       - name: Build core and GUI from source
         shell: pwsh
         run: |
