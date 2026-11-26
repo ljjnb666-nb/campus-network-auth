@@ -3,12 +3,14 @@
 
 /* Local diagnostic data preservation. Never replace an existing archive.
  * Unsupported filesystem/platform operations fail without a destructive
- * fallback. This does not establish the identity of the source pathname.
+ * fallback. Windows verifies and renames the same open file.
  */
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
 #ifdef _WIN32
+#include <stddef.h>
+#include <stdlib.h>
 #include <windows.h>
 #include <io.h>
 #else
@@ -85,11 +87,52 @@ static inline bool log_path_matches_identity(const char* path, uint64_t dev, uin
         actual_dev == dev && actual_ino == ino;
 }
 
-static inline bool archive_log_without_replace(const char* source, const char* destination)
-{
 #ifdef _WIN32
-    return MoveFileExA(source, destination, 0) != 0;
-#elif defined(__linux__) && defined(SYS_renameat2)
+static inline bool log_rename_handle(HANDLE handle, const char* destination)
+{
+    const DWORD path_size = GetFullPathNameA(destination, 0, NULL, NULL);
+    if (path_size == 0 || path_size > 32768) return false;
+    char* path = malloc(path_size);
+    if (!path) return false;
+    const DWORD path_length = GetFullPathNameA(destination, path_size, path, NULL);
+    const UINT code_page = AreFileApisANSI() ? CP_ACP : CP_OEMCP;
+    const int name_size = path_length != 0 && path_length < path_size ?
+        MultiByteToWideChar(code_page, 0, path, -1, NULL, 0) : 0;
+    bool ok = false;
+    if (name_size > 0)
+    {
+        const DWORD info_size = (DWORD)(offsetof(FILE_RENAME_INFO, FileName) + name_size * sizeof(WCHAR));
+        FILE_RENAME_INFO* info = calloc(1, info_size);
+        if (info)
+        {
+            info->FileNameLength = (DWORD)((name_size - 1) * sizeof(WCHAR));
+            ok = MultiByteToWideChar(code_page, 0, path, -1, info->FileName, name_size) == name_size &&
+                SetFileInformationByHandle(handle, FileRenameInfo, info, info_size);
+            free(info);
+        }
+    }
+    free(path);
+    return ok;
+}
+#endif
+
+static inline bool archive_log_without_replace(const char* source, const char* destination,
+    uint64_t expected_dev, uint64_t expected_ino)
+{
+    if (expected_ino == 0) return false;
+#ifdef _WIN32
+    HANDLE handle = CreateFileA(source, DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    uint64_t dev = 0, ino = 0;
+    const bool ok = log_handle_id(handle, &dev, &ino) && dev == expected_dev && ino == expected_ino &&
+        log_rename_handle(handle, destination);
+    CloseHandle(handle);
+    return ok;
+#else
+    /* POSIX rename remains path-based; its identity check is advisory. */
+    if (!log_path_matches_identity(source, expected_dev, expected_ino)) return false;
+#if defined(__linux__) && defined(SYS_renameat2)
     /* Linux RENAME_NOREPLACE is the stable ABI flag value 1. */
     return syscall(SYS_renameat2, AT_FDCWD, source, AT_FDCWD, destination, 1U) == 0;
 #elif defined(__APPLE__) && defined(RENAME_EXCL)
@@ -98,6 +141,7 @@ static inline bool archive_log_without_replace(const char* source, const char* d
     (void)source;
     (void)destination;
     return false;
+#endif
 #endif
 }
 #endif

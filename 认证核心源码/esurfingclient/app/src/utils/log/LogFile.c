@@ -140,21 +140,8 @@ void rotate(void)
     const bool close_ok = fclose(g_logger_cfg.file_handle) == 0;
     g_logger_cfg.file_handle = NULL;
 
-    /**
-     * 关闭之后再确认一次: 关闭与重命名之间仍有窗口, 期间可能已被其它进程轮转.
-     * 不确认的话会把别的进程刚建好的新 run.log 改名走 (rename 会覆盖同名目标)
-     */
-    if (!close_ok || !log_path_matches_identity(g_logger_cfg.log_file,
+    if (close_ok && !archive_log_without_replace(g_logger_cfg.log_file, rotate_file_name,
         g_logger_cfg.file_dev, g_logger_cfg.file_ino))
-    {
-        if (open_log_file() == false)
-        {
-            fprintf(stderr, "[ERROR] 轮转后无法重新打开日志文件 %s\n", g_logger_cfg.log_file);
-        }
-        return;
-    }
-
-    if (!archive_log_without_replace(g_logger_cfg.log_file, rotate_file_name))
     {
         // 失败原因未确认；不把失败解释为另一进程已成功归档
         fprintf(stderr, "[INFO] 日志轮转未完成（目标可能已存在或文件系统不支持）: %s\n", g_logger_cfg.log_file);

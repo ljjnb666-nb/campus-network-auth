@@ -109,14 +109,14 @@ void clean_logger(void)
         fprintf(stderr, "[ERROR] 日志归档路径无效，保留原文件\n");
         return;
     }
-    if (!close_ok || !log_path_matches_identity(g_logger_cfg.log_file,
-        g_logger_cfg.file_dev, g_logger_cfg.file_ino))
+    if (!close_ok)
     {
         logger_unlock();
-        fprintf(stderr, "[ERROR] 日志源身份或关闭结果未确认，跳过退出归档\n");
+        fprintf(stderr, "[ERROR] 日志关闭结果未确认，跳过退出归档\n");
         return;
     }
-    if (!archive_log_without_replace(g_logger_cfg.log_file, new_file_name))
+    if (!archive_log_without_replace(g_logger_cfg.log_file, new_file_name,
+        g_logger_cfg.file_dev, g_logger_cfg.file_ino))
         fprintf(stderr, "[ERROR] 日志归档失败，未确认归档成功\n");
 
     logger_unlock();

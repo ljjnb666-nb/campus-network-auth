@@ -33,24 +33,40 @@ static void expect_absent(const char* path)
     if (f != NULL) fclose(f);
     assert(f == NULL);
 }
+static bool archive_current(const char* source, const char* destination)
+{
+    uint64_t dev = 0, ino = 0;
+    return get_file_id(source, &dev, &ino) &&
+        archive_log_without_replace(source, destination, dev, ino);
+}
 int main(int argc, char** argv)
 {
     assert(argc == 2 && chdir(argv[1]) == 0);
     make_file("active.log", "current");
     make_file("archive.log", "previous");
-    assert(!archive_log_without_replace("active.log", "archive.log"));
+    assert(!archive_current("active.log", "archive.log"));
     expect_file("active.log", "current");
     expect_file("archive.log", "previous");
 
-    assert(archive_log_without_replace("active.log", "fresh.log"));
+    assert(archive_current("active.log", "fresh.log"));
     expect_absent("active.log");
     expect_file("fresh.log", "current");
 
-    assert(!archive_log_without_replace("missing.log", "new.log"));
+    assert(!archive_current("missing.log", "new.log"));
     expect_absent("new.log");
     make_file("active.log", "again");
-    assert(!archive_log_without_replace("active.log", "missing-dir/archive.log"));
+    assert(!archive_current("active.log", "missing-dir/archive.log"));
     expect_file("active.log", "again");
+#ifdef _WIN32
+    HANDLE reader = CreateFileA("active.log", GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(reader != INVALID_HANDLE_VALUE);
+    assert(!archive_current("active.log", "held.log"));
+    assert(CloseHandle(reader));
+    expect_file("active.log", "again");
+    expect_absent("held.log");
+    puts("LOCAL_LOG_ARCHIVE_SHARING_DENIAL_PASS");
+#endif
     assert(remove("active.log") == 0);
     assert(remove("archive.log") == 0);
     assert(remove("fresh.log") == 0);
@@ -61,11 +77,11 @@ int main(int argc, char** argv)
     make_file("active.log", "current");
     assert(mkdir("existing-dir", 0700) == 0);
     make_file("existing-dir/sentinel", "keep");
-    assert(!archive_log_without_replace("active.log", "existing-dir"));
+    assert(!archive_current("active.log", "existing-dir"));
     expect_file("active.log", "current");
     expect_file("existing-dir/sentinel", "keep");
     assert(symlink("missing-target", "dangling.log") == 0);
-    assert(!archive_log_without_replace("active.log", "dangling.log"));
+    assert(!archive_current("active.log", "dangling.log"));
     expect_file("active.log", "current");
     char target[64] = {0};
     assert(readlink("dangling.log", target, sizeof(target)) ==
@@ -91,10 +107,12 @@ int main(int argc, char** argv)
     stream = open_private_log_stream("identity.log");
     assert(stream && fputs("two", stream) >= 0 && fclose(stream) == 0);
     expect_file("identity.log", "onetwo");
-    assert(archive_log_without_replace("identity.log", "identity-old.log"));
+    assert(archive_log_without_replace("identity.log", "identity-old.log", dev, ino));
     assert(!log_path_matches_identity("identity.log", dev, ino));
     make_file("identity.log", "new");
     assert(!log_path_matches_identity("identity.log", dev, ino));
+    assert(!archive_log_without_replace("identity.log", "unexpected.log", dev, ino));
+    expect_absent("unexpected.log");
     assert(log_path_matches_identity("identity-old.log", dev, ino));
     expect_file("identity.log", "new");
     expect_file("identity-old.log", "onetwo");

@@ -391,13 +391,12 @@ bool set_logger_dir(const char* dir)
      * 共写同一份 run.log, 覆盖就等于把别的进程的日志丢掉。
      * 搬不动也无所谓 (跨文件系统时 rename 会失败), 顶多启动那几行留在原地
      */
-    const bool source_matches = close_ok && log_path_matches_identity(old_file,
-        g_logger_cfg.file_dev, g_logger_cfg.file_ino);
-    if (source_matches && path_exists(new_file) == false && strcmp(old_file, new_file) != 0)
+    if (close_ok && path_exists(new_file) == false && strcmp(old_file, new_file) != 0)
     {
         /* The earlier existence check is only advisory: another process
          * may create the destination before this call. Never replace it. */
-        (void)archive_log_without_replace(g_logger_cfg.log_file, new_file);
+        (void)archive_log_without_replace(old_file, new_file,
+            g_logger_cfg.file_dev, g_logger_cfg.file_ino);
     }
 
     snprintf(g_logger_cfg.log_dir, sizeof(g_logger_cfg.log_dir), "%s", new_dir);

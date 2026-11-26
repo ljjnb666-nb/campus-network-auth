@@ -1212,11 +1212,24 @@ internal static class Program
             value.Password = "another-dummy-password";
             store.Save(value);
             if (!SameCredential(store.Load(), value)) return 1;
+            using (var heldLease = new FileStream(store.LeasePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                bool busy = false;
+                try { store.Load(); } catch (CredentialStoreBusyException) { busy = true; }
+                if (!busy) return 1;
+            }
+            if (!SameCredential(store.Load(), value)) return 1;
             byte[] invalid = Encoding.ASCII.GetBytes("UNKNOWN-RECORD");
             File.WriteAllBytes(store.FilePath, invalid);
             bool refused = false;
             try { store.Save(value); } catch { refused = true; }
             if (!refused || !File.ReadAllBytes(store.FilePath).SequenceEqual(invalid)) return 1;
+            refused = false;
+            try { store.Forget(); } catch (InvalidDataException) { refused = true; }
+            if (!refused || !File.ReadAllBytes(store.FilePath).SequenceEqual(invalid)) return 1;
+            File.WriteAllBytes(store.FilePath, Encoding.ASCII.GetBytes("CZT1"));
+            store.Forget();
+            if (store.Load() != null) return 1;
             File.WriteAllBytes(store.FilePath, new byte[65537]);
             refused = false;
             try { store.Load(); } catch (InvalidDataException) { refused = true; }
@@ -1243,6 +1256,7 @@ internal static class Program
         finally
         {
             try { if (File.Exists(store.FilePath)) File.Delete(store.FilePath); } catch { }
+            try { File.Delete(store.LeasePath); } catch { }
             try { if (Directory.Exists(dir)) Directory.Delete(dir, false); } catch { }
         }
     }
@@ -1302,6 +1316,7 @@ internal static class Program
         {
             CleanupCore(); // 崩溃注入测试释放过核心，统一清理
             try { if (File.Exists(store.FilePath)) File.Delete(store.FilePath); } catch { }
+            try { File.Delete(store.LeasePath); } catch { }
             try { if (Directory.Exists(dir)) Directory.Delete(dir, false); } catch { }
         }
     }
@@ -1339,6 +1354,7 @@ internal static class Program
         finally
         {
             CleanupCore();
+            try { File.Delete(new CredentialStore(dir).LeasePath); } catch { }
             try { if (Directory.Exists(dir)) Directory.Delete(dir, false); } catch { }
         }
     }
@@ -1863,6 +1879,10 @@ internal static class Program
                     remember.Checked = true; // 与本地已有记录保持一致
                 }
             }
+            catch (CredentialStoreBusyException)
+            {
+                credentialLoadError = "保存的账号正在被另一个操作使用，请稍后重新打开程序。";
+            }
             catch { credentialLoadError = "读取已保存的账号失败，原有文件未改动。请确认与保存时使用同一个 Windows 用户。"; }
 
             tray.Icon = appIcon != null ? appIcon : SystemIcons.Application; // 复用同一个 Icon, 关闭时统一释放
@@ -1961,6 +1981,8 @@ internal static class Program
                 {
                     resourcesDisposed = true;
                     userStopped = true; taskGeneration++; activeTask = null;
+                    idleCheckLifetime.Cancel();
+                    idleCheckLifetime.Dispose();
                     SystemEvents.PowerModeChanged -= OnPowerModeChanged;
                     SystemEvents.SessionSwitch -= OnSessionSwitch;
                     UnsubscribeNetworkChanges();
@@ -2942,6 +2964,7 @@ internal static class Program
             {
                 SetStatus("保存失败：账号过长，或旧记录无法读取（可先用托盘菜单“清除已保存账号”处理）。", ToneFail);
             }
+            catch (CredentialStoreBusyException) { SetStatus("保存的账号正在被另一个操作使用，请稍后重试保存。", ToneWarn); }
             catch { SetStatus("加密保存失败，原有记录未改动。", ToneFail); }
             if (announce && !isSelfTest) MessageBox.Show(this, status.Text, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
@@ -2958,7 +2981,8 @@ internal static class Program
                 credentialLoadError = null; loadedCredential = false;
                 SetStatus("已删除保存的账号密码。", ToneOk);
             }
-            catch { SetStatus("删除失败：文件内容异常，为安全起见未做改动。", ToneFail); }
+            catch (CredentialStoreBusyException) { SetStatus("保存的账号正在被另一个操作使用，请稍后重试删除。", ToneWarn); }
+            catch { SetStatus("删除失败：无法安全访问保存的账号。", ToneFail); }
         }
 
         private static void AddField(TableLayoutPanel layout, string text, Control field, int row)
@@ -3569,6 +3593,8 @@ internal static class Program
 
         // A11：环境检查（WMI，冷启动可达数秒）异步化——事件处理与启动检查共用
         private bool checkingBlocked;
+        private readonly System.Threading.CancellationTokenSource idleCheckLifetime =
+            new System.Threading.CancellationTokenSource();
         private HandoffObservation lastIdleObservation;
         private Process pendingServiceChild;
         private ServiceJournal pendingServiceJournal;
@@ -3583,14 +3609,17 @@ internal static class Program
         }
         private async Task RunPreConnectCheckAsync(bool showMessage, bool quiet = false)
         {
-            if (checkingBlocked || powerSuspended || serviceBusy || connectCheckPending || retryTimer.Enabled || activeTask != null) return;
+            if (resourcesDisposed || checkingBlocked || powerSuspended || serviceBusy || connectCheckPending ||
+                retryTimer.Enabled || activeTask != null) return;
+            var cancellation = idleCheckLifetime.Token;
             int generation = taskGeneration;
             int observationEpoch = System.Threading.Interlocked.CompareExchange(ref networkEvidenceEpoch, 0, 0);
             checkingBlocked = true;
             try
             {
-                var observation = await Task.Run(observeHandoff);
-                if (observationEpoch != System.Threading.Interlocked.CompareExchange(ref networkEvidenceEpoch, 0, 0) ||
+                var observation = await Task.Run(observeHandoff, cancellation);
+                if (cancellation.IsCancellationRequested ||
+                    observationEpoch != System.Threading.Interlocked.CompareExchange(ref networkEvidenceEpoch, 0, 0) ||
                     HandoffCancelled(generation, false) || serviceBusy || connectCheckPending ||
                     (running != null && !Object.ReferenceEquals(running, completedProcess))) return;
                 state.SetService(observation.Service);
@@ -3613,12 +3642,17 @@ internal static class Program
                     if (showMessage) MessageBox.Show(this, blocked, "暂不能连接", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 else if (!showMessage)
-                    SetHandoff(ConnectionStates.HandoffState.Ready, loadedCredential ?
-                        "已载入保存的账号，点击“立即连接”即可。" : "输入校园网账号和密码，点击“立即连接”即可。", ToneInfo);
+                {
+                    string ready = loadedCredential ? "已载入保存的账号，点击“立即连接”即可。" :
+                        "输入校园网账号和密码，点击“立即连接”即可。";
+                    SetHandoff(ConnectionStates.HandoffState.Ready, credentialLoadError ?? ready,
+                        credentialLoadError == null ? ToneInfo : ToneWarn);
+                }
             }
             catch
             {
-                if (observationEpoch == System.Threading.Interlocked.CompareExchange(ref networkEvidenceEpoch, 0, 0) &&
+                if (!cancellation.IsCancellationRequested &&
+                    observationEpoch == System.Threading.Interlocked.CompareExchange(ref networkEvidenceEpoch, 0, 0) &&
                     !HandoffCancelled(generation, false) && !serviceBusy && !connectCheckPending && activeTask == null)
                     SetHandoff(ConnectionStates.HandoffState.Blocked, "环境状态检查失败，请稍后重试。", ToneWarn);
             }
@@ -3908,13 +3942,25 @@ internal static class Program
             // Invalidate positive events already queued before the notification arrived.
             System.Threading.Interlocked.Increment(ref networkEvidenceEpoch);
             bool suspended = e.Mode == PowerModes.Suspend;
-            try { BeginInvoke((Action)delegate { ApplyPowerTransition(suspended); }); }
+            try
+            {
+                BeginInvoke((Action)(async delegate {
+                    try { await ApplyPowerTransitionAsync(suspended); }
+                    catch (Exception error)
+                    {
+                        // This posted UI callback owns faults escaping the
+                        // transition, including faults during form teardown.
+                        System.Diagnostics.Trace.TraceError("Power transition failed: {0}", error.GetType().Name);
+                    }
+                }));
+            }
             catch (InvalidOperationException) { }
         }
 
-        private void ApplyPowerTransition(bool suspended)
+        private async Task ApplyPowerTransitionAsync(bool suspended)
         {
             if (IsDisposed || Disposing || resourcesDisposed) return;
+            bool checkIdleEnvironment = false;
             powerSuspended = suspended;
             taskGeneration++; // revoke stale environment checks and post-service continuation
             lastIdleObservation = null;
@@ -3945,9 +3991,10 @@ internal static class Program
                 (running == null || Object.ReferenceEquals(running, completedProcess)))
             {
                 SetHandoff(ConnectionStates.HandoffState.None, "系统已唤醒，请按需重新连接。", ToneInfo);
-                if (!isSelfTest) RunPreConnectCheckAsync(false);
+                checkIdleEnvironment = !isSelfTest;
             }
             RefreshOperationPermissions();
+            if (checkIdleEnvironment) await RunPreConnectCheckAsync(false);
         }
 
         private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
@@ -4013,6 +4060,10 @@ internal static class Program
             {
                 credentials.Save(new SavedCredential { Username = activeTask.Username, Password = activeTask.Password, Channel = activeTask.Channel });
                 credentialLoadError = null; loadedCredential = true;
+            }
+            catch (CredentialStoreBusyException)
+            {
+                MessageBox.Show(this, "连接成功。另一个操作正在使用保存的账号，请稍后手动保存。", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             catch
             {
