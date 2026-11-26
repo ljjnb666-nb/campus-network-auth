@@ -396,13 +396,30 @@ jobs:
             if (Test-Path -LiteralPath $repeat -PathType Container) { Remove-Item -LiteralPath $repeat -Recurse -Force }
           }
 
+      - name: Stage reviewed RC documentation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = 'build-core'
+          foreach ($name in @('Licenses.txt','THIRD_PARTY_NOTICES.md','RC_PACKAGE.md','RELEASE_CHECKLIST.md')) {
+            $src = Join-Path $PWD $name
+            $dest = Join-Path $dir $name
+            if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { throw "Missing RC document: $name" }
+            $item = Get-Item -LiteralPath $src
+            if ($item.Length -le 0 -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Invalid RC document: $name" }
+            if (Test-Path -LiteralPath $dest) { throw "Unexpected existing RC document: $name" }
+            Copy-Item -LiteralPath $src -Destination $dest
+            if ((Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash) { throw "RC document digest mismatch: $name" }
+          }
+          Write-Host 'RC_DOCUMENTATION_STAGE_PASS files=4'
+
       - name: Bind unsigned build evidence to artifact digests
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $dir = 'build-core'
           Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'build-toolchain-evidence.json') -Destination (Join-Path $dir 'build-toolchain-evidence.json')
-          $files = @('认证核心-源码重建.exe','澈知科技-源码重建.exe','澈知科技-源码重建.exe.config','build-manifest.json','sbom.cdx.json','pe-imports.json','repeatability.json','build-toolchain-evidence.json')
+          $files = @('认证核心-源码重建.exe','澈知科技-源码重建.exe','澈知科技-源码重建.exe.config','build-manifest.json','sbom.cdx.json','pe-imports.json','repeatability.json','build-toolchain-evidence.json','Licenses.txt','THIRD_PARTY_NOTICES.md','RC_PACKAGE.md','RELEASE_CHECKLIST.md')
           $entries = @(foreach ($name in $files) {
             $file = Join-Path $dir $name
             [ordered]@{file=$name;sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash;bytes=(Get-Item -LiteralPath $file).Length}
@@ -429,6 +446,10 @@ jobs:
             build-core/build-toolchain-evidence.json
             build-core/build-evidence.json
             build-core/澈知科技-源码重建.exe.config
+            build-core/Licenses.txt
+            build-core/THIRD_PARTY_NOTICES.md
+            build-core/RC_PACKAGE.md
+            build-core/RELEASE_CHECKLIST.md
           if-no-files-found: error
 
       - name: Preserve non-executable audit evidence when a gate fails
