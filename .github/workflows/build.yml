@@ -410,6 +410,46 @@ jobs:
             build-core/build-toolchain-evidence.json
           if-no-files-found: ignore
 
+  sbom-synthetic-audit:
+    # Independent generator/schema regression only; no build artifact,
+    # credentials, release, or change to the mandatory Windows scan.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate synthetic source inventory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tmp = Join-Path $env:RUNNER_TEMP ('sbom-fixture-' + [Guid]::NewGuid().ToString('N'))
+          [void](New-Item -ItemType Directory -Path $tmp)
+          try {
+            $fixture = [ordered]@{
+              schemaVersion = 2
+              gitCommit = ('0' * 40)
+              builtAtUtc = '2000-01-01T00:00:00Z'
+              appVersion = '0.0.0-fixture'
+              toolchain = @{ fixture = 'synthetic-only' }
+              dependencies = @{
+                curl = @{ version = '0.0.0'; sha256 = ('1' * 64); source = 'https://example.invalid/source-fixture.tar.gz' }
+                cJSON = @{ version = '0.0.0'; files = @(
+                  @{ file = 'cJSON.c'; sha256 = ('2' * 64) }
+                  @{ file = 'cJSON.h'; sha256 = ('3' * 64) }
+                ) }
+              }
+            }
+            $fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $tmp 'build-manifest.json') -Encoding utf8
+            Write-Host 'SYNTHETIC_SBOM_ONLY: no production build evidence'
+            ./scripts/New-SourceSbom.ps1 -BuildDir $tmp
+            ./scripts/Test-SourceSbomSchema.ps1 -SbomPath (Join-Path $tmp 'sbom.cdx.json')
+            Write-Host 'SYNTHETIC_SBOM_REGRESSION_PASS'
+          } finally {
+            Remove-Item -LiteralPath $tmp -Recurse -Force
+          }
+
   macos-local-resource-audit:
     runs-on: macos-latest
     timeout-minutes: 10
