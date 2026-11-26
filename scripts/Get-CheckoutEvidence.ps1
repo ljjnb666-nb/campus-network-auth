@@ -5,6 +5,11 @@ $ErrorActionPreference = 'Stop'
 $result = [ordered]@{ commit = 'unknown'; state = 'unknown' }
 try {
     $git = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $top = @(& $git.Source -C $Root rev-parse --show-toplevel 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $top.Count -ne 1) { return $result }
+    $resolvedRoot = (Resolve-Path -LiteralPath $Root).ProviderPath
+    $resolvedTop = (Resolve-Path -LiteralPath $top[0]).ProviderPath
+    if ($resolvedRoot -cne $resolvedTop) { return $result }
     $head = @(& $git.Source -C $Root rev-parse --verify HEAD 2>$null)
     if ($LASTEXITCODE -ne 0 -or $head.Count -ne 1 -or $head[0] -cnotmatch '^[0-9a-f]{40}$') { return $result }
     $result.commit = [string]$head[0]
