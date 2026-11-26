@@ -396,9 +396,9 @@ jobs:
             if (Test-Path -LiteralPath $repeat -PathType Container) { Remove-Item -LiteralPath $repeat -Recurse -Force }
           }
 
-      - name: Observe isolated installed Roslyn GUI compiler candidate
+      - name: Observe isolated Roslyn compiler and offline UI stress candidate
         shell: pwsh
-        timeout-minutes: 5
+        timeout-minutes: 8
         run: ./scripts/Test-GuiCompilerCandidate.ps1
 
       - name: Stage reviewed RC documentation

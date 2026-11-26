@@ -1,5 +1,6 @@
-# Isolated diagnostic only. No downloads, no execution of candidate GUI, no
-# replacement of the default compiler or output. Observations are not locks.
+# Isolated diagnostic only. No downloads or replacement of the default
+# compiler or output. Only the explicit offline UI stress entry is executed.
+# Observations are not locks.
 param([string]$BuildDirectory = 'build-core')
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
@@ -9,7 +10,7 @@ $reportPath = Join-Path $build 'gui-compiler-candidate.json'
 if (Test-Path -LiteralPath $reportPath) { throw 'Candidate report already exists' }
 $report = [ordered]@{
     schemaVersion = 1
-    scope = 'isolated same-runner GUI compile experiment; no runtime or independent provenance verification'
+    scope = 'isolated same-runner GUI compile and offline UI stress experiment; no normal launch or independent provenance verification'
     checkout = (git -C $root rev-parse HEAD).Trim()
     status = 'not_started'
     compiler = $null
@@ -17,10 +18,12 @@ $report = [ordered]@{
     coreSha256 = $null
     outputs = @()
     byteIdentical = $false
+    uiStress = [ordered]@{status='not_run';exitCode=$null;sha256=$null;configSha256=$null}
 }
 function Write-Report {
     $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding utf8
     Write-Host "GUI_COMPILER_CANDIDATE status=$($report.status) byteIdentical=$($report.byteIdentical)"
+    Write-Host "GUI_CANDIDATE_UI_STRESS status=$($report.uiStress.status) exitCode=$($report.uiStress.exitCode)"
 }
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
@@ -101,6 +104,48 @@ try {
     }
     $report.byteIdentical = $report.outputs[0].sha256 -ceq $report.outputs[1].sha256
     $report.status = if ($report.byteIdentical) { 'same_runner_gui_compile_identical' } else { 'same_runner_gui_compile_differs' }
+    if ($report.byteIdentical) {
+        # Test the actual candidate, not the baseline executable. Preserve the
+        # existing config bytes and run only the explicit offline UI entry.
+        $runDir = Join-Path $temp 'one'
+        $candidate = Join-Path $runDir 'Candidate.exe'
+        $configName = '澈知科技-源码重建.exe.config'
+        $baselineConfig = Join-Path $build $configName
+        $configEntry = @($manifest.outputs | Where-Object { $_.file -ceq $configName })
+        $configHash = (Get-FileHash -LiteralPath $baselineConfig -Algorithm SHA256).Hash
+        if ($configEntry.Count -ne 1 -or $configEntry[0].sha256 -cne $configHash) { throw 'Candidate config digest mismatch' }
+        $candidateConfig = $candidate + '.config'
+        Copy-Item -LiteralPath $baselineConfig -Destination $candidateConfig
+        if ((Get-FileHash -LiteralPath $candidateConfig -Algorithm SHA256).Hash -cne $configHash) { throw 'Copied candidate config mismatch' }
+        $candidateHash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash
+        if ($candidateHash -cne $report.outputs[0].sha256) { throw 'Candidate changed before UI test' }
+        $report.uiStress.sha256 = $candidateHash
+        $report.uiStress.configSha256 = $configHash
+        $stdout = Join-Path $runDir 'ui-stress.stdout'
+        $stderr = Join-Path $runDir 'ui-stress.stderr'
+        $process = Start-Process -FilePath $candidate -WorkingDirectory $runDir -ArgumentList '--self-test-ui-stress' -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+        try {
+            if (-not $process.WaitForExit(120000)) {
+                # Terminate only this process that we created, never external clients.
+                $process.Kill()
+                $process.WaitForExit()
+                $report.uiStress.status = 'timeout'
+            } else {
+                $report.uiStress.exitCode = $process.ExitCode
+                $lines = @(Get-Content -LiteralPath $stdout)
+                $lines | ForEach-Object { Write-Host "$_" }
+                $marker = @($lines | Where-Object { $_ -match '^UI_STRESS_PASS warmup=10 measured=100(?: |$)' })
+                $scroll = @($lines | Where-Object { $_ -match '^UI_SCROLL_PASS ' })
+                $report.uiStress.status = if ($process.ExitCode -eq 0 -and $marker.Count -eq 1 -and $scroll.Count -eq 1) { 'passed' } else { 'failed' }
+            }
+        } finally {
+            $process.Dispose()
+        }
+        if ((Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash -cne $candidateHash -or
+            (Get-FileHash -LiteralPath $candidateConfig -Algorithm SHA256).Hash -cne $configHash) {
+            throw 'Candidate bytes changed during UI test'
+        }
+    }
     Write-Report
 } finally {
     Remove-Item -LiteralPath $temp -Recurse -Force
