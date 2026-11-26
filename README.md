@@ -129,76 +129,50 @@ flowchart TD
 
 ## 6. 开发进度与验收证据
 
-**状态快照：2026-11-26，提交 6098ff6，CI #376。** 此快照描述该历史提交，不自动代表 README 后续提交或当前 HEAD。实时结果请查看 [GitHub Actions](https://github.com/ljjnb666-nb/campus-network-auth/actions) 与 [开发 PR #1](https://github.com/ljjnb666-nb/campus-network-auth/pull/1)。
+**当前内部 RC 冻结基线：2026-11-26，分支提交 \`716ab3193bf26c2d2ad34fad5e07e8220be4b121\`，CI #443。** 这是指定提交的离线验收状态，不代表正式发布或真实校园网功能已经验收。
 
-| 验收项 | CI #376 实际结果 |
-| --- | --- |
-| Windows 本地资源场景 | 22 项通过 |
-| Linux 网卡扩容及 JSON 分配失败 | 6 + 22 项通过 |
-| Linux 流量快照实际分配失败 | 36 项通过 |
-| macOS 合成缓冲区场景 | 12 项通过 |
-| Windows 原生资源自测 | 通过 |
-| 应用生命周期离线回归 | 100 轮通过 |
-| UI 消息循环压力回归 | 100 轮通过 |
-| 敏感信息扫描器自测 | 4 项通过 |
-| 仓库正式敏感信息扫描 | **失败，未关闭** |
-| CI 整体 | **失败（Windows）；Linux/macOS 成功** |
+### 6.1 最新 CI 与内部归档
 
-[CI #376 原始记录](https://github.com/ljjnb666-nb/campus-network-auth/actions/runs/45754822966)
+- [CI #443](https://github.com/ljjnb666-nb/campus-network-auth/actions/runs/45780131488)：Windows 构建/测试、Linux 安全审计、macOS 资源审计、SBOM 审计共 **4/4 jobs 成功**。
+- Roslyn 候选 GUI 在同一 runner 两次完整编译字节一致；随后实际执行既有离线自测 **11/11 通过**（logic、credentials、core、native-input、native-net、stop、resources、ui、app-lifecycle、ui-stress、signature）。这证明定义的候选离线测试通过，不等于默认构建工具链已经迁移。
+- 候选 GUI 的两次构建大小均为 1,394,176 字节，SHA-256 均为 \`30C9E8CB8349E7D9EF249666E990530A4740D40AD1244132042F9D1B82A6FFB4\`。候选 EXE 不包含在内部 RC 归档中，不能将其当作当前发布产物。
+- 内部归档 artifact ID \`15098745397\`，ZIP 1,281,572 bytes，SHA-256 \`8b72eee0dba9e385350e8e619e499e14592812e97902d203e68d7b6cc5a812a9\`。独立下载核验：14 个唯一文件、CRC 通过、证据索引 13/13、构建产物摘要 3/3 一致。该归档未签名。
+- PR #1 仍为 Draft；main 未修改。最新验证只适用于上述冻结提交及其对应 CI。
 
-Linux 的 64 个实际分配失败位置与 Windows/macOS 的 34 个合成场景具有不同含义，不能合称 98 个实际分配失败位置。上述短期离线回归不证明长期无泄漏，也不证明真实网络功能可用。
+### 6.2 已通过的定义离线范围
 
-### 五大专项
+| 范围 | 证据 | 限制 |
+| --- | --- | --- |
+| 状态机与操作权限 | 256 组合矩阵、事务结果及生命周期回归 | 不等于真实服务操作 |
+| UI 布局与滚动 | 36 组布局、715 次滚动可达性、100 轮压力 | 不等于真实多屏 DPI 或长跑 |
+| 应用与核心生命周期 | 100 轮离线生命周期、STOP/管道排空 | 不等于真实校园网会话 |
+| 本地凭据与事务记录 | DPAPI/ACL、有界读取、损坏/锁定场景 | 不抵御同用户恶意代码或所有祖先路径竞争 |
+| 原生资源与网络缓冲 | 指定平台合成故障、快照分配失败及释放回归 | 不是全部原生路径的完整证明 |
+| 加密中间缓冲 | 指定算法向量、优化擦除探针及 sanitizer 门禁 | 不保证第三方副本、托管字符串、寄存器、换页和崩溃转储完全擦除 |
+| Roslyn 候选兼容性 | 双编译字节一致、11/11 离线自测 | 同 runner 观察，不是独立来源锁或跨环境复现 |
+| 构建归档完整性 | ZIP、CRC、证据索引和产物摘要独立核对 | SHA-256 不等于数字签名或来源信任 |
 
-| 专项 | 当前开发状态 |
-| --- | --- |
-| 原生网络内存与资源管理 | 本地网卡与流量离线范围已通过；其余路径仍有审计缺口 |
-| 原生并发网络探测 | 既有离线回归；未完成集中验收 |
-| 原生线程退出及看门狗 | 既有生命周期回归；未完成集中验收 |
-| 加密中间缓冲清理 | 指定离线门禁历史通过；不保证所有副本擦除 |
-| 构建供应链安全 | 正在整改；扫描、SBOM 语义、公告适用性及独立复现仍有阻断 |
+### 6.3 安全与发布阻断
 
-### 验收口径
+- 上游认证协议使用明文 HTTP，客户端不能单方面提供服务器身份验证或传输机密性；请勿复用校园网密码。
+- cJSON 1.7.19 六项公开公告已完成初步源码适用性分类；32 位边界和最终二进制可达性仍需独立验证。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- 构建依赖版本锁包含 20 项包，但实际安装包归档字节/签名未全部独立核验；静态链接组成及其许可义务仍待 link map、归档成员和来源证据。
+- 当前默认 GUI 仍使用 .NET Framework csc；Roslyn 是隔离候选，尚未切换默认构建。
+- 桌面源码许可、代码签名证书、独立 Windows 环境复现、升级/卸载、真实环境、DPI、服务交接及 24/72 小时长跑仍未完成。
+- 正式敏感信息扫描在 CI #443 的指定提交中通过，但扫描器是启发式工具，不证明整个 Git 历史、所有文件类型或所有秘密形式均无泄漏。
 
-- LOCAL_ADAPTER_AND_TRAFFIC_OFFLINE_VERIFIED：已定义的本地资源离线子阶段通过。
-- DEFERRED_REAL_ENV：真实环境测试延期，并非通过。
-- FULL_RELEASE_ACCEPTANCE_BLOCKED：正式发布条件尚未满足。
-
-实机网络、网卡热插拔、UAC、客户端恢复、多档 DPI、升级与卸载、24/72 小时长期运行均延后至获准环境；当前不阻断其他离线开发，但仍是发布验收条件。
+当前结论：\`INTERNAL_RC_BASELINE_FROZEN\`；\`ROSLYN_DEFINED_OFFLINE_SUITE_VERIFIED\`；\`FULL_RELEASE_ACCEPTANCE_BLOCKED\`。详细证据及 Codex 最终任务见 [FINAL_AUDIT.md](FINAL_AUDIT.md)、[RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) 和 [CODEX_HANDOFF.md](CODEX_HANDOFF.md)。
 
 ## 7. 测试与质量管理
 
-采用宏观分阶段、微观小步提交、专项统一验收的方式。测试应覆盖正常、异常、边界、并发与资源清理；每次验收绑定实际提交 SHA 和 CI 结果。
+测试按“源码变更 → 静态检查 → 离线测试 → CI 实际日志 → 独立复审 → 获准实机验收 → 人工发布审批”逐层判读。Git 提交、CI 绿色、同 runner 哈希一致、内部归档核验分别只能证明其明确定义的范围，不能互相替代。
 
-- 离线测试说明：[TESTING.md](TESTING.md)
-- 五大专项及历史基线：[FINAL_AUDIT.md](FINAL_AUDIT.md)
-- 第三方组件与公告：[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
-- 发布检查：[RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)
+- 离线入口及 11 项 Roslyn 候选测试：[TESTING.md](TESTING.md)。
+- 五大专项与历史基线：[FINAL_AUDIT.md](FINAL_AUDIT.md)。
+- 第三方组件、公开公告及许可状态：[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- 正式发布门禁：[RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)。
 
-不为获取绿色 CI 而删除测试、降低门禁或掩盖未完成项。项目当前保留 Draft PR，未经审核不合并、不正式发布。
-
-### 7.1 质量证据的判读顺序
-
-```mermaid
-flowchart LR
-    A["源码变更"] --> B["静态检查"]
-    B --> C["离线测试"]
-    C --> D["CI 实际日志"]
-    D --> E["独立复审"]
-    E --> F["离线专项验收"]
-    F --> G["获准实机验收"]
-    G --> H["人工发布审批"]
-```
-
-| 证据 | 可以证明 | 不能单独证明 |
-| --- | --- | --- |
-| Git 提交 | 变更已进入指定分支 | 运行正确或无漏洞 |
-| CI 单项通过 | 指定提交的该项门禁通过 | 其他未执行任务通过 |
-| 整体 CI 通过 | 配置内各强制任务通过 | 完整安全性及真实接入可用 |
-| 同 runner 哈希相同 | 指定产物在该环境重复构建一致 | 独立环境复现或签名可信 |
-| 专项离线验收 | 定义的离线范围闭合 | 延期实机条件已满足 |
-
-任何正式发布均需独立复核 [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)。CI #376 的正式扫描仍失败，后续 SBOM 新语义门禁不能据此宣称通过。
+不为获取绿色 CI 删除测试、降低门禁或把未执行事项标记为通过。项目保持 Draft，未经人工审核和用户授权不合并、不正式发布。
 
 ## 8. 故障反馈与退出清理
 

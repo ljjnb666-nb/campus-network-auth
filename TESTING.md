@@ -1,19 +1,24 @@
 # 测试说明（TESTING.md）
 
-## 自测入口（离线，不执行真实认证）
+## 冻结基线的离线自测范围
 
-| 命令 | 覆盖 | 断言方式 |
+以下入口均不执行真实校园网认证、真实服务切换或真实网络访问。Roslyn 候选测试在 CI #443 的同 runner 环境中逐项执行，11/11 退出码为 0 并匹配指定成功标记。
+
+| 入口 | 覆盖范围 | 当前证据 |
 |---|---|---|
-| `澈知科技.exe --self-test-logic` | 服务门控逻辑 + **状态机不变量**（正常/失败链路、非法迁移拒绝、操作不改连接状态） | 精确断言（LOGIC_PASS 仅在全部通过时输出） |
-| `澈知科技.exe --self-test-credentials` | DPAPI 存储：写入/读回一致、明文不落盘（对密文文件字节扫描）、损坏文件拒绝覆盖/保存、换用户不可解密 | 子进程往返验证 |
-| `澈知科技.exe --self-test-core` | 核心 `--ephemeral-check`：哈希校验 + 管道协议 + 配置解析 | 退出码 |
-| `澈知科技.exe --self-test-stop` | 核心 `--ephemeral-probe`：STOP 通道握手 + **结构化事件 v1 端到端**（必须收到 EPHEMERAL_EVENT 行） | 双事件断言（注：本机有认证会话运行时因 auth-1 单实例锁而阻塞，属环境限制，CI 无此问题） |
-| `澈知科技.exe --self-test-ui` | 托盘/密码显隐/保存载入 + **崩溃注入→有界自动恢复调度→用户停止取消**（--ephemeral-crash 钩子） | UI 交互断言 |
-| `澈知科技.exe --self-test-observe` | 服务/进程观察值打印（诊断用） | 输出观测 |
+| \`--self-test-logic\` | 服务门控、状态机不变量、操作权限矩阵 | CI #443 候选通过 |
+| \`--self-test-credentials\` | DPAPI 存储、明文不落盘、损坏记录拒绝覆盖 | CI #443 候选通过 |
+| \`--self-test-core\` | 核心哈希、管道协议、配置解析 | CI #443 候选通过 |
+| \`--self-test-native-input\` | 原生凭据帧边界、JSON/UTF-8/字段校验 | CI #443 候选通过 |
+| \`--self-test-native-net\` | GET/POST 缓冲与资源边界、分配失败清理 | CI #443 候选通过 |
+| \`--self-test-stop\` | STOP 握手、结构化事件及退出排空 | CI #443 候选通过 |
+| \`--self-test-resources\` | 核心资源、句柄及完整性句柄测试 | CI #443 候选通过 |
+| \`--self-test-ui\` | UI 布局、托盘、控件及资源行为 | CI #443 候选通过 |
+| \`--self-test-app-lifecycle\` | 100 轮 WinForms 消息循环及生命周期故障注入 | CI #443 候选通过 |
+| \`--self-test-ui-stress\` | 100 轮 UI 压力、715 次滚动可达性检查 | CI #443 候选通过 |
+| \`--self-test-signature\` | 签名校验逻辑的正反例 | CI #443 候选通过；不表示产品 EXE 已签名 |
 
-## CI（.github/workflows/build.yml）
-
-Windows 全新环境：依赖获取与校验 → MinGW 工具链 → 核心与桌面编译 → logic/credentials/core/stop 四项硬门禁 + ui 尽力项 → 敏感信息扫描 → curl 漏洞核查 → 产物与构建清单上传。CI 不使用真实账号、不执行真实认证（check/probe/crash 均为离线钩子）。
+CI #443 的 Windows、Linux、macOS、SBOM 四个 job 均成功。Roslyn 候选 GUI 两次编译字节一致并实际执行上述离线入口；候选 EXE 不在内部 RC 归档中，默认 Framework csc 仍未迁移。
 
 ## 真实环境验证（需用户授权，当前 BLOCKED）
 
