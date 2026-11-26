@@ -479,6 +479,9 @@ jobs:
           clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
             -I'认证核心源码/esurfingclient/app/src/utils/log' scripts/tests/private_log_stream_audit.c -o "$tmp/log_audit"
           ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 "$tmp/log_audit" "$tmp"
+          clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -I'认证核心源码/esurfingclient/app/src/utils/log' scripts/tests/log_archive_audit.c -o "$tmp/archive_audit"
+          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 "$tmp/archive_audit" "$tmp"
       - name: Offline local sampling buffer regression
         shell: bash
         run: |
@@ -510,6 +513,9 @@ jobs:
           gcc -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
             -I'认证核心源码/esurfingclient/app/src/utils/log' scripts/tests/private_log_stream_audit.c -o "$tmp/log_audit"
           ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/log_audit" "$tmp"
+          gcc -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -I'认证核心源码/esurfingclient/app/src/utils/log' scripts/tests/log_archive_audit.c -o "$tmp/archive_audit"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/archive_audit" "$tmp"
       - name: cJSON source usage and arithmetic regression
         shell: bash
         run: |
