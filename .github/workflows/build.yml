@@ -396,6 +396,11 @@ jobs:
             if (Test-Path -LiteralPath $repeat -PathType Container) { Remove-Item -LiteralPath $repeat -Recurse -Force }
           }
 
+      - name: Observe isolated installed Roslyn GUI compiler candidate
+        shell: pwsh
+        timeout-minutes: 5
+        run: ./scripts/Test-GuiCompilerCandidate.ps1
+
       - name: Stage reviewed RC documentation
         shell: pwsh
         run: |
@@ -419,7 +424,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $dir = 'build-core'
           Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'build-toolchain-evidence.json') -Destination (Join-Path $dir 'build-toolchain-evidence.json')
-          $files = @('认证核心-源码重建.exe','澈知科技-源码重建.exe','澈知科技-源码重建.exe.config','build-manifest.json','sbom.cdx.json','pe-imports.json','repeatability.json','build-toolchain-evidence.json','Licenses.txt','THIRD_PARTY_NOTICES.md','RC_PACKAGE.md','RELEASE_CHECKLIST.md')
+          $files = @('认证核心-源码重建.exe','澈知科技-源码重建.exe','澈知科技-源码重建.exe.config','build-manifest.json','sbom.cdx.json','pe-imports.json','repeatability.json','build-toolchain-evidence.json','Licenses.txt','THIRD_PARTY_NOTICES.md','RC_PACKAGE.md','RELEASE_CHECKLIST.md','gui-compiler-candidate.json')
           $entries = @(foreach ($name in $files) {
             $file = Join-Path $dir $name
             [ordered]@{file=$name;sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash;bytes=(Get-Item -LiteralPath $file).Length}
@@ -450,6 +455,7 @@ jobs:
             build-core/THIRD_PARTY_NOTICES.md
             build-core/RC_PACKAGE.md
             build-core/RELEASE_CHECKLIST.md
+            build-core/gui-compiler-candidate.json
           if-no-files-found: error
 
       - name: Preserve non-executable audit evidence when a gate fails

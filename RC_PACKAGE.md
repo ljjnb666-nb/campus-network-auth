@@ -14,6 +14,7 @@
 | pe-imports.json | 直接 PE 导入报告 |
 | repeatability.json | 同 runner 两次构建比较，不是独立复现证明 |
 | build-toolchain-evidence.json | 工具链观测记录 |
+| gui-compiler-candidate.json | runner 已安装候选编译器的隔离双编译诊断；非默认产物、非运行时验收 |
 | build-evidence.json | 无签名证据索引，绑定其他归档文件的长度与 SHA-256 |
 | Licenses.txt | 已有第三方许可全文与声明 |
 | THIRD_PARTY_NOTICES.md | 第三方组件、来源及尚未关闭的适用性审查 |
@@ -29,3 +30,5 @@
 ## GUI 编译器迁移验收
 
 当前保持已验证的 Framework csc 构建路径。CI #433 已观察到旧编译器拒绝 /deterministic+（CS2007），因此不将原生核心字节一致泛化到 GUI。候选编译器须另行核验来源、版本及摘要锁，保持 Framework 4.x 目标引用与现有资源、清单、平台设置；在独立输出目录完成两次完整构建，检查原始字节与现有离线 UI、生命周期、资源和完整性门禁，之后再决定是否替换默认工具链。未经验证不添加自动下载、自动回退或关闭现有门禁。
+
+CI #435 的四份 RC 文档打包步骤已成功。新增实验仅在已有 Visual Studio Roslyn 编译器自身签名验证通过时进行两次完整 GUI 编译（复用已校验的核心、独立源码目录、显式 Framework 引用及确定性参数）。缺候选、签名未确认、编译失败或摘要不一致均如实记录状态，不等于迁移验收。候选 EXE 不运行、不上传、不替换默认构建，独立来源锁、完整双构建及运行时兼容性仍待验证。
