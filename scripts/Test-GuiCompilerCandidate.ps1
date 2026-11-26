@@ -22,7 +22,7 @@ function Write-Report {
     $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding utf8
     Write-Host "GUI_COMPILER_CANDIDATE status=$($report.status) byteIdentical=$($report.byteIdentical)"
 }
-$vswhere = Join-Path __PF86__ 'Microsoft Visual Studio\Installer\vswhere.exe'
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
     $report.status = 'vswhere_unavailable'; Write-Report; return
 }
