@@ -338,9 +338,11 @@ bool set_logger_dir(const char* dir)
      * 日志系统还没起来 (init_logger 之前调用): 记下目录就够了, init 的时候自然会用上。
      * 不特判的话这里会先把日志文件打开, init_logger 再打开一次 —— 白漏一个句柄
      */
+    logger_lock();
     if (g_logger_inited == false)
     {
         snprintf(g_cfg_log_dir, sizeof(g_cfg_log_dir), "%s", dir);
+        logger_unlock();
         return true;
     }
 
@@ -352,6 +354,7 @@ bool set_logger_dir(const char* dir)
     if (strcmp(new_dir, g_logger_cfg.log_dir) == 0)
     {
         snprintf(g_cfg_log_dir, sizeof(g_cfg_log_dir), "%s", dir);
+        logger_unlock();
         return true;
     }
 
@@ -365,16 +368,15 @@ bool set_logger_dir(const char* dir)
      *
      * 看门狗 log_raw_line() 仅尝试获取同一把锁，忙时省略本次文件诊断。
      */
-    logger_lock();
-
     char old_dir[LOG_PATH_MAX];
     char old_file[LOG_PATH_MAX];
     snprintf(old_dir, sizeof(old_dir), "%s", g_logger_cfg.log_dir);
     snprintf(old_file, sizeof(old_file), "%s", g_logger_cfg.log_file);
 
+    bool close_ok = false;
     if (g_logger_cfg.file_handle != NULL)
     {
-        fclose(g_logger_cfg.file_handle);
+        close_ok = fclose(g_logger_cfg.file_handle) == 0;
         g_logger_cfg.file_handle = NULL;
     }
 
@@ -389,8 +391,9 @@ bool set_logger_dir(const char* dir)
      * 共写同一份 run.log, 覆盖就等于把别的进程的日志丢掉。
      * 搬不动也无所谓 (跨文件系统时 rename 会失败), 顶多启动那几行留在原地
      */
-    const bool old_file_exists = (strlen(g_logger_cfg.log_file) > 0) && path_exists(g_logger_cfg.log_file);
-    if (old_file_exists && path_exists(new_file) == false && strcmp(g_logger_cfg.log_file, new_file) != 0)
+    const bool source_matches = close_ok && log_path_matches_identity(old_file,
+        g_logger_cfg.file_dev, g_logger_cfg.file_ino);
+    if (source_matches && path_exists(new_file) == false && strcmp(old_file, new_file) != 0)
     {
         /* The earlier existence check is only advisory: another process
          * may create the destination before this call. Never replace it. */
@@ -409,16 +412,18 @@ bool set_logger_dir(const char* dir)
          */
         snprintf(g_logger_cfg.log_dir, sizeof(g_logger_cfg.log_dir), "%s", old_dir);
         snprintf(g_logger_cfg.log_file, sizeof(g_logger_cfg.log_file), "%s", old_file);
-        open_log_file();
+        const bool restored = open_log_file();
 
         logger_unlock();
-        LOG_WARN("无法打开日志文件 %s, 继续使用 %s", new_file, old_dir);
+        if (restored)
+            LOG_WARN("无法打开日志文件 %s, 继续使用 %s", new_file, old_dir);
+        else
+            fprintf(stderr, "[ERROR] 无法打开新旧日志文件，日志文件输出不可用\n");
         return false;
     }
 
-    logger_unlock();
-
     snprintf(g_cfg_log_dir, sizeof(g_cfg_log_dir), "%s", dir);
+    logger_unlock();
 
     LOG_INFO("日志目录已改为 %s", new_dir);
     return true;

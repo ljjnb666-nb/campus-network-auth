@@ -20,84 +20,13 @@ static const char s_rotate_file_name[] = ".rotate.log";
 static uint32_t s_rotate_seq = 0;
 
 /**
- * @brief 获取路径当前的文件身份
- *
- * 设备号 + inode 唯一标识一个文件, 重命名之后路径会指向新的 inode,
- * 据此可以判断自己手上的句柄是否已经落在被轮转掉的旧文件上
- * @param path 文件路径
- * @param dev 设备号 (Windows 为卷序列号)
- * @param ino inode (Windows 为文件索引)
- * @return 是否获取成功
- */
-static bool get_file_id(const char* path, uint64_t* dev, uint64_t* ino)
-{
-#ifdef _WIN32
-    HANDLE handle = CreateFileA(path, GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (handle == INVALID_HANDLE_VALUE) return false;
-
-    BY_HANDLE_FILE_INFORMATION info;
-    const bool ok = GetFileInformationByHandle(handle, &info) != 0;
-    CloseHandle(handle);
-    if (ok == false) return false;
-
-    *dev = (uint64_t)info.dwVolumeSerialNumber;
-    *ino = ((uint64_t)info.nFileIndexHigh << 32) | (uint64_t)info.nFileIndexLow;
-    return true;
-#else
-    struct stat st;
-    if (stat(path, &st) != 0) return false;
-
-    *dev = (uint64_t)st.st_dev;
-    *ino = (uint64_t)st.st_ino;
-    return true;
-#endif
-}
-
-/* Obtain the identity of the stream itself, not a second pathname lookup.
- * A concurrent rename between fopen and stat must not record another file
- * as the one actually held open. Zero remains the unknown-ID sentinel. */
-static bool get_stream_id(FILE* stream, uint64_t* dev, uint64_t* ino)
-{
-    if (stream == NULL) return false;
-#ifdef _WIN32
-    const int fd = _fileno(stream);
-    if (fd < 0) return false;
-    const intptr_t os_handle = _get_osfhandle(fd);
-    if (os_handle == -1) return false;
-    BY_HANDLE_FILE_INFORMATION info;
-    if (!GetFileInformationByHandle((HANDLE)os_handle, &info)) return false;
-    const uint64_t file_index = ((uint64_t)info.nFileIndexHigh << 32) |
-        (uint64_t)info.nFileIndexLow;
-    if (file_index == 0) return false;
-    *dev = (uint64_t)info.dwVolumeSerialNumber;
-    *ino = file_index;
-#else
-    struct stat st;
-    const int fd = fileno(stream);
-    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        st.st_ino == 0) return false;
-    *dev = (uint64_t)st.st_dev;
-    *ino = (uint64_t)st.st_ino;
-#endif
-    return true;
-}
-
-/**
  * @brief 以追加方式打开一个日志文件
  * @param path 文件路径
  * @return 文件句柄 (失败返回 NULL)
  */
 static FILE* open_log_handle(const char* path)
 {
-#ifdef _WIN32
-    FILE* handle = fopen(path, "a");
-#else
-    FILE* handle = open_private_log_stream(path);
-#endif
-
-    return handle;
+    return open_private_log_stream(path);
 }
 
 /**
@@ -208,17 +137,15 @@ void rotate(void)
     }
 
     // Windows 无法重命名一个仍被自己打开的文件, 所以先关闭再改名
-    fclose(g_logger_cfg.file_handle);
+    const bool close_ok = fclose(g_logger_cfg.file_handle) == 0;
     g_logger_cfg.file_handle = NULL;
 
     /**
      * 关闭之后再确认一次: 关闭与重命名之间仍有窗口, 期间可能已被其它进程轮转.
      * 不确认的话会把别的进程刚建好的新 run.log 改名走 (rename 会覆盖同名目标)
      */
-    uint64_t dev = 0;
-    uint64_t ino = 0;
-    if (get_file_id(g_logger_cfg.log_file, &dev, &ino) == false ||
-        dev != g_logger_cfg.file_dev || ino != g_logger_cfg.file_ino)
+    if (!close_ok || !log_path_matches_identity(g_logger_cfg.log_file,
+        g_logger_cfg.file_dev, g_logger_cfg.file_ino))
     {
         if (open_log_file() == false)
         {

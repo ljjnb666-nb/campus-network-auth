@@ -81,7 +81,7 @@ void clean_logger(void)
         fprintf(stderr, "[ERROR] 日志系统未启动\n");
         return;
     }
-    fclose(g_logger_cfg.file_handle);
+    const bool close_ok = fclose(g_logger_cfg.file_handle) == 0;
     g_logger_cfg.file_handle = NULL;
 
     // 收尾之后句柄已经没了, 再 set_logger_dir 只该记下目录, 不该去搬文件
@@ -107,6 +107,13 @@ void clean_logger(void)
     {
         logger_unlock();
         fprintf(stderr, "[ERROR] 日志归档路径无效，保留原文件\n");
+        return;
+    }
+    if (!close_ok || !log_path_matches_identity(g_logger_cfg.log_file,
+        g_logger_cfg.file_dev, g_logger_cfg.file_ino))
+    {
+        logger_unlock();
+        fprintf(stderr, "[ERROR] 日志源身份或关闭结果未确认，跳过退出归档\n");
         return;
     }
     if (!archive_log_without_replace(g_logger_cfg.log_file, new_file_name))

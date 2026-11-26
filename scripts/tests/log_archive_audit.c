@@ -1,5 +1,6 @@
 /* Standalone synthetic files, no network or project runtime. */
 #include "LogArchiveFile.h"
+#include "LogPrivateFile.h"
 #include <assert.h>
 #include <string.h>
 #ifdef _WIN32
@@ -77,5 +78,37 @@ int main(int argc, char** argv)
     assert(rmdir("existing-dir") == 0);
     puts("LOCAL_ARCHIVE_DESTINATION_TYPES_PASS cases=2");
 #endif
+    /* Preserve the original file under its archived name, then recreate
+     * the active path. A stale identity must not authorize that move. */
+    FILE* stream = open_private_log_stream("identity.log");
+    assert(stream);
+    assert(fputs("one", stream) >= 0);
+    uint64_t dev = 0, ino = 0;
+    assert(get_stream_id(stream, &dev, &ino));
+    assert(log_path_matches_identity("identity.log", dev, ino));
+    assert(!log_path_matches_identity("identity.log", dev, 0));
+    assert(fclose(stream) == 0);
+    stream = open_private_log_stream("identity.log");
+    assert(stream && fputs("two", stream) >= 0 && fclose(stream) == 0);
+    expect_file("identity.log", "onetwo");
+    assert(archive_log_without_replace("identity.log", "identity-old.log"));
+    assert(!log_path_matches_identity("identity.log", dev, ino));
+    make_file("identity.log", "new");
+    assert(!log_path_matches_identity("identity.log", dev, ino));
+    assert(log_path_matches_identity("identity-old.log", dev, ino));
+    expect_file("identity.log", "new");
+    expect_file("identity-old.log", "onetwo");
+#ifdef _WIN32
+    assert(CreateHardLinkA("identity-link.log", "identity.log", NULL));
+#else
+    assert(link("identity.log", "identity-link.log") == 0);
+#endif
+    assert(!open_private_log_stream("identity-link.log"));
+    assert(!get_file_id("identity.log", &dev, &ino));
+    expect_file("identity.log", "new");
+    assert(remove("identity-link.log") == 0);
+    assert(remove("identity.log") == 0);
+    assert(remove("identity-old.log") == 0);
+    puts("LOCAL_LOG_IDENTITY_AND_APPEND_PASS");
     return 0;
 }

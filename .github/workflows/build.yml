@@ -115,6 +115,7 @@ jobs:
           try {
             $root = '认证核心源码/esurfingclient/app/src/utils/log'
             Copy-Item -LiteralPath (Join-Path $root 'LogArchiveFile.h') -Destination $temp
+            Copy-Item -LiteralPath (Join-Path $root 'LogPrivateFile.h') -Destination $temp
             Copy-Item -LiteralPath 'scripts/tests/log_archive_audit.c' -Destination $temp
             Push-Location -LiteralPath $temp
             try {
@@ -129,7 +130,7 @@ jobs:
               $result = @(& ./archive_audit.exe $temp 2>&1)
               $code = $LASTEXITCODE
               $result | ForEach-Object { Write-Host "$_" }
-              if ($code -ne 0 -or -not ($result -ccontains 'LOCAL_LOG_ARCHIVE_NO_REPLACE_PASS cases=4')) { throw "Windows archive audit failed: exit=$code" }
+              if ($code -ne 0 -or -not ($result -ccontains 'LOCAL_LOG_ARCHIVE_NO_REPLACE_PASS cases=4') -or -not ($result -ccontains 'LOCAL_LOG_IDENTITY_AND_APPEND_PASS')) { throw "Windows archive audit failed: exit=$code" }
             } finally { Pop-Location }
           } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
 
