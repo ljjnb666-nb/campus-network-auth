@@ -98,8 +98,8 @@ try {
         $composition = $compositions[0]
         $expectedAssemblies = @('auth-core','chezhi-desktop')
         $expectedDependencies = @('auth-core','cJSON','chezhi-desktop','libcurl')
-        if ((@($composition.assemblies | Sort-Object) -join '|') -cne ($expectedAssemblies -join '|') -or
-            (@($composition.dependencies | Sort-Object) -join '|') -cne ($expectedDependencies -join '|')) {
+        if ((@($composition.assemblies | Sort-Object) -join '|') -cne (@($expectedAssemblies | Sort-Object) -join '|') -or
+            (@($composition.dependencies | Sort-Object) -join '|') -cne (@($expectedDependencies | Sort-Object) -join '|')) {
             throw 'Source inventory composition scope mismatch'
         }
     }
