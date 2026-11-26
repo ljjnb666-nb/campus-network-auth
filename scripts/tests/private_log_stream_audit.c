@@ -1,8 +1,52 @@
 /* Local synthetic files only. No project runtime or network. */
-#include "LogPrivateFile.h"
+#include <fcntl.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <errno.h>
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+
+enum failure_point { NONE, STAT_FAIL, CHMOD_FAIL, STREAM_FAIL };
+static enum failure_point failure;
+static int observed_fd = -1;
+
+static int fixture_fstat(int fd, struct stat* info)
+{
+    observed_fd = fd;
+    if (failure == STAT_FAIL) { errno = EIO; return -1; }
+    return fstat(fd, info);
+}
+static int fixture_fchmod(int fd, mode_t mode)
+{
+    if (failure == CHMOD_FAIL) { errno = EPERM; return -1; }
+    return fchmod(fd, mode);
+}
+static FILE* fixture_fdopen(int fd, const char* mode)
+{
+    if (failure == STREAM_FAIL) { errno = ENOMEM; return NULL; }
+    return fdopen(fd, mode);
+}
+
+#define fstat fixture_fstat
+#define fchmod fixture_fchmod
+#define fdopen fixture_fdopen
+#include "LogPrivateFile.h"
+#undef fstat
+#undef fchmod
+#undef fdopen
+
+static void check_failed_descriptor(enum failure_point point)
+{
+    observed_fd = -1;
+    failure = point;
+    FILE* stream = open_private_log_stream("sample.log");
+    failure = NONE;
+    assert(stream == NULL && observed_fd >= 0);
+    errno = 0;
+    assert(fcntl(observed_fd, F_GETFD) == -1 && errno == EBADF);
+}
 
 int main(int argc, char** argv)
 {
@@ -39,7 +83,11 @@ int main(int argc, char** argv)
     assert(unlink("pipe.log") == 0);
     assert(open_private_log_stream(".") == NULL);
     assert(open_private_log_stream("missing/file.log") == NULL);
+    check_failed_descriptor(STAT_FAIL);
+    check_failed_descriptor(CHMOD_FAIL);
+    check_failed_descriptor(STREAM_FAIL);
     assert(unlink("sample.log") == 0);
+    puts("PRIVATE_LOG_FAILURE_CLEANUP_PASS cases=3");
     puts("PRIVATE_LOG_STREAM_PASS cases=8");
     return 0;
 }
