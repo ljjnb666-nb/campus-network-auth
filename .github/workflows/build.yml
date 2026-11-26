@@ -470,6 +470,15 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Private local log file regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -I'认证核心源码/esurfingclient/app/src/utils/log' scripts/tests/private_log_stream_audit.c -o "$tmp/log_audit"
+          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 "$tmp/log_audit" "$tmp"
       - name: Offline local sampling buffer regression
         shell: bash
         run: |
@@ -492,6 +501,15 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Private local log file regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          gcc -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -I'认证核心源码/esurfingclient/app/src/utils/log' scripts/tests/private_log_stream_audit.c -o "$tmp/log_audit"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/log_audit" "$tmp"
       - name: cJSON source usage and arithmetic regression
         shell: bash
         run: |
