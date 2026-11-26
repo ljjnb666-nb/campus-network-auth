@@ -75,6 +75,9 @@ $toolVersions = @{
     tar      = Get-FirstLine $tar @('--version')
 }
 
+$checkoutObserver = Join-Path $PSScriptRoot 'scripts\Get-CheckoutEvidence.ps1'
+$checkoutBefore = & $checkoutObserver -Root $PSScriptRoot
+
 $build = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $PSScriptRoot 'build-core' }
 if (Test-Path -LiteralPath $build) { throw "构建目录已存在：$build。为保护已有文件，请先自行选择其他目录保存旧结果。" }
 $tempRoot = if ($WorkDirectory) { [IO.Path]::GetFullPath($WorkDirectory) } else { [IO.Path]::GetFullPath([IO.Path]::GetTempPath()) }
@@ -120,8 +123,11 @@ if ($LASTEXITCODE -ne 0) { throw '桌面程序编译失败。' }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'app.config') -Destination (Join-Path $build '澈知科技-源码重建.exe.config') -Force
 
 # 构建清单：版本 / 提交 / 工具链 / 依赖 / 产物哈希（可复现性证据，随产物一起归档）
-$gitSha = 'unknown'
-try { $gitSha = (& git -C $PSScriptRoot rev-parse HEAD 2>$null | Select-Object -First 1).Trim() } catch { }
+$checkoutAfter = & $checkoutObserver -Root $PSScriptRoot
+$gitSha = $checkoutAfter.commit
+$checkoutStatus = if ($checkoutBefore.state -eq 'clean' -and $checkoutAfter.state -eq 'clean' -and
+    $checkoutBefore.commit -cne 'unknown' -and $checkoutBefore.commit -ceq $checkoutAfter.commit) { 'clean-observed' } else { 'unverified' }
+if ($checkoutStatus -ne 'clean-observed') { Write-Warning 'Source checkout provenance is unverified; do not treat this build as clean-commit evidence.' }
 $appVersion = 'unknown'
 try {
     $m = [regex]::Match((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Program.cs') -Raw -Encoding UTF8), 'AssemblyVersion\("([0-9.]+)"\)')
@@ -138,6 +144,12 @@ $manifest = [ordered]@{
     schemaVersion = 2
     appVersion = $appVersion
     gitCommit  = $gitSha
+    checkoutEvidence = [ordered]@{
+        status = $checkoutStatus
+        before = $checkoutBefore
+        after = $checkoutAfter
+        scope = 'Git status observations before and after build; excludes ignored files; not immutable or signed provenance'
+    }
     builtAtUtc = (Get-Date).ToUniversalTime().ToString('o')
     toolchain  = $toolVersions
     cscPath    = $compiler
@@ -150,7 +162,7 @@ $manifest = [ordered]@{
         }
         cJSON = [ordered]@{
             version = '1.7.19'
-            source = 'vendored source at gitCommit'
+            source = 'vendored working tree; see checkoutEvidence'
             files = @($cjsonFiles)
         }
     }
