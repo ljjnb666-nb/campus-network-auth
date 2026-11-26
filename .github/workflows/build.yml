@@ -199,7 +199,13 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $dir = 'build-core'
           $m = Get-Content -LiteralPath (Join-Path $dir 'build-manifest.json') -Raw | ConvertFrom-Json
-          if ($m.schemaVersion -ne 2 -or $m.gitCommit -cne (git rev-parse HEAD).Trim()) { throw 'Manifest checkout mismatch' }
+          $head = @(git rev-parse --verify HEAD)
+          if ($LASTEXITCODE -ne 0 -or $head.Count -ne 1 -or $m.schemaVersion -ne 2 -or $m.gitCommit -cne $head[0]) { throw 'Manifest checkout mismatch' }
+          $checkout = $m.checkoutEvidence
+          if ($checkout.status -cne 'clean-observed' -or
+              $checkout.before.state -cne 'clean' -or $checkout.after.state -cne 'clean' -or
+              $checkout.before.commit -cne $head[0] -or $checkout.after.commit -cne $head[0]) { throw 'Manifest checkout provenance unverified' }
+          Write-Host 'BUILD_CHECKOUT_EVIDENCE_PASS'
           if ($m.dependencies.curl.sha256 -cne 'E3DE77CFA6367083C776A26647FC9F633B538C06C3BAA73D931A252AC8F72B49') { throw 'Manifest dependency lock mismatch' }
           $expected = @('认证核心-源码重建.exe','澈知科技-源码重建.exe','澈知科技-源码重建.exe.config')
           if (@($m.outputs).Count -ne $expected.Count) { throw 'Manifest output count mismatch' }
@@ -420,6 +426,9 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Checkout provenance observation regression
+        shell: pwsh
+        run: ./scripts/Test-CheckoutEvidence.ps1
       - name: Read-only PE evidence regression
         shell: pwsh
         run: ./scripts/Test-PeEvidence.ps1
