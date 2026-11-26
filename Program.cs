@@ -1153,9 +1153,14 @@ internal static class Program
         catch (Exception e) { Console.WriteLine("OBSERVE_ERROR " + e.GetType().Name); return 1; }
     }
 
-    private static SavedCredential DummyCredential()
+    private static SavedCredential DummyCredential(string fixtureDirectory)
     {
-        return new SavedCredential { Username = "测试12", Password = "dummy-Secret-\"\\-中文-987", Channel = 3 };
+        // Derive non-secret test data from this test's unique temporary directory.
+        // Reproduce the same sample across the offline child process and UI reload.
+        string sample = Path.GetFileName(Path.GetFullPath(fixtureDirectory));
+        if (string.IsNullOrEmpty(sample)) throw new ArgumentException("Missing fixture directory");
+        string sampleText = string.Format("synthetic:{0}:\"\\中文", sample);
+        return new SavedCredential { Username = "测试12", Password = sampleText, Channel = 3 };
     }
 
     private static bool SameCredential(SavedCredential a, SavedCredential b)
@@ -1165,7 +1170,7 @@ internal static class Program
 
     private static int CredentialReadTest(string dir)
     {
-        try { return SameCredential(new CredentialStore(dir).Load(), DummyCredential()) ? 0 : 1; }
+        try { return SameCredential(new CredentialStore(dir).Load(), DummyCredential(dir)) ? 0 : 1; }
         catch { return 1; }
     }
 
@@ -1187,7 +1192,7 @@ internal static class Program
         var store = new CredentialStore(dir);
         try
         {
-            SavedCredential value = DummyCredential();
+            SavedCredential value = DummyCredential(dir);
             store.Save(value);
             byte[] bytes = File.ReadAllBytes(store.FilePath);
             if (ContainsBytes(bytes, Encoding.UTF8.GetBytes(value.Username)) ||
@@ -1226,7 +1231,7 @@ internal static class Program
             if (store.Load() != null) return 1;
             // Derive the deliberately invalid value from the existing offline
             // fixture, never from a real credential.
-            value.Password = DummyCredential().Password + '\0';
+            value.Password = DummyCredential(dir).Password + '\0';
             refused = false;
             try { store.Save(value); } catch (InvalidDataException) { refused = true; }
             if (!refused || File.Exists(store.FilePath)) return 1;
@@ -2840,7 +2845,7 @@ internal static class Program
 
         internal bool CheckTrayAndSaveForTest()
         {
-            SavedCredential dummy = DummyCredential();
+            SavedCredential dummy = DummyCredential(Path.GetDirectoryName(credentials.FilePath));
             if (!password.UseSystemPasswordChar || reveal.Text != "显示") return false;
             account.Text = dummy.Username; password.Text = dummy.Password; channel.SelectedIndex = dummy.Channel - 1;
             reveal.PerformClick();
@@ -2875,7 +2880,7 @@ internal static class Program
 
         internal bool CheckCredentialReloadForTest()
         {
-            SavedCredential dummy = DummyCredential();
+            SavedCredential dummy = DummyCredential(Path.GetDirectoryName(credentials.FilePath));
             bool ok = loadedCredential && account.Text == dummy.Username && password.Text == dummy.Password &&
                 channel.SelectedIndex + 1 == dummy.Channel && password.UseSystemPasswordChar && reveal.Text == "显示";
             exitRequested = true; Close(); Application.DoEvents();
