@@ -3595,6 +3595,7 @@ internal static class Program
         private bool checkingBlocked;
         private readonly System.Threading.CancellationTokenSource idleCheckLifetime =
             new System.Threading.CancellationTokenSource();
+        private Task<HandoffObservation> idleCheckWorker;
         private HandoffObservation lastIdleObservation;
         private Process pendingServiceChild;
         private ServiceJournal pendingServiceJournal;
@@ -3610,18 +3611,39 @@ internal static class Program
         private async Task RunPreConnectCheckAsync(bool showMessage, bool quiet = false)
         {
             if (resourcesDisposed || checkingBlocked || powerSuspended || serviceBusy || connectCheckPending ||
-                retryTimer.Enabled || activeTask != null) return;
+                retryTimer.Enabled || activeTask != null || (idleCheckWorker != null && !idleCheckWorker.IsCompleted)) return;
             var cancellation = idleCheckLifetime.Token;
             int generation = taskGeneration;
             int observationEpoch = System.Threading.Interlocked.CompareExchange(ref networkEvidenceEpoch, 0, 0);
             checkingBlocked = true;
             try
             {
-                var observation = await Task.Run(observeHandoff, cancellation);
+                var observer = observeHandoff;
+                var worker = Task.Run(() => SampleIdleEnvironment(observer), cancellation);
+                idleCheckWorker = worker;
+                using (var deadline = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellation))
+                {
+                    var timeout = Task.Delay(5000, deadline.Token);
+                    if (await Task.WhenAny(worker, timeout) != worker)
+                    {
+                        if (!cancellation.IsCancellationRequested &&
+                            observationEpoch == System.Threading.Interlocked.CompareExchange(ref networkEvidenceEpoch, 0, 0) &&
+                            !HandoffCancelled(generation, false) && !serviceBusy && !connectCheckPending && activeTask == null)
+                            SetStatus("环境状态检查超时，请稍后重试。", ToneWarn);
+                        return;
+                    }
+                    deadline.Cancel();
+                }
+                var observation = await worker;
                 if (cancellation.IsCancellationRequested ||
                     observationEpoch != System.Threading.Interlocked.CompareExchange(ref networkEvidenceEpoch, 0, 0) ||
                     HandoffCancelled(generation, false) || serviceBusy || connectCheckPending ||
                     (running != null && !Object.ReferenceEquals(running, completedProcess))) return;
+                if (observation == null)
+                {
+                    SetHandoff(ConnectionStates.HandoffState.Blocked, "环境状态检查失败，请稍后重试。", ToneWarn);
+                    return;
+                }
                 state.SetService(observation.Service);
                 bool changed = lastIdleObservation == null || lastIdleObservation.Service != observation.Service ||
                     lastIdleObservation.Clients != observation.Clients || lastIdleObservation.VisibleClient != observation.VisibleClient;
@@ -3657,6 +3679,14 @@ internal static class Program
                     SetHandoff(ConnectionStates.HandoffState.Blocked, "环境状态检查失败，请稍后重试。", ToneWarn);
             }
             finally { checkingBlocked = false; }
+        }
+
+        private static HandoffObservation SampleIdleEnvironment(Func<HandoffObservation> observer)
+        {
+            // The UI may stop waiting while the read-only query is still
+            // running. Observe its exception here without posting to the UI.
+            try { return observer(); }
+            catch { return null; }
         }
 
         private async void ConnectClicked(object sender, EventArgs e)

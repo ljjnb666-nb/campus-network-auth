@@ -3,8 +3,7 @@
 
 /* Reject final-component links and nonregular files before returning a
  * writable stream. POSIX establishes owner-only permissions; Windows
- * inherits the directory ACL, not an independent ACL guarantee.
- * Ancestor directories are not independently validated.
+ * inherits the directory ACL and holds checked ancestors during open.
  */
 #ifdef _WIN32
 #include "LogArchiveFile.h"
@@ -13,9 +12,13 @@
 
 static inline FILE* open_private_log_stream(const char* path)
 {
-    HANDLE handle = CreateFileA(path, GENERIC_WRITE | FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
-        FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    log_pinned_path checked = {0};
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    if (log_pin_directories(path, &checked, false))
+        handle = CreateFileW(checked.name, GENERIC_WRITE | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+            FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    log_release_path(&checked);
     if (handle == INVALID_HANDLE_VALUE) return NULL;
     uint64_t dev = 0, ino = 0;
     if (!log_handle_id(handle, &dev, &ino))

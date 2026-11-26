@@ -15,32 +15,13 @@ static const char s_default_base[] = "/var/log/esurfing";
  * @param path 路径
  * @return 是否是目录
  */
+#ifndef _WIN32
 static bool is_dir(const char* path)
 {
-#ifdef _WIN32
-    const DWORD attr = GetFileAttributesA(path);
-    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
-#else
     struct stat st;
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode) != 0;
+}
 #endif
-}
-
-#ifdef _WIN32
-
-/**
- * @brief 跳过一个路径组件 (跳到它后面的分隔符之后)
- * @param p 当前位置
- * @return 下一个组件的位置 (已经到结尾时返回指向结尾的指针)
- */
-static char* skip_component(char* p)
-{
-    while (*p != '\0' && *p != SEP) p++;
-    if (*p == SEP) p++;
-    return p;
-}
-
-#endif // _WIN32
 
 /**
  * @brief 逐级创建目录 (Posix 的 mkdir -p / Windows 的逐级 CreateDirectory)
@@ -52,63 +33,16 @@ static char* skip_component(char* p)
  */
 static bool make_dirs(const char* path)
 {
+#ifdef _WIN32
+    log_pinned_path checked = {0};
+    bool ok = log_pin_directories(path, &checked, true);
+    log_release_path(&checked);
+    return ok;
+#else
     char buf[LOG_PATH_MAX];
     const int len = snprintf(buf, sizeof(buf), "%s", path);
     if (len <= 0 || (size_t)len >= sizeof(buf)) return false;
 
-#ifdef _WIN32
-    // 配置里可能写成 D:/esurfing/logs 这种混合分隔符, 先统一成 Windows 形式
-    for (char* p = buf; *p != '\0'; p++)
-    {
-        if (*p == '/') *p = SEP;
-    }
-
-    /**
-     * 先把"不能拿去建目录"的前缀跳过, 只把后面的部分逐级建出来
-     *
-     * 前缀有三种形状:
-     *   D:\...                盘符
-     *   \\服务器\共享名\...   UNC (\\ 与 \\服务器 这两段都不能单独建)
-     *   \\?\D:\... \\?\UNC\…  扩展长度前缀 (路径超过 260 字符要用它, 这里同样支持)
-     */
-    char* p = buf;
-    if (p[0] == SEP && p[1] == SEP)
-    {
-        p += 2;
-        if (p[0] == '?' && p[1] == SEP)
-        {
-            p += 2;
-            // \\?\UNC\服务器\共享名\... : UNC 那一段也不能单独建
-            if (str_iprefix(p, "UNC") && p[3] == SEP)
-            {
-                p = skip_component(skip_component(p + 4));
-            }
-            // \\?\D:\... : 剩下的就是普通盘符路径
-            if (isalpha((unsigned char)p[0]) != 0 && p[1] == ':') p += 2;
-        }
-        else
-        {
-            // \\服务器\共享名\... : 这两段由系统管着, 建不得
-            p = skip_component(skip_component(p));
-        }
-    }
-    else if (isalpha((unsigned char)p[0]) != 0 && p[1] == ':')
-    {
-        p += 2;
-    }
-
-    // 前缀后面紧跟的那个分隔符属于前缀, 从它【之后】的组件开始逐级建
-    if (*p == SEP) p++;
-
-    for (; *p != '\0'; p++)
-    {
-        if (*p != SEP) continue;
-        *p = '\0';
-        if (!CreateDirectoryA(buf, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return false;
-        *p = SEP;
-    }
-    if (!CreateDirectoryA(buf, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return false;
-#else
     for (char* p = buf + 1; *p != '\0'; p++)
     {
         if (*p != SEP) continue;
@@ -118,13 +52,13 @@ static bool make_dirs(const char* path)
     }
     // 日志目录本身收紧为仅属主可用 (中间层目录可能被共享, 维持 0755)
     if (mkdir(buf, 0700) != 0 && errno != EEXIST) return false;
-#endif
 
     /**
      * 上面每一级都是"存在就跳过" (EEXIST / ERROR_ALREADY_EXISTS),
      * 而路径上摆着一个同名【文件】时同样会走到这里, 所以最后再确认一次是不是目录
      */
     return is_dir(buf);
+#endif
 }
 
 /**

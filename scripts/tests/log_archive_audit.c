@@ -41,7 +41,34 @@ static bool archive_current(const char* source, const char* destination)
 }
 int main(int argc, char** argv)
 {
+#ifdef _WIN32
+    if (argc == 3 && strcmp(argv[2], "check-junction") == 0)
+    {
+        assert(chdir(argv[1]) == 0);
+        make_file("ordinary.log", "preserve");
+        log_pinned_path checked = {0};
+        assert(!log_pin_directories("mapped/missing", &checked, true));
+        log_release_path(&checked);
+        assert(!open_private_log_stream("mapped/new.log"));
+        assert(!archive_current("ordinary.log", "mapped/archive.log"));
+        expect_file("ordinary.log", "preserve");
+        assert(GetFileAttributesA("plain/missing") == INVALID_FILE_ATTRIBUTES);
+        expect_absent("plain/new.log");
+        expect_absent("plain/archive.log");
+        puts("LOCAL_LOG_ANCESTOR_JUNCTION_REJECTED_PASS");
+        return 0;
+    }
+#endif
     assert(argc == 2 && chdir(argv[1]) == 0);
+#ifdef _WIN32
+    log_pinned_path checked = {0};
+    assert(log_pin_directories("folder/nested", &checked, true));
+    const DWORD attrs = GetFileAttributesA("folder/nested");
+    assert(attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY));
+    log_release_path(&checked);
+    assert(RemoveDirectoryA("folder/nested"));
+    assert(RemoveDirectoryA("folder"));
+#endif
     make_file("active.log", "current");
     make_file("archive.log", "previous");
     assert(!archive_current("active.log", "archive.log"));

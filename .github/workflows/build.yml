@@ -131,6 +131,17 @@ jobs:
               $code = $LASTEXITCODE
               $result | ForEach-Object { Write-Host "$_" }
               if ($code -ne 0 -or -not ($result -ccontains 'LOCAL_LOG_ARCHIVE_NO_REPLACE_PASS cases=4') -or -not ($result -ccontains 'LOCAL_LOG_IDENTITY_AND_APPEND_PASS')) { throw "Windows archive audit failed: exit=$code" }
+              $fixture = Join-Path $temp 'junction-test'
+              $target = Join-Path $fixture 'plain'
+              $junction = Join-Path $fixture 'mapped'
+              [void](New-Item -ItemType Directory -Path $target)
+              [void](New-Item -ItemType Junction -Path $junction -Target $target)
+              try {
+                $result = @(& ./archive_audit.exe $fixture check-junction 2>&1)
+                $code = $LASTEXITCODE
+                $result | ForEach-Object { Write-Host "$_" }
+                if ($code -ne 0 -or -not ($result -ccontains 'LOCAL_LOG_ANCESTOR_JUNCTION_REJECTED_PASS')) { throw "Windows log path audit failed: exit=$code" }
+              } finally { [IO.Directory]::Delete($junction) }
             } finally { Pop-Location }
           } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
 
@@ -638,6 +649,11 @@ jobs:
           EOF
           gcc -std=c11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -Ithird_party/cJSON "$tmp/json_audit.c" -lm -o "$tmp/json_audit"
           ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/json_audit"
+          gcc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -DCJSON_BYTE_LIMIT=384 -DCJSON_NODE_LIMIT=16 -DCJSON_NESTING_LIMIT=8 \
+            -Ithird_party/cJSON "$GITHUB_WORKSPACE/scripts/tests/cjson_resource_limits_audit.c" \
+            third_party/cJSON/cJSON.c -lm -o "$tmp/json_limits_audit"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/json_limits_audit"
           echo CJSON_UNUSED_API_SOURCE_GATE_PASS
 
       - name: Sanitized local adapter list ownership and allocation failures

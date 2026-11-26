@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -31,6 +32,8 @@ internal sealed class CredentialStore
     private static readonly byte[] Magic = Encoding.ASCII.GetBytes("CZT1");
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("CheZhiTech.CampusNetwork.Credentials.v1");
     private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
+    private static readonly SecurityIdentifier SystemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+    private static readonly SecurityIdentifier AdministratorsSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
     private readonly string directory;
     private readonly string filePath;
     private readonly string leasePath;
@@ -58,19 +61,59 @@ internal sealed class CredentialStore
             throw new IOException("Unexpected reparse point.");
     }
 
-    private void EnsureDirectory()
+    private sealed class PinnedDirectories : IDisposable
     {
-        if (!Directory.Exists(directory))
+        internal readonly List<SafeFileHandle> Handles = new List<SafeFileHandle>();
+
+        public void Dispose()
         {
-            SecurityIdentifier user = CurrentUserSid();
-            var acl = new DirectorySecurity();
-            acl.SetAccessRuleProtection(true, false);
-            const InheritanceFlags inherit = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
-            acl.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl, inherit, PropagationFlags.None, AccessControlType.Allow));
-            acl.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl, inherit, PropagationFlags.None, AccessControlType.Allow));
-            Directory.CreateDirectory(directory, acl);
+            for (int i = Handles.Count - 1; i >= 0; i--) Handles[i].Dispose();
         }
-        RejectReparsePoint(directory);
+    }
+
+    private PinnedDirectories PinDirectories(bool create)
+    {
+        const uint readAttributes = 0x80, directoryAccess = 0x02000000, noFollow = 0x00200000;
+        string root = Path.GetPathRoot(directory);
+        if (directory.Length <= root.Length) throw new IOException("The credential store requires a private subdirectory.");
+        var pinned = new PinnedDirectories();
+        bool complete = false;
+        try
+        {
+            string path = root;
+            string[] parts = directory.Substring(root.Length).Split(
+                new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = -1; i < parts.Length; i++)
+            {
+                if (i >= 0) path = Path.Combine(path, parts[i]);
+                SafeFileHandle handle = TryOpen(path, readAttributes, FileShare.Read | FileShare.Write, directoryAccess | noFollow);
+                if (handle == null)
+                {
+                    if (!create || i < 0) return null;
+                    // The parent is already pinned. Without it, recursive
+                    // directory creation could follow a substituted ancestor.
+                    Directory.CreateDirectory(path, PrivateDirectorySecurity());
+                    handle = TryOpen(path, readAttributes, FileShare.Read | FileShare.Write, directoryAccess | noFollow);
+                    if (handle == null) throw new IOException("Created credential directory is unavailable.");
+                }
+                pinned.Handles.Add(handle);
+                CheckObjectType(handle, true);
+            }
+            CheckPrivateAcl(Directory.GetAccessControl(directory, AccessControlSections.Access | AccessControlSections.Owner));
+            complete = true;
+            return pinned;
+        }
+        finally { if (!complete) pinned.Dispose(); }
+    }
+
+    private static DirectorySecurity PrivateDirectorySecurity()
+    {
+        var acl = new DirectorySecurity();
+        acl.SetAccessRuleProtection(true, false);
+        const InheritanceFlags inherit = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+        acl.AddAccessRule(new FileSystemAccessRule(CurrentUserSid(), FileSystemRights.FullControl, inherit, PropagationFlags.None, AccessControlType.Allow));
+        acl.AddAccessRule(new FileSystemAccessRule(SystemSid, FileSystemRights.FullControl, inherit, PropagationFlags.None, AccessControlType.Allow));
+        return acl;
     }
 
     private static SecurityIdentifier CurrentUserSid()
@@ -89,8 +132,28 @@ internal sealed class CredentialStore
         var acl = new FileSecurity();
         acl.SetAccessRuleProtection(true, false);
         acl.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl, AccessControlType.Allow));
-        acl.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl, AccessControlType.Allow));
+        acl.AddAccessRule(new FileSystemAccessRule(SystemSid, FileSystemRights.FullControl, AccessControlType.Allow));
         return acl;
+    }
+
+    private static void CheckPrivateAcl(FileSystemSecurity acl)
+    {
+        SecurityIdentifier user = CurrentUserSid();
+        var descriptor = new RawSecurityDescriptor(acl.GetSecurityDescriptorBinaryForm(), 0);
+        if (descriptor.DiscretionaryAcl == null || !TrustedSid(descriptor.Owner, user))
+            throw new IOException("Unexpected credential object owner or access control.");
+        foreach (GenericAce entry in descriptor.DiscretionaryAcl)
+        {
+            var rule = entry as QualifiedAce;
+            if (rule == null || (rule.AceQualifier != AceQualifier.AccessDenied &&
+                (rule.AceQualifier != AceQualifier.AccessAllowed || !TrustedSid(rule.SecurityIdentifier, user))))
+                throw new IOException("Unexpected credential object access rule.");
+        }
+    }
+
+    private static bool TrustedSid(IdentityReference identity, SecurityIdentifier user)
+    {
+        return user.Equals(identity) || SystemSid.Equals(identity) || AdministratorsSid.Equals(identity);
     }
 
     // Keep the same lease file across replacements and Forget. Closing its
@@ -104,27 +167,36 @@ internal sealed class CredentialStore
         {
             try
             {
-                try { RejectReparsePoint(leasePath); }
-                catch (FileNotFoundException) { }
-                return new FileStream(leasePath, FileMode.OpenOrCreate, FileSystemRights.ReadData | FileSystemRights.WriteData,
-                    FileShare.None, 4096, FileOptions.None, acl);
+                const uint genericReadWrite = 0xc0000000, noFollow = 0x00200000;
+                SafeFileHandle handle = TryOpen(leasePath, genericReadWrite, FileShare.None, noFollow);
+                if (handle == null)
+                    return new FileStream(leasePath, FileMode.CreateNew, FileSystemRights.ReadData | FileSystemRights.WriteData,
+                        FileShare.None, 4096, FileOptions.None, acl);
+                FileStream lease = null;
+                try
+                {
+                    CheckObjectType(handle, false);
+                    lease = new FileStream(handle, FileAccess.ReadWrite);
+                    CheckPrivateAcl(lease.GetAccessControl());
+                    return lease;
+                }
+                catch
+                {
+                    if (lease != null) lease.Dispose();
+                    else handle.Dispose();
+                    throw;
+                }
             }
             catch (IOException e)
             {
-                int code = e.HResult & 0xffff;
-                if (code != 32 && code != 33) throw;
+                var native = e.InnerException as Win32Exception;
+                int code = native == null ? e.HResult & 0xffff : native.NativeErrorCode;
+                if (code != 32 && code != 33 && code != 80 && code != 183) throw;
                 long remaining = waitMilliseconds - wait.ElapsedMilliseconds;
                 if (remaining <= 0) throw new CredentialStoreBusyException(e);
                 Thread.Sleep((int)Math.Min(10, remaining));
             }
         }
-    }
-
-    private bool DirectoryPresent()
-    {
-        try { RejectReparsePoint(directory); return true; }
-        catch (FileNotFoundException) { return false; }
-        catch (DirectoryNotFoundException) { return false; }
     }
 
     private static void Validate(SavedCredential value)
@@ -171,6 +243,7 @@ internal sealed class CredentialStore
             if (handle == null) return null;
             using (var input = new FileStream(handle, FileAccess.Read))
             {
+                CheckPrivateAcl(input.GetAccessControl());
                 byte[] record = ReadBoundedStream(input, 65536);
                 try
                 {
@@ -188,8 +261,11 @@ internal sealed class CredentialStore
 
     internal SavedCredential Load()
     {
-        if (!DirectoryPresent()) return null;
-        using (AcquireLease()) return LoadRecord();
+        using (var pinned = PinDirectories(false))
+        {
+            if (pinned == null) return null;
+            using (AcquireLease()) return LoadRecord();
+        }
     }
 
     private SavedCredential LoadRecord()
@@ -215,7 +291,7 @@ internal sealed class CredentialStore
     internal void Save(SavedCredential value)
     {
         Validate(value);
-        EnsureDirectory();
+        using (PinDirectories(true))
         using (AcquireLease()) SaveRecord(value);
     }
 
@@ -252,8 +328,11 @@ internal sealed class CredentialStore
 
     internal void Forget()
     {
-        if (!DirectoryPresent()) return;
-        using (AcquireLease()) ForgetRecord();
+        using (var pinned = PinDirectories(false))
+        {
+            if (pinned == null) return;
+            using (AcquireLease()) ForgetRecord();
+        }
     }
 
     private void ForgetRecord()
@@ -265,6 +344,7 @@ internal sealed class CredentialStore
             if (handle == null) return;
             using (var input = new FileStream(handle, FileAccess.Read))
             {
+                CheckPrivateAcl(input.GetAccessControl());
                 // Explicit user action can remove a damaged record, but never an unknown file.
                 foreach (byte expected in Magic)
                     if (input.ReadByte() != expected) throw new InvalidDataException("Credential record is not recognized.");
@@ -279,28 +359,39 @@ internal sealed class CredentialStore
     private SafeFileHandle OpenCredential(bool deleting)
     {
         const uint genericRead = 0x80000000, deleteAccess = 0x00010000;
-        const uint openExisting = 3, openReparsePoint = 0x00200000;
+        const uint openReparsePoint = 0x00200000;
         uint access = deleting ? genericRead | deleteAccess : genericRead;
         FileShare share = deleting ? FileShare.None : FileShare.Read | FileShare.Delete;
-        SafeFileHandle handle = CreateFileW(filePath, access, share,
-            IntPtr.Zero, openExisting, openReparsePoint, IntPtr.Zero);
+        SafeFileHandle handle = TryOpen(filePath, access, share, openReparsePoint);
+        if (handle == null) return null;
         try
         {
-            if (handle.IsInvalid)
-            {
-                int error = Marshal.GetLastWin32Error();
-                if (error == 2) { handle.Dispose(); return null; } // ERROR_FILE_NOT_FOUND
-                throw new IOException("Unable to open the credential record.", new Win32Exception(error));
-            }
-            const int fileAttributeTagInfo = 9;
-            FileAttributeTag attributes;
-            if (!GetFileInformationByHandleEx(handle, fileAttributeTagInfo, out attributes, 8))
-                throw new IOException("Unable to inspect the credential record.", new Win32Exception(Marshal.GetLastWin32Error()));
-            if ((attributes.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
-                throw new IOException("Unexpected credential file type.");
+            CheckObjectType(handle, false);
             return handle;
         }
         catch { handle.Dispose(); throw; }
+    }
+
+    private static SafeFileHandle TryOpen(string path, uint access, FileShare share, uint flags)
+    {
+        const uint openExisting = 3;
+        SafeFileHandle handle = CreateFileW(path, access, share, IntPtr.Zero, openExisting, flags, IntPtr.Zero);
+        if (!handle.IsInvalid) return handle;
+        int error = Marshal.GetLastWin32Error();
+        handle.Dispose();
+        if (error == 2) return null; // ERROR_FILE_NOT_FOUND
+        throw new IOException("Unable to open a credential object.", new Win32Exception(error));
+    }
+
+    private static void CheckObjectType(SafeFileHandle handle, bool directory)
+    {
+        const int fileAttributeTagInfo = 9;
+        FileAttributeTag attributes;
+        if (!GetFileInformationByHandleEx(handle, fileAttributeTagInfo, out attributes, 8))
+            throw new IOException("Unable to inspect a credential object.", new Win32Exception(Marshal.GetLastWin32Error()));
+        if ((attributes.Attributes & FileAttributes.ReparsePoint) != 0 ||
+            ((attributes.Attributes & FileAttributes.Directory) != 0) != directory)
+            throw new IOException("Unexpected credential object type.");
     }
 
     [StructLayout(LayoutKind.Sequential)]

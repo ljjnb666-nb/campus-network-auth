@@ -143,6 +143,16 @@ typedef int cJSON_bool;
 #define CJSON_CIRCULAR_LIMIT 10000
 #endif
 
+/* Per-operation limits for the local build. The byte limit includes the
+ * terminator and working capacity for printing. Duplicate counts string
+ * bytes and nodes separately. These limits do not apply to cJSON_Compare. */
+#ifndef CJSON_BYTE_LIMIT
+#define CJSON_BYTE_LIMIT (8U * 1024U * 1024U)
+#endif
+#ifndef CJSON_NODE_LIMIT
+#define CJSON_NODE_LIMIT 65536U
+#endif
+
 /* returns the version of cJSON as a string */
 CJSON_PUBLIC(const char*) cJSON_Version(void);
 

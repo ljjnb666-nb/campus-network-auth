@@ -11,6 +11,8 @@
 #ifdef _WIN32
 #include <stddef.h>
 #include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
 #include <windows.h>
 #include <io.h>
 #else
@@ -88,30 +90,110 @@ static inline bool log_path_matches_identity(const char* path, uint64_t dev, uin
 }
 
 #ifdef _WIN32
-static inline bool log_rename_handle(HANDLE handle, const char* destination)
+typedef struct
 {
-    const DWORD path_size = GetFullPathNameA(destination, 0, NULL, NULL);
-    if (path_size == 0 || path_size > 32768) return false;
+    WCHAR *name;
+    HANDLE *directories;
+    size_t count;
+} log_pinned_path;
+
+static inline void log_release_path(log_pinned_path *path)
+{
+    while (path->count != 0) CloseHandle(path->directories[--path->count]);
+    free(path->directories);
+    free(path->name);
+}
+
+static inline WCHAR *log_full_path(const char* source)
+{
+    const DWORD path_size = GetFullPathNameA(source, 0, NULL, NULL);
+    if (path_size == 0 || path_size > 32768) return NULL;
     char* path = malloc(path_size);
-    if (!path) return false;
-    const DWORD path_length = GetFullPathNameA(destination, path_size, path, NULL);
+    if (!path) return NULL;
+    const DWORD path_length = GetFullPathNameA(source, path_size, path, NULL);
     const UINT code_page = AreFileApisANSI() ? CP_ACP : CP_OEMCP;
     const int name_size = path_length != 0 && path_length < path_size ?
         MultiByteToWideChar(code_page, 0, path, -1, NULL, 0) : 0;
-    bool ok = false;
-    if (name_size > 0)
+    WCHAR* name = name_size > 0 ? malloc((size_t)name_size * sizeof(WCHAR)) : NULL;
+    if (name && MultiByteToWideChar(code_page, 0, path, -1, name, name_size) != name_size)
     {
-        const DWORD info_size = (DWORD)(offsetof(FILE_RENAME_INFO, FileName) + name_size * sizeof(WCHAR));
-        FILE_RENAME_INFO* info = calloc(1, info_size);
-        if (info)
-        {
-            info->FileNameLength = (DWORD)((name_size - 1) * sizeof(WCHAR));
-            ok = MultiByteToWideChar(code_page, 0, path, -1, info->FileName, name_size) == name_size &&
-                SetFileInformationByHandle(handle, FileRenameInfo, info, info_size);
-            free(info);
-        }
+        free(name);
+        name = NULL;
     }
     free(path);
+    return name;
+}
+
+static inline WCHAR* log_root_end(WCHAR* name)
+{
+    if (name[1] == L':' && name[2] == L'\\') return name + 3;
+    if (name[0] != L'\\' || name[1] != L'\\') return NULL;
+    WCHAR* server = name + 2;
+    if (server[0] == L'?' && server[1] == L'\\')
+    {
+        server += 2;
+        if (wcslen(server) < 3) return NULL;
+        if (server[1] == L':' && server[2] == L'\\') return server + 3;
+        if (_wcsnicmp(server, L"UNC\\", 4) != 0) return NULL;
+        server += 4;
+    }
+    else if (server[0] == L'.') return NULL; /* Win32 device namespace */
+    WCHAR* server_end = wcschr(server, L'\\');
+    return server_end ? wcschr(server_end + 1, L'\\') : NULL;
+}
+
+static inline bool log_pin_directories(const char* source, log_pinned_path *path, bool create)
+{
+    path->name = log_full_path(source);
+    if (!path->name) return false;
+    const size_t length = wcslen(path->name);
+    if (length < 4 || path->name[length - 1] == L'\\') return false;
+
+    WCHAR* root_end = log_root_end(path->name);
+    if (!root_end) return false;
+
+    size_t count = create ? 2 : 1;
+    for (const WCHAR* p = root_end + 1; *p; p++) if (*p == L'\\') count++;
+    path->directories = malloc(count * sizeof(HANDLE));
+    if (!path->directories) return false;
+    for (WCHAR* end = root_end; end;)
+    {
+        const WCHAR saved = *end;
+        *end = L'\0';
+        HANDLE dir = CreateFileW(path->name, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        if (dir == INVALID_HANDLE_VALUE && create && end != root_end)
+        {
+            const DWORD error = GetLastError();
+            if ((error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) &&
+                (CreateDirectoryW(path->name, NULL) || GetLastError() == ERROR_ALREADY_EXISTS))
+                dir = CreateFileW(path->name, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        }
+        *end = saved;
+        if (dir == INVALID_HANDLE_VALUE) return false;
+        path->directories[path->count++] = dir;
+        BY_HANDLE_FILE_INFORMATION info;
+        if (!GetFileInformationByHandle(dir, &info) ||
+            !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+            (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
+        if (!saved) break;
+        end = wcschr(end + 1, L'\\');
+        if (!end && create) end = path->name + length;
+    }
+    return true;
+}
+
+static inline bool log_rename_handle(HANDLE handle, const WCHAR* destination)
+{
+    const size_t name_bytes = wcslen(destination) * sizeof(WCHAR);
+    const DWORD info_size = (DWORD)(offsetof(FILE_RENAME_INFO, FileName) + name_bytes + sizeof(WCHAR));
+    FILE_RENAME_INFO* info = calloc(1, info_size);
+    if (!info) return false;
+    info->FileNameLength = (DWORD)name_bytes;
+    memcpy(info->FileName, destination, name_bytes);
+    const bool ok = SetFileInformationByHandle(handle, FileRenameInfo, info, info_size) != 0;
+    free(info);
     return ok;
 }
 #endif
@@ -121,13 +203,22 @@ static inline bool archive_log_without_replace(const char* source, const char* d
 {
     if (expected_ino == 0) return false;
 #ifdef _WIN32
-    HANDLE handle = CreateFileA(source, DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL,
-        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-    if (handle == INVALID_HANDLE_VALUE) return false;
-    uint64_t dev = 0, ino = 0;
-    const bool ok = log_handle_id(handle, &dev, &ino) && dev == expected_dev && ino == expected_ino &&
-        log_rename_handle(handle, destination);
-    CloseHandle(handle);
+    log_pinned_path from = {0}, to = {0};
+    bool ok = false;
+    if (log_pin_directories(source, &from, false) && log_pin_directories(destination, &to, false))
+    {
+        HANDLE handle = CreateFileW(from.name, DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL,
+            OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        if (handle != INVALID_HANDLE_VALUE)
+        {
+            uint64_t dev = 0, ino = 0;
+            ok = log_handle_id(handle, &dev, &ino) && dev == expected_dev && ino == expected_ino &&
+                log_rename_handle(handle, to.name);
+            CloseHandle(handle);
+        }
+    }
+    log_release_path(&to);
+    log_release_path(&from);
     return ok;
 #else
     /* POSIX rename remains path-based; its identity check is advisory. */
