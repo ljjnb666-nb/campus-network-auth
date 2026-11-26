@@ -14,7 +14,7 @@
 | pe-imports.json | 直接 PE 导入报告 |
 | repeatability.json | 同 runner 两次构建比较，不是独立复现证明 |
 | build-toolchain-evidence.json | 工具链观测记录 |
-| gui-compiler-candidate.json | runner 已安装候选编译器的隔离双编译及离线 UI 压力诊断；非默认产物、非完整运行时验收 |
+| gui-compiler-candidate.json | runner 已安装候选编译器的隔离双编译及既有离线自测兼容性诊断；非默认产物、非真实环境验收 |
 | build-evidence.json | 无签名证据索引，绑定其他归档文件的长度与 SHA-256 |
 | Licenses.txt | 已有第三方许可全文与声明 |
 | THIRD_PARTY_NOTICES.md | 第三方组件、来源及尚未关闭的适用性审查 |
@@ -32,3 +32,5 @@
 当前保持已验证的 Framework csc 构建路径。CI #433 已观察到旧编译器拒绝 /deterministic+（CS2007），因此不将原生核心字节一致泛化到 GUI。候选编译器须另行核验来源、版本及摘要锁，保持 Framework 4.x 目标引用与现有资源、清单、平台设置；在独立输出目录完成两次完整构建，检查原始字节与现有离线 UI、生命周期、资源和完整性门禁，之后再决定是否替换默认工具链。未经验证不添加自动下载、自动回退或关闭现有门禁。
 
 CI #435 的四份 RC 文档打包步骤已成功。新增实验仅在已有 Visual Studio Roslyn 编译器自身签名验证通过时进行两次完整 GUI 编译（复用已校验的核心、独立源码目录、显式 Framework 引用及确定性参数）。缺候选、签名未确认、编译失败或摘要不一致均如实记录状态，不等于迁移验收。候选 EXE 不上传、不替换默认构建。CI #439 已获得同 runner 双编译字节一致证据；下一步仅对一致的候选 EXE 执行既有显式离线 UI 压力入口，绑定配置及 EXE 摘要，要求退出码和 UI_SCROLL_PASS、UI_STRESS_PASS 两个标记。超时或失败如实记入候选报告，不视为迁移通过，不启动正常连接流程。独立来源锁、完整双构建及其余运行时兼容性仍待验证。
+
+CI #441（e8a59dd）已确认候选 UI 压力 100 轮、滚动检查 715 次、托盘 22 次、退出码 0；GDI 51→51、USER 78→78、句柄 348→349。下一轮集中执行既有 11 个离线入口（logic、credentials、core、native-input、native-net、stop、resources、ui、app-lifecycle、ui-stress、signature），逐项要求真实退出码和指定成功标记，绑定候选与配置摘要；失败或超时后停止，未运行项目不得视为通过。这不是新增网络功能，也不启动正常认证或真实服务操作。候选仍只作诊断，不上传或替换默认 EXE。完成定义的候选离线范围后冻结该专项，不反复扩展；独立供应链来源、独立环境复现及发布许可/签名依然是正式迁移和发布的独立阻断。
