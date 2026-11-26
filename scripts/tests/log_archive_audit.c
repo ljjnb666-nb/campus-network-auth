@@ -6,6 +6,7 @@
 #include <direct.h>
 #define chdir _chdir
 #else
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -53,5 +54,28 @@ int main(int argc, char** argv)
     assert(remove("archive.log") == 0);
     assert(remove("fresh.log") == 0);
     puts("LOCAL_LOG_ARCHIVE_NO_REPLACE_PASS cases=4");
+#ifndef _WIN32
+    /* A directory or dangling symlink occupies a destination even when
+     * fopen on the link would report that its target does not exist. */
+    make_file("active.log", "current");
+    assert(mkdir("existing-dir", 0700) == 0);
+    make_file("existing-dir/sentinel", "keep");
+    assert(!archive_log_without_replace("active.log", "existing-dir"));
+    expect_file("active.log", "current");
+    expect_file("existing-dir/sentinel", "keep");
+    assert(symlink("missing-target", "dangling.log") == 0);
+    assert(!archive_log_without_replace("active.log", "dangling.log"));
+    expect_file("active.log", "current");
+    char target[64] = {0};
+    assert(readlink("dangling.log", target, sizeof(target)) ==
+        (ssize_t)strlen("missing-target"));
+    assert(strcmp(target, "missing-target") == 0);
+    expect_absent("missing-target");
+    assert(unlink("dangling.log") == 0);
+    assert(remove("active.log") == 0);
+    assert(remove("existing-dir/sentinel") == 0);
+    assert(rmdir("existing-dir") == 0);
+    puts("LOCAL_ARCHIVE_DESTINATION_TYPES_PASS cases=2");
+#endif
     return 0;
 }
