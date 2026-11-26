@@ -34,15 +34,15 @@
     "upstreamRepository": "https://github.com/DaveGamble/cJSON",
     "files": {
       "cJSON.c": {
-        "gitBlob": "021b5c1fa7fe4871c03caf2568ce400f5ab7d01a",
+        "gitBlob": "e111e00f2100001b1315b78eb0eef955ae1c79d9",
         "upstreamGitBlob": "6e4fb0dd369cd905923da515be87ab06db6c1ee0"
       },
       "cJSON.h": {
-        "gitBlob": "cab5feb427725f8e5c82287f7fe59481b609b9b5",
+        "gitBlob": "4b917a9372dd038a4a6e6043ebba75933d7b9c1f",
         "upstreamGitBlob": "cab5feb427725f8e5c82287f7fe59481b609b9b5"
       }
     },
-    "localPatchCommit": "8e839689a65eaf6ca643a3a1bb2a3204472a024a"
+    "localPatchCommit": "15a939cca76996aea3159469ed969e7bdca1b2d4"
   },
   "peDirectImports": {
     "baseline": {
