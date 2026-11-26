@@ -1,2 +1,2 @@
-# This file is embedded byte-for-byte in the Windows GUI and shipped alongside it.
-/Licenses.txt text eol=lf
+# The Windows About dialog needs CRLF in this byte-for-byte embedded resource.
+/Licenses.txt text eol=crlf
