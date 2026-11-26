@@ -8,6 +8,10 @@
 #include "utils/time/TimeUtils.h"
 
 #include <inttypes.h>
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 static const char s_rotate_file_name[] = ".rotate.log";
 
@@ -51,6 +55,35 @@ static bool get_file_id(const char* path, uint64_t* dev, uint64_t* ino)
 #endif
 }
 
+/* Obtain the identity of the stream itself, not a second pathname lookup.
+ * A concurrent rename between fopen and stat must not record another file
+ * as the one actually held open. Zero remains the unknown-ID sentinel. */
+static bool get_stream_id(FILE* stream, uint64_t* dev, uint64_t* ino)
+{
+    if (stream == NULL) return false;
+#ifdef _WIN32
+    const int fd = _fileno(stream);
+    if (fd < 0) return false;
+    const intptr_t os_handle = _get_osfhandle(fd);
+    if (os_handle == -1) return false;
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle((HANDLE)os_handle, &info)) return false;
+    const uint64_t file_index = ((uint64_t)info.nFileIndexHigh << 32) |
+        (uint64_t)info.nFileIndexLow;
+    if (file_index == 0) return false;
+    *dev = (uint64_t)info.dwVolumeSerialNumber;
+    *ino = file_index;
+#else
+    struct stat st;
+    const int fd = fileno(stream);
+    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_ino == 0) return false;
+    *dev = (uint64_t)st.st_dev;
+    *ino = (uint64_t)st.st_ino;
+#endif
+    return true;
+}
+
 /**
  * @brief 以追加方式打开一个日志文件
  * @param path 文件路径
@@ -80,7 +113,7 @@ bool open_log_file(void)
     g_logger_cfg.lines_since_check = 0;
     g_logger_cfg.file_dev = 0;
     g_logger_cfg.file_ino = 0;
-    get_file_id(g_logger_cfg.log_file, &g_logger_cfg.file_dev, &g_logger_cfg.file_ino);
+    get_stream_id(g_logger_cfg.file_handle, &g_logger_cfg.file_dev, &g_logger_cfg.file_ino);
     return true;
 }
 
@@ -93,7 +126,7 @@ bool open_log_file(void)
  */
 static bool reopen_if_rotated(void)
 {
-    // 拿不到身份信息时无从比较, 退化为仅按自身行数计数
+    // 拿不到句柄身份时不推断路径与句柄一致
     if (!g_logger_cfg.file_handle || g_logger_cfg.file_ino == 0) return false;
 
     uint64_t dev = 0;
@@ -117,9 +150,8 @@ static bool reopen_if_rotated(void)
 /**
  * @brief 日志轮转
  *
- * 轮转是"无主"的: 任何进程都可以发起, 并发安全由 rename 的原子性保证.
- * 同时发起时只有一个进程的 rename 会成功, 其余进程拿到失败,
- * 把失败直接当作"已被其它进程轮转"处理即可, 因此不需要锁或额外的协调
+ * 归档操作禁止覆盖已有目标，但路径身份检查与重命名之间仍有竞争窗口。
+ * 这不是完整的跨进程事务；不能仅凭原子重命名推断源路径身份不变。
  */
 void rotate(void)
 {
@@ -139,6 +171,18 @@ void rotate(void)
      * 否则会把别的进程刚轮转出来的新 run.log 再轮转一次
      */
     if (reopen_if_rotated() || g_logger_cfg.file_handle == NULL) return;
+    if (g_logger_cfg.file_ino == 0)
+    {
+        /* Keep writing the current stream rather than archive an unknown
+         * source. Retry identification on a subsequent rotation check. */
+        if (!get_stream_id(g_logger_cfg.file_handle, &g_logger_cfg.file_dev,
+            &g_logger_cfg.file_ino))
+        {
+            g_logger_cfg.cur_lines = 0;
+            return;
+        }
+        if (reopen_if_rotated() || g_logger_cfg.file_handle == NULL) return;
+    }
 
     char cur_tm[32];
     get_fmt_time(cur_tm, FILE_FORMAT);
@@ -185,7 +229,7 @@ void rotate(void)
 
     if (!archive_log_without_replace(g_logger_cfg.log_file, rotate_file_name))
     {
-        // 多半是已被其它进程抢先轮转, 属于正常竞争
+        // 失败原因未确认；不把失败解释为另一进程已成功归档
         fprintf(stderr, "[INFO] 日志轮转未完成（目标可能已存在或文件系统不支持）: %s\n", g_logger_cfg.log_file);
     }
 
