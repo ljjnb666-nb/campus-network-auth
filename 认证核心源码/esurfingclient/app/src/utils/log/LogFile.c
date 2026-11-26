@@ -1,4 +1,5 @@
 #include "LoggerInternal.h"
+#include "LogArchiveFile.h"
 #include "LogPrivateFile.h"
 
 #include "core/States.h"
@@ -182,10 +183,10 @@ void rotate(void)
         return;
     }
 
-    if (rename(g_logger_cfg.log_file, rotate_file_name) != 0)
+    if (!archive_log_without_replace(g_logger_cfg.log_file, rotate_file_name))
     {
         // 多半是已被其它进程抢先轮转, 属于正常竞争
-        fprintf(stderr, "[INFO] 日志轮转未生效 (可能已被其它进程轮转): %s\n", g_logger_cfg.log_file);
+        fprintf(stderr, "[INFO] 日志轮转未完成（目标可能已存在或文件系统不支持）: %s\n", g_logger_cfg.log_file);
     }
 
     if (open_log_file() == false)
