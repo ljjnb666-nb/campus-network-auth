@@ -102,3 +102,11 @@ CI #364 的 scanner self-test 四项通过，但正式敏感信息扫描失败�
 - 桌面 GUI 源码目前没有对外分发许可；权利人授权确认前，不对外分发源代码或二进制。
 
 当前状态：`SOURCE_LEVEL_CJSON_TRIAGE_COMPLETE`；`FINAL_LINK_COMPOSITION_AND_LICENSE_REVIEW_PENDING`；`FULL_RELEASE_ACCEPTANCE_BLOCKED`。
+
+## 固定 UCRT64 工具链的 Windows x64 链接许可补充
+
+独立构建使用发行方签名的 20 个锁定包归档与 Kitware CMake 4.5.0。GNU ld map 和交叉引用表确认选入了 libcurl 8.23.0 的静态成员、本地 cJSON 1.7.19 对象、libgcc 16.2.0-7 运行库成员及 MinGW-w64 CRT 14.0.0.r598.ge3d18511f-1 的启动对象、运行库成员和 Windows DLL 导入存根。插入 map 输出选项前后的核心 EXE 原始 SHA-256 相同。
+
+- 固定锁定构建的 map 未选入 libstdc++ 或 winpthreads 归档成员。这两者保留在工具链审计范围。使用较旧的本机 GCC 15.2.0 工具链诊断时，map 实际选入了 winpthreads 成员。变更工具链后须重新核查组成及许可。
+- Licenses.txt 保留既有 Apache-2.0、MIT 和 curl 文本，并附上锁定 MSYS2 包内的 MinGW-w64 CRT 运行时通知、GCC Runtime Library Exception 3.1 和 GPLv3 原文。来源分别为 CRT 包的 `share/licenses/crt/COPYING.MinGW-w64-runtime.txt` 与 libgcc 包的 `share/licenses/libgcc/{COPYING.RUNTIME,COPYING3}`。
+- Windows 系统 DLL 在 PE 中是动态导入。桌面源码分发授权、二进制签名、动态及传递依赖和正式发布仍须单独验收。

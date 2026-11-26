@@ -21,4 +21,4 @@
 
 ## 许可说明
 
-认证核心声明为 Apache-2.0（修改版已移除 mongoose 及其 Web 界面，不再链接 GPL 组件）。桌面界面源码（Program.cs/CredentialStore.cs）未附带许可声明，仅限自用时无碍，对外分发前需补充。
+认证核心衍生源码声明为 Apache-2.0（修改版已移除 mongoose 及其 Web 界面）。Windows UCRT64 构建包含 MinGW-w64 CRT 及适用 GCC Runtime Library Exception 3.1 的 libgcc 运行库成员，原文载于 Licenses.txt。桌面界面源码（Program.cs/CredentialStore.cs）未附带许可声明，对外分发前须由权利人确认。
