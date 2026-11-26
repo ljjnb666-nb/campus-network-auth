@@ -21,10 +21,21 @@ $allow = @(
     'ESURFING_CONTROL_TOKEN', 'control-token', 'control_token', 'controltoken', 'web_external_acc' # 参数名/环境变量名/配置键
 )
 
+function Assert-OrdinaryScanEntry([IO.FileAttributes]$attributes) {
+    if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'Secret scan cannot attest a reparse-point entry'
+    }
+}
+
 function Get-TextFiles([string]$dir) {
+    Assert-OrdinaryScanEntry ([IO.File]::GetAttributes($dir))
     foreach ($item in [IO.Directory]::EnumerateFileSystemEntries($dir)) {
         $name = [IO.Path]::GetFileName($item)
-        if ([IO.Directory]::Exists($item)) {
+        $attributes = [IO.File]::GetAttributes($item)
+        # Fail closed before traversing a link or reading a linked file.
+        # Existing excluded directory names are still pruned as before.
+        Assert-OrdinaryScanEntry $attributes
+        if (($attributes -band [IO.FileAttributes]::Directory) -ne 0) {
             if ($excludeDirs -notcontains $name) { Get-TextFiles $item }
         } else {
             if ($skipExt -notcontains [IO.Path]::GetExtension($name).ToLower()) { $item }
@@ -54,7 +65,7 @@ function Get-ScanFindings([string]$scanRoot, [scriptblock]$Reader) {
                 $v = $m.Groups['v'].Value
                 # Exact fixture/structural literal only; a permitted substring
                 # must not exempt a different credential.
-                if ($v -and $allow -contains $v) { continue }
+                if ($v -and $allow -ccontains $v) { continue }
                 $line = ([regex]::Matches($text.Substring(0, $m.Index), "`n")).Count + 1
                 [pscustomobject]@{ File = $rel; Line = $line; Rule = $ruleNames[$ruleIndex] }
             }
@@ -82,7 +93,15 @@ if ($SelfTest) {
         if (($hits | ConvertTo-Json -Compress).Contains($other)) { throw 'Scanner redaction regression' }
         $hits = @(Get-ScanFindings $fixture { param($p) throw 'synthetic read failure' })
         if ($hits.Count -ne 1 -or $hits[0].Rule -cne 'read-failure') { throw 'Scanner unreadable file regression' }
-        Write-Host 'SECRET_SCAN_SELFTEST_PASS cases=4'
+        [IO.File]::WriteAllText($file, ($key + ' = "' + $allowed.ToUpperInvariant() + '"'))
+        $hits = @(Get-ScanFindings $fixture $read)
+        if ($hits.Count -ne 1 -or $hits[0].Rule -cne 'credential-literal') { throw 'Scanner case-sensitive allow regression' }
+        Assert-OrdinaryScanEntry ([IO.FileAttributes]::Normal)
+        $blocked = $false
+        try { Assert-OrdinaryScanEntry ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint) }
+        catch { $blocked = $true }
+        if (-not $blocked) { throw 'Scanner reparse-point regression' }
+        Write-Host 'SECRET_SCAN_SELFTEST_PASS cases=6'
         exit 0
     } finally {
         Remove-Item -LiteralPath $fixture -Recurse -Force
