@@ -49,7 +49,16 @@
 
 ## 2026-11-26 冻结基线与边界补充
 
-当前内部 RC 基线为 \`716ab3193bf26c2d2ad34fad5e07e8220be4b121\`。桌面 GUI 仍是 WinForms/.NET Framework 4.x；Roslyn 仅作为隔离候选完成同 runner 双编译与 11 项离线自测，未替换默认构建工具链。
+当前内部 RC 基线为 `716ab3193bf26c2d2ad34fad5e07e8220be4b121`。桌面 GUI 仍是 WinForms/.NET Framework 4.x；Roslyn 仅作为隔离候选完成同 runner 双编译与 11 项离线自测，未替换默认构建工具链。
+
+认证核心 Windows 产物为 x86-64；CMake 静态链接 libcurl 及 GCC/MinGW 运行库。PE 直接导入报告只能描述 PE 导入表，不能揭示全部静态链接归档成员。最终依赖组成须通过链接 map、归档成员和工具链来源记录补足。
+
+认证协议仍使用明文 HTTP。DPAPI、匿名管道、核心哈希和本地状态机不改变上游协议的传输安全性质。任何远程控制接口、监听服务或额外网络权限均不在当前版本范围内。
+
+
+## 2026-11-26 冻结基线与边界补充
+
+当前内部 RC 基线为 `716ab3193bf26c2d2ad34fad5e07e8220be4b121`。桌面 GUI 仍是 WinForms/.NET Framework 4.x；Roslyn 仅作为隔离候选完成同 runner 双编译与 11 项离线自测，未替换默认构建工具链。
 
 认证核心 Windows 产物为 x86-64；CMake 静态链接 libcurl 及 GCC/MinGW 运行库。PE 直接导入报告只能描述 PE 导入表，不能揭示全部静态链接归档成员。最终依赖组成须通过链接 map、归档成员和工具链来源记录补足。
 

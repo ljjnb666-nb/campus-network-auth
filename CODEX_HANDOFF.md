@@ -1,8 +1,8 @@
 # Codex 最终集中交接任务书
 
-- 项目：\`ljjnb666-nb/campus-network-auth\`
-- 冻结基线：\`716ab3193bf26c2d2ad34fad5e07e8220be4b121\`
-- 分支：\`fix/v1.2.0-stability-security\`
+- 项目：`ljjnb666-nb/campus-network-auth`
+- 冻结基线：`716ab3193bf26c2d2ad34fad5e07e8220be4b121`
+- 分支：`fix/v1.2.0-stability-security`
 - 最新验收：CI #443，4/4 jobs 成功
 - PR #1：Draft；main 不得擅自修改
 - 目标：完成本地 Windows/独立环境可做的最后验证；不得为了追求发布而降低门禁或改变认证、访问控制和服务管理语义。
@@ -10,7 +10,7 @@
 ## 0. 开始前必须确认
 
 1. Fetch 最新远端分支与 main，确认工作树干净，核对冻结基线及 PR 状态。
-2. 阅读 \`README.md\`、\`SECURITY.md\`、\`ARCHITECTURE.md\`、\`FINAL_AUDIT.md\`、\`RELEASE_CHECKLIST.md\`、\`THIRD_PARTY_NOTICES.md\`。
+2. 阅读 `README.md`、`SECURITY.md`、`ARCHITECTURE.md`、`FINAL_AUDIT.md`、`RELEASE_CHECKLIST.md`、`THIRD_PARTY_NOTICES.md`。
 3. 不从 Phase 0 重做已通过范围；不重复已完成的 11 项离线候选测试，除非源码变更影响相应测试。
 4. 不运行真实认证、不修改学校网络访问控制、不强制结束官方客户端或第三方进程，不自动修改服务启动类型。
 5. 不合并 PR、不推送 main、不打 tag、不发布。所有变更留在开发分支并附实际 CI 证据。
@@ -34,19 +34,19 @@
 - 核实实际进入 Windows x64 原生核心的 libcurl、libgcc、libstdc++、libwinpthread、MinGW-w64 CRT/headers 等成员；区分静态链接、动态导入、仅安装但未链接的包。
 - 对每个实际链接成员保存包名/版本、上游 URL/tag/commit、归档原始字节 SHA-256、可信签名验证结果、许可与 NOTICE 原文。
 - 重点复核 GCC Runtime Library Exception、MinGW-w64、winpthreads 及任何静态链接例外条款；不能因 Licenses.txt 当前缺某段文本就直接断言违法，也不能默认无需补充。
-- 不得将 PE 直接导入表或源码 SBOM 冒充完整静态/动态组成证明。更新 \`THIRD_PARTY_NOTICES.md\` 与 \`Licenses.txt\` 时保留来源和具体文件，不复制无关许可证。
+- 不得将 PE 直接导入表或源码 SBOM 冒充完整静态/动态组成证明。更新 `THIRD_PARTY_NOTICES.md` 与 `Licenses.txt` 时保留来源和具体文件，不复制无关许可证。
 
 ## 3. cJSON 公告适用性最终证据
 
-- 版本锁：cJSON v1.7.19；本地 cJSON.c blob \`021b5c1fa7fe4871c03caf2568ce400f5ab7d01a\`，cJSON.h 与上游一致。
-- 7 处本地差异见 \`THIRD_PARTY_NOTICES.md\`。先逐处复核语义和整数边界，不覆盖本地修订。
+- 版本锁：cJSON v1.7.19；本地 cJSON.c blob `021b5c1fa7fe4871c03caf2568ce400f5ab7d01a`，cJSON.h 与上游一致。
+- 7 处本地差异见 `THIRD_PARTY_NOTICES.md`。先逐处复核语义和整数边界，不覆盖本地修订。
 - 重点补充 CVE-2026-16554 32 位打印长度边界的独立测试。若产品只支持 Windows x64，明确目标范围；若声称支持 32 位，必须提供 32 位编译与测试证据。
 - 对 cJSON_Utils 相关公告，保存最终链接 map/归档成员及全量调用检索证据；源码树未见 cJSON_Utils.c 不自动等于二进制不可能包含相关实现。
 - 生成逐条公告适用性记录：affected / not_affected / fixed / under_investigation，逐项附版本、配置、调用路径和证据；没有证据就保留 under_investigation，不编造 VEX 结论。
 
 ## 4. CS4014 与异步生命周期审查
 
-- 定位 Program.cs 中系统唤醒分支的 \`RunPreConnectCheckAsync(false)\` 未等待调用。
+- 定位 Program.cs 中系统唤醒分支的 `RunPreConnectCheckAsync(false)` 未等待调用。
 - 先判断它是否为有意 fire-and-forget；若是，必须显式观察异常、取消、任务代次与窗体释放时的结果；若不是，按既有任务所有权模型修复。
 - 不得简单添加 await 导致系统事件线程阻塞；不得改变连接重试策略、真实网络请求、凭据或服务切换语义。
 - 保留所有已有 256 状态组合、100 轮生命周期、UI 与 11 项候选离线回归。新增测试需针对实际风险，不堆砌重复测试。
