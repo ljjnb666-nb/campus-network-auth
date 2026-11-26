@@ -133,14 +133,14 @@ f81ba6c / dbc4d3b：补充 macOS 独立合成缓冲测试12例及 clang ASan/UBS
 
 ## 当前冻结基线统一验收补充（2026-11-26）
 
-验收对象 \`716ab3193bf26c2d2ad34fad5e07e8220be4b121\`；[CI #443](https://github.com/ljjnb666-nb/campus-network-auth/actions/runs/45780131488) 的 Windows 构建/测试、Linux 安全、macOS 资源、SBOM 四个 job 均成功。
+验收对象 `716ab3193bf26c2d2ad34fad5e07e8220be4b121`；[CI #443](https://github.com/ljjnb666-nb/campus-network-auth/actions/runs/45780131488) 的 Windows 构建/测试、Linux 安全、macOS 资源、SBOM 四个 job 均成功。
 
 ### 最新可核验证据
 
-- Roslyn 候选双编译输出完全一致；候选 GUI 两次均为 1,394,176 bytes，SHA-256 \`30C9E8CB8349E7D9EF249666E990530A4740D40AD1244132042F9D1B82A6FFB4\`。
+- Roslyn 候选双编译输出完全一致；候选 GUI 两次均为 1,394,176 bytes，SHA-256 `30C9E8CB8349E7D9EF249666E990530A4740D40AD1244132042F9D1B82A6FFB4`。
 - Roslyn 候选离线自测 11/11：logic、credentials、core、native-input、native-net、stop、resources、ui、app-lifecycle、ui-stress、signature；每项实际退出码为 0 并匹配指定成功标记。
-- 内部归档 artifact \`15098745397\`，1,281,572 bytes，SHA-256 \`8b72eee0dba9e385350e8e619e499e14592812e97902d203e68d7b6cc5a812a9\`。独立下载重算摘要一致；14 个唯一文件，CRC 通过，证据索引 13/13、产物摘要 3/3 匹配。候选 EXE 不在归档。
-- GitHub PR #1 保持 Draft；main 基线 \`0607631f6d189daa7f49e1d1fd120114d93fe530\` 未修改。
+- 内部归档 artifact `15098745397`，1,281,572 bytes，SHA-256 `8b72eee0dba9e385350e8e619e499e14592812e97902d203e68d7b6cc5a812a9`。独立下载重算摘要一致；14 个唯一文件，CRC 通过，证据索引 13/13、产物摘要 3/3 匹配。候选 EXE 不在归档。
+- GitHub PR #1 保持 Draft；main 基线 `0607631f6d189daa7f49e1d1fd120114d93fe530` 未修改。
 
 ### 安全边界复审结论
 
@@ -159,4 +159,4 @@ f81ba6c / dbc4d3b：补充 macOS 独立合成缓冲测试12例及 clang ASan/UBS
 - 未关闭：完整静态/传递/动态依赖组成、工具链包签名与来源、实际链接许可义务、GUI 正式迁移与独立复现、桌面源码授权、Authenticode 签名、32 位边界适用性、未审计原生路径、真实环境/DPI/升级卸载/24-72 小时长跑。
 - 本文是阶段工程审计，不是第三方认证、法律意见、VEX 声明或无漏洞保证。
 
-结论：\`INTERNAL_RC_BASELINE_FROZEN\`；\`DEFINED_OFFLINE_GATES_VERIFIED\`；\`FULL_RELEASE_ACCEPTANCE_BLOCKED\`。
+结论：`INTERNAL_RC_BASELINE_FROZEN`；`DEFINED_OFFLINE_GATES_VERIFIED`；`FULL_RELEASE_ACCEPTANCE_BLOCKED`。
