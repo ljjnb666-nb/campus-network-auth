@@ -1,4 +1,5 @@
 #include "LoggerInternal.h"
+#include "LogPrivateFile.h"
 
 #include "core/States.h"
 #include "utils/platform/PlatformUtils.h"
@@ -56,23 +57,10 @@ static bool get_file_id(const char* path, uint64_t* dev, uint64_t* ino)
  */
 static FILE* open_log_handle(const char* path)
 {
+#ifdef _WIN32
     FILE* handle = fopen(path, "a");
-    if (handle == NULL) return NULL;
-
-#ifndef _WIN32
-    /**
-     * 设成 exec 时自动关闭:
-     * 监管者 fork 出子进程时会继承这里的句柄, 而子进程自己还要再开一份,
-     * 不关掉的话子进程会一直白占着一个 fd
-     * (Windows 侧用 CreateProcess 且不继承句柄, 无需处理)
-     */
-    const int fd = fileno(handle);
-    if (fd >= 0)
-    {
-        fcntl(fd, F_SETFD, FD_CLOEXEC);
-        // 日志可能含票据等敏感内容, 收紧为仅属主可读写 (umask 只会更严不会更松)
-        fchmod(fd, 0600);
-    }
+#else
+    FILE* handle = open_private_log_stream(path);
 #endif
 
     return handle;
