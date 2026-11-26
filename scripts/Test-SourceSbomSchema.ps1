@@ -88,6 +88,33 @@ try {
     $invalid.bomFormat = 'invalid-format'
     $invalidText = ConvertTo-Json -InputObject $invalid -Depth 100 -Compress
     if (Test-Json -Json $invalidText -Schema $schemaText -ErrorAction SilentlyContinue) { throw 'Schema accepted invalid format' }
+    # Schema validity alone permits a misleading complete declaration.
+    # Enforce the repository's deliberately partial source inventory scope.
+    function Assert-SourceInventoryScope($bom) {
+        $compositions = @($bom.compositions)
+        if ($compositions.Count -ne 1 -or $compositions[0].aggregate -cne 'incomplete') {
+            throw 'Source inventory must declare incomplete composition'
+        }
+        $composition = $compositions[0]
+        $expectedAssemblies = @('auth-core','chezhi-desktop')
+        $expectedDependencies = @('auth-core','cJSON','chezhi-desktop','libcurl')
+        if ((@($composition.assemblies | Sort-Object) -join '|') -cne ($expectedAssemblies -join '|') -or
+            (@($composition.dependencies | Sort-Object) -join '|') -cne ($expectedDependencies -join '|')) {
+            throw 'Source inventory composition scope mismatch'
+        }
+    }
+    $scope = $jsonText | ConvertFrom-Json -AsHashtable
+    Assert-SourceInventoryScope $scope
+    $scope.compositions[0].aggregate = 'complete'
+    $rejectedScope = $false
+    try { Assert-SourceInventoryScope $scope } catch { $rejectedScope = $true }
+    if (-not $rejectedScope) { throw 'Incomplete inventory scope negative control failed' }
+    $scope = $jsonText | ConvertFrom-Json -AsHashtable
+    [void]$scope.Remove('compositions')
+    $rejectedScope = $false
+    try { Assert-SourceInventoryScope $scope } catch { $rejectedScope = $true }
+    if (-not $rejectedScope) { throw 'Missing inventory scope negative control failed' }
+    Write-Host 'SOURCE_SBOM_SCOPE_PASS negativeCases=2'
     Write-Host 'CYCLONEDX_SCHEMA_VERIFY_PASS'
 } finally {
     Remove-Item -LiteralPath $temp -Recurse -Force
