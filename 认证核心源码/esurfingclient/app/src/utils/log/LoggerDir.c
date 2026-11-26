@@ -1,4 +1,5 @@
 #include "LoggerInternal.h"
+#include "LogArchiveFile.h"
 
 #include "utils/platform/PlatformUtils.h"
 #include "utils/text/TextUtils.h"
@@ -362,9 +363,7 @@ bool set_logger_dir(const char* dir)
      * 就会拿到"日志系统未打开"并丢掉那一行。持锁之后那些写日志的线程只是等
      * 一小会儿, 醒来看到的已经是新目录的句柄了
      *
-     * ⚠️ 唯一绕开这把锁的是 log_raw_line() (看门狗卡死时用的), 它在换目录的这一
-     *    瞬间可能读到已经被关掉的旧句柄 —— 与 rotate() 里那个窗口是同一类问题,
-     *    那边同样是明知故犯 (见文件开头关于互斥的说明)
+     * 看门狗 log_raw_line() 仅尝试获取同一把锁，忙时省略本次文件诊断。
      */
     logger_lock();
 
@@ -393,7 +392,9 @@ bool set_logger_dir(const char* dir)
     const bool old_file_exists = (strlen(g_logger_cfg.log_file) > 0) && path_exists(g_logger_cfg.log_file);
     if (old_file_exists && path_exists(new_file) == false && strcmp(g_logger_cfg.log_file, new_file) != 0)
     {
-        rename(g_logger_cfg.log_file, new_file);
+        /* The earlier existence check is only advisory: another process
+         * may create the destination before this call. Never replace it. */
+        (void)archive_log_without_replace(g_logger_cfg.log_file, new_file);
     }
 
     snprintf(g_logger_cfg.log_dir, sizeof(g_logger_cfg.log_dir), "%s", new_dir);

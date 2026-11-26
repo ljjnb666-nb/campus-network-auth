@@ -120,3 +120,12 @@ f81ba6c / dbc4d3b：补充 macOS 独立合成缓冲测试12例及 clang ASan/UBS
 - 本轮独立读取 CERT Polska CVE-2026-16554 与 Debian Security Tracker CVE-2026-67215/67216，确认公告编号及风险类别；此前记录不能代替此次原始来源核验。当前本地修订适用性、公告穷尽性、32位及实际调用路径仍需复核，不宣称漏洞全部已修复。
 
 保持Draft；不合并、不发布。
+
+
+## RC 集中收尾基线（2026-11-26）
+
+已验证源码 5f8ca8af18da4db33a594a941a14caf22efb8447：[CI #429](https://github.com/ljjnb666-nb/campus-network-auth/actions/runs/45771275936) 四个任务全部成功，Windows 139744232456、Linux 139744231986、macOS 139744232276、SBOM 139744232273。Windows 实际日志含 OPERATION_MATRIX_PASS cases=256、JOURNAL_OUTCOME_PASS cases=32、APP_LIFECYCLE_PASS cycles=100 ready_ack_drain=100、UI_LAYOUT_MATRIX_PASS cases=36、UI_SCROLL_PASS checks=715、UI_STRESS_PASS measured=100（GDI 51→51、USER 78→78、handles 346→347）、LOCAL_LOG_ARCHIVE_NO_REPLACE_PASS cases=4、SECRET_SCAN_SELFTEST_PASS cases=6、BUILD_MANIFEST_VERIFY_PASS、PE_DIRECT_IMPORT_AUDIT_PASS、SOURCE_SBOM_SCOPE_PASS negativeCases=2、CYCLONEDX_SCHEMA_VERIFY_PASS、BUILD_EVIDENCE_INDEX_PASS。既有独立测试未直接覆盖新句柄身份竞争；不得把全绿等同该竞态已被故障注入验证。
+
+原生核心同 runner 两次构建 SHA-256 均为 8CA106A6A6941482B87F2C19C299AF72BEE927F3935DACD34A3A729352E79CDC。GUI 编译器能力探针仍为 CS2007（不支持 /deterministic+），独立环境复现未证明。平台记录 artifact 15094985276（1260151 字节，sha256:60b560ff2780dda2033c26be010578634a3f486ff4b4585768349f9aa97d2b68），仅元数据核对，不是独立下载校验或签名证明。
+
+本次集中修正两个明确的本地日志问题：看门狗文件写入使用非等待锁，忙时省略本次诊断，避免并发访问已关闭的 FILE；日志目录迁移改用已有不覆盖归档原语。后者不消除源路径竞争；前者不保证文件 I/O 不阻塞或所有诊断可保留。新修改须重新编译及回归，尚未验证。冻结此前通过的定义范围，不继续为低优先级理论风险扩张测试；退出归档源身份、Windows ACL、真实环境、独立供应链与签名等剩余事项仍开放，不降低发布门禁，不改认证或网络访问控制。保持 Draft。
