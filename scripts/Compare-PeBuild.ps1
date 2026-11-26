@@ -8,7 +8,7 @@ function Read-PeEvidence([string]$Path) {
     $bytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Path).Path)
     if ($bytes.Length -lt 64 -or [BitConverter]::ToUInt16($bytes,0) -ne 0x5a4d) { throw 'Invalid DOS header' }
     $pe = [int64][BitConverter]::ToUInt32($bytes,60)
-    if ($pe -gt $bytes.Length - 24 -or [BitConverter]::ToUInt32($bytes,[int]$pe) -ne 0x4550) { throw 'Invalid PE signature' }
+    if ($pe -lt 64 -or $pe -gt $bytes.Length - 24 -or [BitConverter]::ToUInt32($bytes,[int]$pe) -ne 0x4550) { throw 'Invalid PE signature' }
     $coff = $pe + 4
     $count = [BitConverter]::ToUInt16($bytes,[int]($coff+2))
     $timestamp = [BitConverter]::ToUInt32($bytes,[int]($coff+4))
@@ -23,7 +23,7 @@ function Read-PeEvidence([string]$Path) {
             $name = [Text.Encoding]::ASCII.GetString($bytes,$h,8).TrimEnd([char]0)
             $size = [int64][BitConverter]::ToUInt32($bytes,$h+16)
             $offset = [int64][BitConverter]::ToUInt32($bytes,$h+20)
-            if ($offset -gt $bytes.Length -or $size -gt $bytes.Length-$offset) { throw "Invalid PE raw section range: $name" }
+            if ($offset -gt $bytes.Length -or $size -gt $bytes.Length-$offset -or ($size -gt 0 -and $offset -lt $sectionTable + 40L*$count)) { throw "Invalid PE raw section range: $name" }
             $digest = [Convert]::ToHexString($hasher.ComputeHash($bytes,[int]$offset,[int]$size))
             $sections += [ordered]@{index=$i;name=$name;offset=$offset;bytes=$size;sha256=$digest}
         }
