@@ -48,6 +48,15 @@ $bom = [ordered]@{
         properties=$properties
     }
     components=$components
+    # A source inventory is intentionally partial. Make incompleteness
+    # visible to standard CycloneDX consumers, not only custom properties.
+    compositions=@(
+        [ordered]@{
+            aggregate='incomplete'
+            assemblies=@('chezhi-desktop','auth-core')
+            dependencies=@('chezhi-desktop','auth-core','libcurl','cJSON')
+        }
+    )
     dependencies=@(
         @{ref='chezhi-desktop';dependsOn=@('auth-core')},
         @{ref='auth-core';dependsOn=@('libcurl','cJSON')},
