@@ -49,3 +49,23 @@
 - 新增 PE 直接导入表及 x86-64 原生核心检查，输出 pe-imports.json；不覆盖传递依赖、运行时动态加载或所有静态链接组件。
 - CycloneDX 1.5 官方三份 Schema 按 Git blob 校验，并局部化外部引用后使用 PowerShell Test-Json 校验，加入无效格式负向测试；待 CI 验证。
 - 最新工作流修复了中间提交出现的重复步骤，检查最终文件仅有一组上传步骤及两个预期 job。
+
+
+## 2026-11-26 公告范围与清单语义复审
+
+公告来源：[Debian cJSON 开放问题清单](https://security-tracker.debian.org/tracker/source-package/cjson)，本轮查询共有六项开放记录。Debian 包状态不能直接代替本仓库本地修订的适用性结论。
+
+| 公告 | 风险类别 | 本仓库初步适用性 |
+| --- | --- | --- |
+| [CVE-2026-16554](https://cert.pl/en/posts/2026/07/CVE-2026-16554/) | 32 位打印长度整数溢出 | 有本地边界修订；32 位完整验证未完成 |
+| [CVE-2026-67215](https://security-tracker.debian.org/tracker/CVE-2026-67215) | JSON Patch 递归资源耗尽 | 工具模块未见入库/编译；待最终链接与调用证据 |
+| [CVE-2026-67216](https://security-tracker.debian.org/tracker/CVE-2026-67216) | 递归比较复杂度 | 已有历史源码门禁；待当前构建和可达性证据 |
+| [CVE-2026-67217](https://security-tracker.debian.org/tracker/CVE-2026-67217) | JSON Patch 失败时非原子数据修改 | 新补录；工具模块未见入库/编译，待最终核验 |
+| [CVE-2026-29036](https://security-tracker.debian.org/tracker/CVE-2026-29036) | JSON Pointer 解析导致目标数据错误修改 | 新补录；工具模块未见入库/编译，待最终核验 |
+| [CVE-2026-87933](https://security-tracker.debian.org/tracker/CVE-2026-87933) | MergePatch 释放后使用 | 新补录；工具模块未见入库/编译，待最终核验 |
+
+已读取 5bdfec5 的递归树：vendored cJSON 仅有 cJSON.c、cJSON.h，app/CMakeLists.txt 列入 cJSON.c，未见 cJSON_Utils.c。上述是源码组成证据，不是最终二进制符号或可达性证明；尚不标记为修复或不适用。其他公告数据库与后续变更仍需复审。
+
+SBOM：dc517ca / 1f599e7 / 1400689 为源码级清单增加 CycloneDX 标准 compositions aggregate=incomplete，覆盖已声明的应用、核心及依赖关系；验证器拒绝缺失或错误 complete 声明。新门禁尚未取得 CI 成功证据。独立包归档、动态/传递依赖、签名及独立环境复现仍未关闭。
+
+CI #364 的 scanner self-test 四项通过，但正式敏感信息扫描失败，保留阻断。未修改扫描规则、未增加例外或绕过步骤。真实环境验收按既有决定延期，不等于通过。
