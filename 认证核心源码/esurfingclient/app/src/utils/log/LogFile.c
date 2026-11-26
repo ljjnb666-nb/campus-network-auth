@@ -152,10 +152,10 @@ void rotate(void)
      * 时间戳只有秒级精度, 多个进程可能在同一秒内各自轮转,
      * 只靠时间戳必然重名, 而 rename 会覆盖同名目标, 那样一次就会丢掉一整份日志
      */
-    const uint16_t result = snprintf(rotate_file_name, sizeof(rotate_file_name), "%s%c%s-%lu-%" PRIu32 "%s",
+    const int result = snprintf(rotate_file_name, sizeof(rotate_file_name), "%s%c%s-%lu-%" PRIu32 "%s",
         safe_str(g_logger_cfg.log_dir), SEP, safe_str(cur_tm), proc_id, s_rotate_seq, s_rotate_file_name);
     s_rotate_seq++;
-    if (result >= (uint16_t)sizeof(rotate_file_name))
+    if (result < 0 || (size_t)result >= sizeof(rotate_file_name))
     {
         fprintf(stderr, "[ERROR] 轮转的文件名过长 (最大 %zu)\n", sizeof(rotate_file_name) - 1);
         g_logger_cfg.cur_lines = 0;
