@@ -304,7 +304,7 @@ internal static class DesktopLicenseOnlineSmoke
             using(var owner=new Form{Text="Disposable licensing integration fixture",Width=500,Height=340})
             {
                 owner.Shown+=async delegate{
-                    try{await Run(owner,id);await RunLifecycle(owner,id);await RunEnrollmentFaults(owner);result=0;}
+                    try{await Run(owner,id);await RunLifecycle(owner,id);await RunEnrollmentFaults(owner);await Program.CheckOnlineMainWindowFixture(id,FixtureCard);result=0;}
                     catch(Exception ex){Console.Error.WriteLine(ex.GetType().Name+": "+ex.Message);}
                     finally{owner.Close();}
                 };
