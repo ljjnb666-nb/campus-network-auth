@@ -78,3 +78,28 @@ refuse concurrent license management; restore remains available. New
 candidate compile/CLI probes and card format tests pending. Remaining:
 real licensed UI/PG/TPM/campus acceptance, ongoing-session enforcement,
 authenticated distribution, P5 capacity. No production release.
+
+## Release boundary and negative runtime increment
+Prior exact ce74666 CI 46016109429 4/4 PASS. Privileged prepare remains
+disabled in licensed build. Restore remains subject to original SCM safety
+checks, not license. No privileged handoff protocol or network bootstrap
+implemented here.
+
+Licensed production-shaped candidate now rejects all offline self-test
+CLI commands, except the existing restore path; separate
+CHEZHI_LICENSED_TEST compilation is CI-only and never packaged. The
+negative-only fixture checks actual low-level core launch refusal without
+authorization, real licensed WinForms launch refusal, cancellation, restore
+button availability, tray and disposal, with no embedded core, DLL,
+registry enrollment or service/network operation. The low-level LaunchCore
+adds a second admission check for live auth before creating the process
+and just before Process.Start. This is defense in depth inside the GUI,
+not independent core enforcement, a cross-process proof, or DRM.
+
+Candidate CI still builds and tests the legacy offline binaries but no
+longer uploads them; only explicitly labeled non-executable evidence is
+uploaded. Existing SBOM and manifest describe the legacy offline build,
+not a licensed release. No historical artifacts removed, no stable main
+change. Full positive licensed UI, actual server, TPM, elevated handoff
+and bootstrap, existing-session policy, installation trust and direct
+core threat model remain release blockers. Latest tests pending.

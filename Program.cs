@@ -53,6 +53,13 @@ internal static class Program
 #endif
         }
         if (args.Length == 1 && args[0] == "--admin-restore") return ChangeService(false);
+#if CHEZHI_LICENSED && !CHEZHI_LICENSED_TEST
+        // Production-shaped candidate accepts no offline self-test commands.
+        if (args.Length != 0) return 2;
+#endif
+#if CHEZHI_LICENSED && CHEZHI_LICENSED_TEST
+        if (args.Length == 1 && args[0] == "--self-test-license-boundary") return LicensedBoundaryTests();
+#endif
         if (args.Length == 1 && args[0] == "--self-test-logic") return LogicTests();
         if (args.Length == 2 && args[0] == "--self-test-boot-sequence")
         {
@@ -768,8 +775,12 @@ internal static class Program
     }
 
     private static Process LaunchCore(string mode, string username, string password, int channel, Action<Process, string> status,
-        Action<Stream, Stream, Stream> captureStreams = null)
+        Action<Stream, Stream, Stream> captureStreams = null, Func<bool> licenseAdmission = null)
     {
+#if CHEZHI_LICENSED
+        if (mode == "--ephemeral-auth" && (licenseAdmission == null || !licenseAdmission()))
+            throw new InvalidOperationException("Online authorization required.");
+#endif
         string invalid = ValidateAuthInput(username, password, channel);
         if (invalid != null) throw new ArgumentException(invalid);
         string json = new JavaScriptSerializer().Serialize(new { username = username, password = password, channel = channel });
@@ -788,6 +799,10 @@ internal static class Program
         // CreateProcess returns; do not release it between hashing and launch.
         using (OpenVerifiedCore())
         {
+#if CHEZHI_LICENSED
+            if (mode == "--ephemeral-auth" && (licenseAdmission == null || !licenseAdmission()))
+                throw new InvalidOperationException("Online authorization required.");
+#endif
             if (!p.Start()) throw new InvalidOperationException("Core failed to start.");
             started = true;
         }
@@ -1277,6 +1292,37 @@ internal static class Program
             try { if (Directory.Exists(dir)) Directory.Delete(dir, false); } catch { }
         }
     }
+
+#if CHEZHI_LICENSED && CHEZHI_LICENSED_TEST
+    // Negative-only fixture: no trusted DLL, card, CNG, service or network
+    // calls. Never built into the production-shaped candidate.
+    private static int LicensedBoundaryTests()
+    {
+        string dir = Path.Combine(Path.GetFullPath(Path.GetTempPath()), "ChezhiLicenseUi-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            bool denied = false;
+            try { LaunchCore("--ephemeral-auth", "dummy-user", "dummy-pass", 1, null); }
+            catch (InvalidOperationException ex) { denied = ex.Message == "Online authorization required."; }
+            if (!denied || corePath != null) return 1;
+            using (var window = new MainWindow(dir, true))
+            {
+                window.Show(); Application.DoEvents();
+                if (!window.CheckLicensedBoundaryForTest()) return 1;
+                window.Dispose();
+                if (!window.CheckDisposedResourcesForTest()) return 1;
+            }
+            return 0;
+        }
+        catch { return 1; }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+    }
+#endif
 
     private static int UiTests()
     {
@@ -2923,6 +2969,34 @@ internal static class Program
             }
         }
 
+#if CHEZHI_LICENSED && CHEZHI_LICENSED_TEST
+        internal bool CheckLicensedBoundaryForTest()
+        {
+            if (!isSelfTest || licenseGate.Allowed || licenseGate.Busy ||
+                !CurrentPermissions().CanSwitch || !restore.Enabled) return false;
+            activeTask = new AuthTask("dummy-user", "dummy-pass", 1, false);
+            userStopped = false;
+            bool denied = false;
+            try { StartAuthProcess(); }
+            catch (InvalidOperationException ex) { denied = ex.Message == "Online authorization required."; }
+            if (!denied || running != null || corePath != null) return false;
+            // Real stop/cancel path must work without licensing.
+            connectCheckPending = true;
+            RefreshOperationPermissions();
+            if (!stop.Enabled) return false;
+            BeginStop();
+            connectCheckPending = false;
+            RefreshOperationPermissions();
+            if (!userStopped || activeTask != null || running != null || !restore.Enabled || licenseGate.Allowed)
+                return false;
+            // Closing to tray must not dispose the form or start a process.
+            Close(); Application.DoEvents();
+            if (Visible || IsDisposed || running != null) return false;
+            ShowFromTray(); Application.DoEvents();
+            return Visible && !licenseGate.Allowed && restore.Enabled;
+        }
+#endif
+
         internal bool CheckDisposedResourcesForTest()
         {
             return IsDisposed && resourcesDisposed && !timer.Enabled && !animTimer.Enabled &&
@@ -3917,10 +3991,10 @@ internal static class Program
         private void StartAuthProcess(string mode = "--ephemeral-auth")
         {
             if (activeTask == null || userStopped || serviceBusy || exitRequested || powerSuspended) return;
-            if (isSelfTest && mode == "--ephemeral-auth") throw new InvalidOperationException("Offline test cannot authenticate.");
 #if CHEZHI_LICENSED
             if (mode == "--ephemeral-auth" && !licenseGate.Allowed) throw new InvalidOperationException("Online authorization required.");
 #endif
+            if (isSelfTest && mode == "--ephemeral-auth") throw new InvalidOperationException("Offline test cannot authenticate.");
             if (running != null && !Object.ReferenceEquals(running, completedProcess)) return;
             try
             {
@@ -3930,7 +4004,12 @@ internal static class Program
                 runSawProgress = false; authFailureSeen = false; runtimeFailureSeen = false; retryEligible = false;
                 offlineProbeReady = false; offlineProbeStopAccepted = false; lastCoreReadersDrained = false;
                 stop.Text = "停止认证"; StyleStopArmed(false); timer.Stop();
+#if CHEZHI_LICENSED
+                running = LaunchCore(mode, activeTask.Username, activeTask.Password, activeTask.Channel, OnCoreStatus,
+                    licenseAdmission: delegate { return licenseGate.Allowed && !userStopped && !exitRequested && !powerSuspended; });
+#else
                 running = LaunchCore(mode, activeTask.Username, activeTask.Password, activeTask.Channel, OnCoreStatus);
+#endif
                 password.UseSystemPasswordChar = true; reveal.Text = "显示";
                 connect.Text = "连接中…"; RefreshOperationPermissions();
                 lastNetworkEvidence = 0;
