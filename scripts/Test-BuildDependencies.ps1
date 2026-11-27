@@ -86,7 +86,9 @@ foreach ($tool in @('gcc.exe','g++.exe','ninja.exe','objdump.exe','ld.exe','stri
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing build tool: $tool" }
     $evidence.tools += [ordered]@{name=$tool;sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash}
 }
-foreach ($file in @((Get-Command cmake.exe).Source,(Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'))) {
+$guiCompiler = & (Join-Path $PSScriptRoot 'Get-GuiCompiler.ps1')
+$evidence.guiCompiler = $guiCompiler.Evidence
+foreach ($file in @((Get-Command cmake.exe).Source,$guiCompiler.Path)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'Missing build tool executable' }
     $evidence.tools += [ordered]@{name=[IO.Path]::GetFileName($file);sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash}
 }
