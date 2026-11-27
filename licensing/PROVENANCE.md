@@ -180,3 +180,54 @@ No code change in this review entry. No merge, release, service action,
 production credentials or real campus test. Preserve Draft until remaining
 gates are explicitly resolved. Subsequent changes require a new exact-head
 CI/evidence review; the above evidence must not be attributed to future SHAs.
+
+## P4.4 positive MainWindow evidence and P4.5 entry review
+
+Exact 336b0886661b1db2992467d8457eb39d8d03149d CI
+[46030388980](https://github.com/ljjnb666-nb/campus-network-auth/actions/runs/46030388980)
+5/5 PASS. Online job 140612403290 checked out PR merge 547159a
+against unchanged base bf7eb8aaf523c953a6b232290eb1adaa546d9ec8.
+The actual MainWindow with a real isolated device/card context passed
+online authorization, reached the offline-test refusal before launching
+a real core, then passed stop invalidation, fresh verification,
+suspend/resume and tray checks. Existing enrollment and lifecycle
+fixture checks also passed. This closes the specific positive
+MainWindow authorization projection test gap, not real core launch,
+SCM mutation, network bootstrap, or full field acceptance.
+P4.4 isolated evidence: CONDITIONAL_PASS; release HOLD.
+
+### P4.5 boundary inventory and hold
+
+Review of Program.cs: licensed CLI --admin-prepare and ChangeService(true)
+already return 28; RunServiceAction refuses the licensed prepare branch
+before service confirmation/journal/mutation. ChangeServiceUnderGate
+previously depended on those callers for licensed refusal. The
+ee66b85 change adds an independent refusal there before service
+observation or mutation, plus direct negative probes and specific
+error text. CI for that change remains pending. Legacy build and
+restore paths retain their existing semantics.
+
+Do not treat elevation consent, process-local Allowed, a process ID,
+an arbitrary command line, user-owned files or the service journal as
+an independently authenticated authorization. The journal is recovery
+evidence only. The global mutation mutex is a serialization mechanism,
+not an identity/authorization proof. Existing service executable
+signature validation uses cache-only trust without revocation checks;
+SCM observation and mutation are not atomic. These are explicit limits,
+not verified exploits.
+
+P4.5 acceptance must independently review:
+- authorized operation and caller identity, including alternate-account
+  elevation, process termination and concurrent invocations;
+- fail-closed handling of missing, stale, repeated or malformed authority;
+- no mutation or journal change after denied admission; bounded waits,
+  correct recovery ownership and no destructive cleanup on failure;
+- isolation of test hooks, protected installation and authenticated
+  distribution; no secrets in command arguments, logs or recovery files;
+- preserve official access restoration and approved recovery; no
+  authorization bypass or unapproved real service action.
+
+Use an inert test operation for cross-process validation; do not remove
+the prepare refusal or test against a real campus service until the
+authorized environment and policy have been explicitly approved.
+No new handoff protocol is implemented by this entry. P4.5 remains open.
