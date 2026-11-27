@@ -229,6 +229,10 @@ internal sealed class ServiceJournal
             Result = "failed:" + (code.HasValue ? code.Value.ToString() : "unknown");
             Uncertain = actualState != "Running";
             if (actualState == "Running") NeedsRecovery = false;
+            // An unsuccessful helper can still have changed the service.
+            // Retain possible restoration responsibility without claiming
+            // that the helper succeeded or caused the observed state.
+            else if (Action == "prepare" && StateBefore == "Running") NeedsRecovery = true;
         }
         Write();
         }
@@ -316,8 +320,33 @@ internal sealed class ServiceJournal
         var failure = Load(failurePath);
         failure.Begin("prepare", "Running");
         failure.Complete(25, "Stopped", false);
+        failure = Load(failurePath);
+        if (!failure.NeedsRecovery || !failure.Uncertain || failure.HasConfirmedOutcome ||
+            failure.Result != "failed:25") return false;
         failure.ReconcileRunning();
         if (Load(failurePath).Result != "failed:25" || Load(failurePath).HasConfirmedOutcome) return false;
+        int failures = 0;
+        foreach (int? code in new int?[] { null, 20, 25, 27, 28 })
+        foreach (string actual in new[] { "Running", "Stopped", "NotInstalled", "unknown", "StopPending" })
+        {
+            string path = Path.Combine(dir, "failed-matrix-" + failures + ".json");
+            var record = Load(path);
+            record.Begin("prepare", "Running");
+            record.Complete(code, actual, false);
+            record = Load(path);
+            bool possibleRecovery = actual != "Running";
+            if (record.Invalid || record.HasPending || record.HasConfirmedOutcome ||
+                record.NeedsRecovery != possibleRecovery || record.Uncertain != possibleRecovery ||
+                record.Result != "failed:" + (code.HasValue ? code.Value.ToString() : "unknown")) return false;
+            // A later running observation settles responsibility, not history.
+            string historical = record.Result;
+            record.ReconcileRunning();
+            record = Load(path);
+            if (record.NeedsRecovery || record.Uncertain || record.HasConfirmedOutcome ||
+                record.Result != historical) return false;
+            failures++;
+        }
+        Console.WriteLine("JOURNAL_FAILURE_RECOVERY_PASS cases=" + failures);
         Console.WriteLine("JOURNAL_OUTCOME_PASS cases=" + cases + " failure_history=1");
         return true;
     }

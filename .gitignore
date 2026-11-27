@@ -10,3 +10,6 @@ third-party/
 # 本地工具状态
 .mimosa/
 .zcode/
+
+# Non-release licensed candidate output (generated public trust + binaries)
+/build-licensed-candidate-*/

@@ -23,6 +23,60 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Licensed candidate x64 source compilation
+        shell: pwsh
+        run: ./scripts/Test-LicensedCandidateCompile.ps1
+
+      - name: Windows DPAPI license card store regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $temp = Join-Path $env:RUNNER_TEMP ('card-store-' + [Guid]::NewGuid().ToString('N'))
+          [void](New-Item -ItemType Directory -Path $temp)
+          try {
+            $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+            $src = (Resolve-Path -LiteralPath 'licensing/LicenseCardStore.cs').Path
+            $test = (Resolve-Path -LiteralPath 'licensing/LicenseCardStoreSmoke.cs').Path
+            $exe = Join-Path $temp 'LicenseCardStoreSmoke.exe'
+            & $csc /nologo /target:exe /platform:x64 /define:CHEZHI_CARD_TEST /r:System.Core.dll /r:System.Security.dll "/out:$exe" $src $test
+            if ($LASTEXITCODE -ne 0) { throw 'License card test compile failed' }
+            & $exe
+            if ($LASTEXITCODE -ne 0) { throw 'License card store regression failed' }
+          } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
+
+      - name: Authorization renewal scheduling regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $temp = Join-Path $env:RUNNER_TEMP ('license-renewal-' + [Guid]::NewGuid().ToString('N'))
+          [void](New-Item -ItemType Directory -Path $temp)
+          try {
+            $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+            $sources = @('AuthorizationState.cs','LicenseRenewalSchedule.cs','LicenseRenewalSmoke.cs') | ForEach-Object { (Resolve-Path -LiteralPath ('licensing/'+$_)).Path }
+            $exe = Join-Path $temp 'LicenseRenewalSmoke.exe'
+            & $csc /nologo /target:exe /platform:x64 /define:CHEZHI_RENEWAL_TEST "/out:$exe" $sources
+            if ($LASTEXITCODE -ne 0) { throw 'Renewal test compile failed' }
+            & $exe
+            if ($LASTEXITCODE -ne 0) { throw 'Renewal scheduling regression failed' }
+          } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
+
+      - name: License card input canonicalization regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $temp = Join-Path $env:RUNNER_TEMP ('card-input-' + [Guid]::NewGuid().ToString('N'))
+          [void](New-Item -ItemType Directory -Path $temp)
+          try {
+            $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+            $src = (Resolve-Path -LiteralPath 'licensing/LicenseCardInput.cs').Path
+            $test = (Resolve-Path -LiteralPath 'licensing/LicenseCardInputSmoke.cs').Path
+            $exe = Join-Path $temp 'LicenseCardInputSmoke.exe'
+            & $csc /nologo /target:exe /platform:x64 /define:CHEZHI_CARD_INPUT_TEST "/out:$exe" $src $test
+            if ($LASTEXITCODE -ne 0) { throw 'Card input test compile failed' }
+            & $exe
+            if ($LASTEXITCODE -ne 0) { throw 'Card input regression failed' }
+          } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
+
       - name: Cache curl source package
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -448,25 +502,24 @@ jobs:
         shell: pwsh
         run: ./scripts/Test-SourceSbomSchema.ps1
 
-      - name: Upload build artifacts
+      # This branch contains legacy offline test executables, NOT the
+      # licensed release. Keep all previous tests/evidence, but never
+      # distribute those executables as an authorization candidate.
+      - name: Mark non-release integration evidence
+        shell: pwsh
+        run: |
+          'NON_RELEASE: legacy offline regression evidence only; no licensed binary or release attestation' | Set-Content -LiteralPath 'build-core/LICENSING_CANDIDATE_NOTICE.txt' -Encoding UTF8
+
+      - name: Stage isolated non-release evidence
+        shell: pwsh
+        run: |
+          ./scripts/Stage-LicensingAuditEvidence.ps1 -Source build-core -Destination (Join-Path $env:RUNNER_TEMP 'licensed-audit-evidence')
+
+      - name: Upload non-executable integration audit evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: chezhi-windows-build
-          path: |
-            build-core/澈知科技-源码重建.exe
-            build-core/认证核心-源码重建.exe
-            build-core/build-manifest.json
-            build-core/sbom.cdx.json
-            build-core/pe-imports.json
-            build-core/repeatability.json
-            build-core/build-toolchain-evidence.json
-            build-core/build-evidence.json
-            build-core/澈知科技-源码重建.exe.config
-            build-core/Licenses.txt
-            build-core/THIRD_PARTY_NOTICES.md
-            build-core/RC_PACKAGE.md
-            build-core/RELEASE_CHECKLIST.md
-            build-core/gui-compiler-candidate.json
+          name: chezhi-licensing-integration-audit-only
+          path: ${{ runner.temp }}/licensed-audit-evidence/
           if-no-files-found: error
 
       - name: Preserve non-executable audit evidence when a gate fails
@@ -482,6 +535,29 @@ jobs:
             build-core/build-evidence.json
             build-core/build-toolchain-evidence.json
           if-no-files-found: ignore
+
+  licensed-desktop-online:
+    # Dedicated hosted runner, no production credentials or campus service.
+    runs-on: windows-2025
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ljjnb666-nb/chezhi-license
+          ref: 57369b9097534530db1b018e2ff9adbaa24c6578
+          path: sdk-fixture-source
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: '1.26.11'
+          cache: false
+      - name: Actual desktop licensing dialog and loopback TLS
+        shell: pwsh
+        timeout-minutes: 5
+        run: ./scripts/Test-LicensedDesktopOnline.ps1 -SdkSource sdk-fixture-source
 
   sbom-synthetic-audit:
     # Independent generator/schema regression only; no build artifact,

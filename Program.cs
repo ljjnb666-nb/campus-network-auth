@@ -41,8 +41,30 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        if (args.Length == 1 && args[0] == "--admin-prepare") return ChangeService(true);
+        if (args.Length == 1 && args[0] == "--admin-prepare")
+        {
+#if CHEZHI_LICENSED
+            // A process-local online grant is not a cross-process proof.
+            // Until the privileged handoff is independently validated,
+            // the licensed candidate must not stop the official service.
+            return 28;
+#else
+            return ChangeService(true);
+#endif
+        }
+#if CHEZHI_LICENSED && CHEZHI_LICENSED_TEST
+        // Resource-less negative fixture has exactly one test entrypoint.
+        // It cannot restore a service, run legacy probes, or open the
+        // production startup path. The prepare refusal above is retained.
+        if (args.Length == 1 && args[0] == "--self-test-license-boundary") return LicensedBoundaryTests();
+        return 2;
+#else
         if (args.Length == 1 && args[0] == "--admin-restore") return ChangeService(false);
+#if CHEZHI_LICENSED
+        // Production-shaped candidate accepts no offline self-test commands.
+        if (args.Length != 0) return 2;
+#endif
+#endif
         if (args.Length == 1 && args[0] == "--self-test-logic") return LogicTests();
         if (args.Length == 2 && args[0] == "--self-test-boot-sequence")
         {
@@ -548,6 +570,9 @@ internal static class Program
 
     private static int ChangeService(bool prepare)
     {
+#if CHEZHI_LICENSED
+        if (prepare) return 28;
+#endif
         try
         {
             var principal = new WindowsPrincipal(WindowsIdentity.GetCurrent());
@@ -619,6 +644,11 @@ internal static class Program
 
     private static int ChangeServiceUnderGate(bool prepare)
     {
+#if CHEZHI_LICENSED
+        // The mutation boundary itself must remain closed even if a future
+        // caller skips the CLI wrapper or the outer mutex entrypoint.
+        if (prepare) return 28;
+#endif
         try
         {
             if (!ServiceInstalled())
@@ -670,6 +700,7 @@ internal static class Program
                 case 21: return "天翼服务文件路径或数字签名身份未通过验证；未执行切换。请核对官方客户端。";
                 case 26: return "未安装天翼后台服务，请检查官方客户端安装。";
                 case 27: return "另一个服务切换正在执行，或无法确认切换互斥状态；未执行新的服务修改。";
+                case 28: return "管理员准备连接尚未通过授权验收；未执行服务修改。恢复天翼功能不受此限制。";
                 case 22: return "仍有天翼客户端或认证进程在运行，请先断开并完全退出。";
                 case 23: return "移动热点或 Wi-Fi Direct 仍在使用（或状态未知），请先关闭热点。";
                 case 24: return "天翼服务正在切换中，请稍后再试。";
@@ -755,8 +786,12 @@ internal static class Program
     }
 
     private static Process LaunchCore(string mode, string username, string password, int channel, Action<Process, string> status,
-        Action<Stream, Stream, Stream> captureStreams = null)
+        Action<Stream, Stream, Stream> captureStreams = null, Func<bool> licenseAdmission = null)
     {
+#if CHEZHI_LICENSED
+        if (mode == "--ephemeral-auth" && (licenseAdmission == null || !licenseAdmission()))
+            throw new InvalidOperationException("Online authorization required.");
+#endif
         string invalid = ValidateAuthInput(username, password, channel);
         if (invalid != null) throw new ArgumentException(invalid);
         string json = new JavaScriptSerializer().Serialize(new { username = username, password = password, channel = channel });
@@ -775,6 +810,10 @@ internal static class Program
         // CreateProcess returns; do not release it between hashing and launch.
         using (OpenVerifiedCore())
         {
+#if CHEZHI_LICENSED
+            if (mode == "--ephemeral-auth" && (licenseAdmission == null || !licenseAdmission()))
+                throw new InvalidOperationException("Online authorization required.");
+#endif
             if (!p.Start()) throw new InvalidOperationException("Core failed to start.");
             started = true;
         }
@@ -1265,6 +1304,59 @@ internal static class Program
         }
     }
 
+#if CHEZHI_LICENSED && CHEZHI_LICENSED_TEST
+    // Negative-only fixture: no trusted DLL, card, CNG, service or network
+    // calls. Never built into the production-shaped candidate.
+    private static int LicensedBoundaryTests()
+    {
+        string dir = Path.Combine(Path.GetFullPath(Path.GetTempPath()), "ChezhiLicenseUi-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            // Each independent prepare boundary must deny before SCM/WMI.
+            // This fixture must never exercise restore or real service mutation.
+            if (ChangeService(true) != 28 || ChangeServiceUnderGate(true) != 28) return 1;
+            bool denied = false;
+            try { LaunchCore("--ephemeral-auth", "dummy-user", "dummy-pass", 1, null); }
+            catch (InvalidOperationException ex) { denied = ex.Message == "Online authorization required."; }
+            if (!denied || corePath != null) return 1;
+            using (var window = new MainWindow(dir, true))
+            {
+                window.Show(); Application.DoEvents();
+                if (!window.CheckLicensedBoundaryForTest()) return 1;
+                window.Dispose();
+                if (!window.CheckDisposedResourcesForTest()) return 1;
+            }
+            return 0;
+        }
+        catch { return 1; }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+    }
+#endif
+
+#if CHEZHI_LICENSED && CHEZHI_LICENSE_UI_TEST
+    internal static async Task CheckOnlineMainWindowFixture(Guid id, string card)
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "ChezhiOnlineMainWindow-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using (var window = new MainWindow(dir, true, id))
+            {
+                window.Show();
+                await window.CheckOnlineLicenseForTest(card);
+                window.Dispose();
+                if (!window.CheckDisposedResourcesForTest() || corePath != null)
+                    throw new InvalidOperationException("Online main-window fixture cleanup failed.");
+            }
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+#endif
+
     private static int UiTests()
     {
         string dir = Path.Combine(Path.GetFullPath(Path.GetTempPath()), "ChezhiUiTest-" + Guid.NewGuid().ToString("N"));
@@ -1531,6 +1623,15 @@ internal static class Program
         private readonly CredentialStore credentials;
         private readonly ConnectionState state = new ConnectionState();
         private readonly bool isSelfTest;
+#if CHEZHI_LICENSED
+#if CHEZHI_LICENSE_UI_TEST
+        private readonly DesktopLicenseGate licenseGate;
+#else
+        private readonly DesktopLicenseGate licenseGate = new DesktopLicenseGate();
+#endif
+        private bool licenseManagementPending;
+        private ToolStripItem trayLicenseReplace, trayLicenseForget;
+#endif
         private Icon appIcon;
         private bool resourcesDisposed;
         // 核心结构化事件归档（EPHEMERAL_EVENT v1，协议见 docs/EphemeralExperimental.md）：
@@ -1588,8 +1689,17 @@ internal static class Program
         private static readonly Color ToneWarn = Color.FromArgb(217, 119, 6);
         private static readonly Color ToneFail = Color.FromArgb(220, 38, 38);
 
-        internal MainWindow(string credentialDirectory = null, bool selfTest = false)
+        internal MainWindow(string credentialDirectory = null, bool selfTest = false
+#if CHEZHI_LICENSED && CHEZHI_LICENSE_UI_TEST
+            , Guid? licenseFixture = null
+#endif
+            )
         {
+#if CHEZHI_LICENSED && CHEZHI_LICENSE_UI_TEST
+            if (!selfTest || !licenseFixture.HasValue || licenseFixture.Value == Guid.Empty)
+                throw new InvalidOperationException("Online UI fixture requires isolated self-test identity.");
+            licenseGate = new DesktopLicenseGate(licenseFixture.Value);
+#endif
             isSelfTest = selfTest;
             Text = "澈知科技 - 校园网连接";
             try { appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
@@ -1894,6 +2004,18 @@ internal static class Program
             trayMenu.Items.Add("打开主窗口", null, delegate { ShowFromTray(); });
             trayStop = trayMenu.Items.Add("停止认证", null, delegate { ShowFromTray(); StopClicked(stop, EventArgs.Empty); });
             trayMenu.Items.Add("清除已保存账号", null, delegate { ShowFromTray(); ForgetCredentials(); });
+#if CHEZHI_LICENSED
+            trayMenu.Items.Add("查看授权状态", null, delegate {
+                ShowFromTray();
+                MessageBox.Show(this, licenseGate.Message, "软件授权", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            });
+            trayLicenseReplace = trayMenu.Items.Add("更换授权卡密", null, async delegate {
+                ShowFromTray(); await ManageLicenseAsync(false);
+            });
+            trayLicenseForget = trayMenu.Items.Add("清除已保存授权卡密", null, async delegate {
+                ShowFromTray(); await ManageLicenseAsync(true);
+            });
+#endif
             trayMenu.Items.Add("导出诊断信息", null, delegate { ShowFromTray(); ExportDiagnostics(); });
             trayRecover = trayMenu.Items.Add("核对遗留服务事务", null, async delegate { ShowFromTray(); await RecoverInterruptedJournalAsync(); });
             trayMenu.Opening += delegate { RefreshOperationPermissions(); };
@@ -1960,6 +2082,22 @@ internal static class Program
                 if (IsDisposed || Disposing) return;
                 // Expiry must not wait behind a slow WMI/SCM observation.
                 ExpireNetworkEvidence(evidenceClock.ElapsedMilliseconds);
+#if CHEZHI_LICENSED
+                // Existing session remains usable for safe recovery; no
+                // fresh protected operation may bypass the online gate.
+                if (!isSelfTest && !serviceBusy && !connectCheckPending && !stopping &&
+                    !exitRequested && !powerSuspended && activeTask != null &&
+                    running != null && !Object.ReferenceEquals(running, completedProcess))
+                {
+                    int licenseEpoch = taskGeneration;
+                    Process licenseProcess = running;
+                    bool attempted = await licenseGate.RenewIfDueAsync();
+                    if (IsDisposed || Disposing || resourcesDisposed) return;
+                    if (attempted && licenseEpoch == taskGeneration && Object.ReferenceEquals(running, licenseProcess) &&
+                        !licenseGate.Allowed && !stopping && !userStopped && !exitRequested && !serviceBusy && !connectCheckPending)
+                        SetStatus(licenseGate.Message + " 当前会话暂不强制中断；新连接需重新验证。", ToneWarn);
+                }
+#endif
                 if (pendingServiceChild != null) await PollTimedOutServiceAsync();
                 else if (!isSelfTest && !serviceBusy && !connectCheckPending && !retryTimer.Enabled && activeTask == null)
                     await RunPreConnectCheckAsync(false, true);
@@ -1984,6 +2122,9 @@ internal static class Program
                 if (disposing && !resourcesDisposed)
                 {
                     resourcesDisposed = true;
+#if CHEZHI_LICENSED
+                    licenseGate.Dispose();
+#endif
                     userStopped = true; taskGeneration++; activeTask = null;
                     idleCheckLifetime.Cancel();
                     idleCheckLifetime.Dispose();
@@ -2863,6 +3004,105 @@ internal static class Program
             }
         }
 
+#if CHEZHI_LICENSED && CHEZHI_LICENSED_TEST
+        internal bool CheckLicensedBoundaryForTest()
+        {
+            if (!isSelfTest || licenseGate.Allowed || licenseGate.Busy ||
+                !CurrentPermissions().CanSwitch || !restore.Enabled) return false;
+            if (!LicenseManagementContextValid()) return false;
+            licenseManagementPending = true;
+            RefreshOperationPermissions();
+            if (connect.Enabled || prepare.Enabled || !restore.Enabled ||
+                trayLicenseReplace.Enabled || trayLicenseForget.Enabled) return false;
+            if (!PumpTaskForTest(ConnectCommandAsync(), 3000) || activeTask != null || running != null) return false;
+            licenseManagementPending = false;
+            RefreshOperationPermissions();
+            if (!trayLicenseReplace.Enabled || !trayLicenseForget.Enabled) return false;
+            powerSuspended = true;
+            if (LicenseManagementContextValid()) return false;
+            RefreshOperationPermissions();
+            if (trayLicenseReplace.Enabled || trayLicenseForget.Enabled) return false;
+            powerSuspended = false;
+            RefreshOperationPermissions();
+            activeTask = new AuthTask("dummy-user", "dummy-pass", 1, false);
+            userStopped = false;
+            bool denied = false;
+            try { StartAuthProcess(); }
+            catch (InvalidOperationException ex) { denied = ex.Message == "Online authorization required."; }
+            if (!denied || running != null || corePath != null) return false;
+            // Real stop/cancel path must work without licensing.
+            connectCheckPending = true;
+            RefreshOperationPermissions();
+            if (!stop.Enabled) return false;
+            BeginStop();
+            connectCheckPending = false;
+            RefreshOperationPermissions();
+            if (!userStopped || activeTask != null || running != null || !restore.Enabled || licenseGate.Allowed)
+                return false;
+            // Closing to tray must not dispose the form or start a process.
+            Close(); Application.DoEvents();
+            if (Visible || IsDisposed || running != null) return false;
+            ShowFromTray(); Application.DoEvents();
+            return Visible && !licenseGate.Allowed && restore.Enabled;
+        }
+#endif
+
+#if CHEZHI_LICENSED && CHEZHI_LICENSE_UI_TEST
+        // Real MainWindow, real gate and signed loopback authorization;
+        // retain the existing self-test prohibition on actual authentication.
+        private void RequireFixture(bool condition, string label)
+        {
+            if (!condition) throw new InvalidOperationException(label);
+        }
+        internal async Task CheckOnlineLicenseForTest(string card)
+        {
+            RequireFixture(isSelfTest && !licenseGate.Allowed && running == null && corePath == null,
+                "main window initial state");
+            licenseGate.FixtureCard = card;
+            RequireFixture(await licenseGate.VerifyAsync(this, true) && licenseGate.Allowed,
+                "main window real authorization");
+            activeTask = new AuthTask("dummy-user", "dummy-pass", 1, false);
+            userStopped = false;
+            bool offlineDenied = false;
+            try { StartAuthProcess(); }
+            catch (InvalidOperationException ex) { offlineDenied = ex.Message == "Offline test cannot authenticate."; }
+            RequireFixture(offlineDenied && running == null && corePath == null,
+                "positive authorization did not reach offline safety boundary");
+            connectCheckPending = true;
+            RefreshOperationPermissions();
+            RequireFixture(stop.Enabled, "cancel not available");
+            BeginStop();
+            connectCheckPending = false;
+            RefreshOperationPermissions();
+            RequireFixture(!licenseGate.Allowed && userStopped && activeTask == null && restore.Enabled,
+                "main window cancellation failed to invalidate authorization");
+            activeTask = new AuthTask("dummy-user", "dummy-pass", 1, false);
+            userStopped = false;
+            bool denied = false;
+            try { StartAuthProcess(); }
+            catch (InvalidOperationException ex) { denied = ex.Message == "Online authorization required."; }
+            RequireFixture(denied && running == null && corePath == null,
+                "invalidated main window admission");
+            activeTask = null;
+            RequireFixture(await licenseGate.VerifyAsync(this, false) && licenseGate.Allowed,
+                "main window fresh online verification");
+            await ApplyPowerTransitionAsync(true);
+            RequireFixture(!licenseGate.Allowed && powerSuspended && !connect.Enabled,
+                "main window suspend did not invalidate");
+            await ApplyPowerTransitionAsync(false);
+            RequireFixture(!licenseGate.Allowed && !powerSuspended && restore.Enabled,
+                "main window resume restored stale authorization");
+            RequireFixture(await licenseGate.VerifyAsync(this, false) && licenseGate.Allowed,
+                "main window verification after resume");
+            Close();
+            RequireFixture(!Visible && !IsDisposed && licenseGate.Allowed && running == null,
+                "tray close changed authorized idle context");
+            ShowFromTray();
+            RequireFixture(Visible && licenseGate.Allowed, "tray reopen lost authorized idle context");
+            Console.WriteLine("PASS real MainWindow authorization, offline safety boundary, stop invalidation, suspend/resume and tray");
+        }
+#endif
+
         internal bool CheckDisposedResourcesForTest()
         {
             return IsDisposed && resourcesDisposed && !timer.Enabled && !animTimer.Enabled &&
@@ -3568,12 +3808,59 @@ internal static class Program
                 owned, stopping, force, exitRequested || powerSuspended, userStopped);
         }
 
+#if CHEZHI_LICENSED
+        // A modal confirmation pumps messages. Reserve the management slot
+        // before showing it and recheck the context afterwards.
+        private bool LicenseManagementContextValid()
+        {
+            return !resourcesDisposed && !IsDisposed && !Disposing && !exitRequested &&
+                !powerSuspended && !serviceBusy && !connectCheckPending &&
+                !retryTimer.Enabled && !stopping && activeTask == null &&
+                (running == null || Object.ReferenceEquals(running, completedProcess)) &&
+                !licenseGate.Busy;
+        }
+
+        private async Task ManageLicenseAsync(bool forget)
+        {
+            if (licenseManagementPending || !LicenseManagementContextValid()) return;
+            licenseManagementPending = true;
+            int generation = ++taskGeneration;
+            RefreshOperationPermissions();
+            try
+            {
+                string prompt = forget ? "仅清除本地卡密，不解绑服务器或删除设备密钥。确定？" :
+                    licenseGate.Message + "\n\n是否输入或更换授权卡密？";
+                if (MessageBox.Show(this, prompt, "软件授权", MessageBoxButtons.YesNo,
+                    forget ? MessageBoxIcon.Warning : MessageBoxIcon.Information) != DialogResult.Yes) return;
+                if (generation != taskGeneration || !LicenseManagementContextValid()) return;
+                bool ok = forget ? await licenseGate.ForgetAsync() : await licenseGate.VerifyAsync(this, true, true);
+                if (!resourcesDisposed && !IsDisposed && !Disposing && !exitRequested &&
+                    !powerSuspended && generation == taskGeneration)
+                    SetStatus(licenseGate.Message, ok ? (forget ? ToneInfo : ToneOk) : ToneWarn);
+            }
+            finally
+            {
+                licenseManagementPending = false;
+                RefreshOperationPermissions();
+            }
+        }
+#endif
+
         private void RefreshOperationPermissions()
         {
             if (IsDisposed || Disposing || resourcesDisposed) return;
             var rights = CurrentPermissions();
             connect.Enabled = rights.CanConnect;
             prepare.Enabled = restore.Enabled = rights.CanSwitch;
+#if CHEZHI_LICENSED
+            if (licenseManagementPending || licenseGate.Busy)
+            {
+                connect.Enabled = false; prepare.Enabled = false;
+            }
+            bool manage = !licenseManagementPending && LicenseManagementContextValid();
+            if (trayLicenseReplace != null) trayLicenseReplace.Enabled = manage;
+            if (trayLicenseForget != null) trayLicenseForget.Enabled = manage;
+#endif
             stop.Enabled = rights.Stop != ConnectionStates.StopIntent.None;
             switch (rights.Stop)
             {
@@ -3701,6 +3988,9 @@ internal static class Program
         private async Task ConnectCommandAsync()
         {
             if (!CurrentPermissions().CanConnect) return;
+#if CHEZHI_LICENSED
+            if (licenseManagementPending || licenseGate.Busy) { SetStatus("授权操作正在进行，请稍后。", ToneWarn); return; }
+#endif
             string invalid = ValidateAuthInput(account.Text, password.Text, channel.SelectedIndex + 1);
             if (invalid != null) { SetStatus(invalid, ToneWarn); return; }
             retryTimer.Stop();
@@ -3783,6 +4073,13 @@ internal static class Program
             bool ready = false;
             try
             {
+#if CHEZHI_LICENSED
+                if (!await licenseGate.VerifyAsync(this, !automaticRetry) || HandoffCancelled(generation, true))
+                {
+                    if (!HandoffCancelled(generation, true)) SetHandoff(ConnectionStates.HandoffState.Blocked, licenseGate.Message, ToneWarn);
+                    return;
+                }
+#endif
                 var observation = await WaitForHandoffAsync(ConnectionStates.HandoffIntent.Connect, generation, true);
                 if (observation == null || HandoffCancelled(generation, true)) return;
                 var decision = observation.Decide(ConnectionStates.HandoffIntent.Connect);
@@ -3802,6 +4099,26 @@ internal static class Program
                     return;
                 }
                 if (HandoffCancelled(generation, true)) return;
+#if CHEZHI_LICENSED
+                // Handoff may have interrupted connectivity. Revalidate
+                // before launching; never treat a prior grant as offline permission.
+                if (!await licenseGate.VerifyAsync(this, false) || HandoffCancelled(generation, true))
+                {
+                    if (!HandoffCancelled(generation, true)) SetHandoff(ConnectionStates.HandoffState.Blocked, licenseGate.Message + " 可使用恢复天翼功能。", ToneWarn);
+                    return;
+                }
+#endif
+#if CHEZHI_LICENSED
+                // Authorization awaited network I/O after the previous
+                // observation. Re-observe local handoff before launch.
+                observation = await Task.Run((Func<HandoffObservation>)ObserveHandoff);
+                if (HandoffCancelled(generation, true)) return;
+                if (observation.Decide(ConnectionStates.HandoffIntent.Connect) != ConnectionStates.HandoffDecision.Ready || !licenseGate.Allowed)
+                {
+                    SetHandoff(ConnectionStates.HandoffState.Blocked, "授权或天翼环境已变化，请重新检查；可恢复天翼。", ToneWarn);
+                    return;
+                }
+#endif
                 // Keep preflight ownership until the synchronous launch has returned.
                 state.SetHandoff(ConnectionStates.HandoffState.None);
                 StartAuthProcess(isSelfTest && offlineLifecycleProbe ? "--ephemeral-probe" : "--ephemeral-auth");
@@ -3827,6 +4144,9 @@ internal static class Program
         private void StartAuthProcess(string mode = "--ephemeral-auth")
         {
             if (activeTask == null || userStopped || serviceBusy || exitRequested || powerSuspended) return;
+#if CHEZHI_LICENSED
+            if (mode == "--ephemeral-auth" && !licenseGate.Allowed) throw new InvalidOperationException("Online authorization required.");
+#endif
             if (isSelfTest && mode == "--ephemeral-auth") throw new InvalidOperationException("Offline test cannot authenticate.");
             if (running != null && !Object.ReferenceEquals(running, completedProcess)) return;
             try
@@ -3837,7 +4157,12 @@ internal static class Program
                 runSawProgress = false; authFailureSeen = false; runtimeFailureSeen = false; retryEligible = false;
                 offlineProbeReady = false; offlineProbeStopAccepted = false; lastCoreReadersDrained = false;
                 stop.Text = "停止认证"; StyleStopArmed(false); timer.Stop();
+#if CHEZHI_LICENSED
+                running = LaunchCore(mode, activeTask.Username, activeTask.Password, activeTask.Channel, OnCoreStatus,
+                    licenseAdmission: delegate { return licenseGate.Allowed && !userStopped && !exitRequested && !powerSuspended; });
+#else
                 running = LaunchCore(mode, activeTask.Username, activeTask.Password, activeTask.Channel, OnCoreStatus);
+#endif
                 password.UseSystemPasswordChar = true; reveal.Text = "显示";
                 connect.Text = "连接中…"; RefreshOperationPermissions();
                 lastNetworkEvidence = 0;
@@ -3962,6 +4287,9 @@ internal static class Program
                     System.Threading.Interlocked.Exchange(ref networkChangeQueued, 0);
                     if (IsDisposed || Disposing || resourcesDisposed) return;
                     lastIdleObservation = null;
+#if CHEZHI_LICENSED
+                    licenseGate.Invalidate();
+#endif
                     InvalidateNetworkEvidence("检测到网络接口变化，当前可达性待重新确认。");
                     // Do not start/restart a core, change a service or revoke an authorized handoff.
                     // Existing retry rules and idle observation timer remain responsible.
@@ -3996,6 +4324,9 @@ internal static class Program
             if (IsDisposed || Disposing || resourcesDisposed) return;
             bool checkIdleEnvironment = false;
             powerSuspended = suspended;
+#if CHEZHI_LICENSED
+            licenseGate.Invalidate();
+#endif
             taskGeneration++; // revoke stale environment checks and post-service continuation
             lastIdleObservation = null;
             state.SetNetwork(ConnectionStates.NetworkState.Unknown);
@@ -4261,6 +4592,9 @@ internal static class Program
         {
             if (serviceBusy) { SetStatus("正在进行系统服务切换，完成后才能停止或退出。", ToneWarn); return; }
             // Cancellation intent is independent of process existence and invalidates outstanding checks.
+#if CHEZHI_LICENSED
+            licenseGate.Invalidate();
+#endif
             userStopped = true; taskGeneration++; retryTimer.Stop(); activeTask = null;
             state.SetNetwork(ConnectionStates.NetworkState.Unknown); UpdateConnectionPill();
             if (running == null || running.HasExited)
@@ -4414,6 +4748,9 @@ internal static class Program
         {
             var rights = CurrentPermissions();
             if (exitRequested || (fromConnect ? !rights.CanPrepareForConnection : !rights.CanSwitch)) return false;
+#if CHEZHI_LICENSED
+            if (forPrepare && (licenseManagementPending || licenseGate.Busy)) return false;
+#endif
             if (!fromConnect) { taskGeneration++; state.TrySetAuth(ConnectionStates.AuthState.Idle, "handoff request"); }
             if (!JournalAllowsNewAction()) return false;
             int generation = taskGeneration;
@@ -4423,6 +4760,13 @@ internal static class Program
             int? code = null;
             try
             {
+#if CHEZHI_LICENSED
+                if (forPrepare && (!await licenseGate.VerifyAsync(this, !fromConnect) || HandoffCancelled(generation, fromConnect)))
+                {
+                    if (!HandoffCancelled(generation, fromConnect)) SetHandoff(ConnectionStates.HandoffState.Blocked, licenseGate.Message, ToneWarn);
+                    return false;
+                }
+#endif
                 var intent = forPrepare ? ConnectionStates.HandoffIntent.Prepare : ConnectionStates.HandoffIntent.Restore;
                 SetHandoff(ConnectionStates.HandoffState.Checking, "正在检查天翼服务与进程……", ToneBusy, true);
                 var observation = await WaitForHandoffAsync(intent, generation, fromConnect);
@@ -4441,6 +4785,13 @@ internal static class Program
                 }
                 if (decision != ConnectionStates.HandoffDecision.NeedStopService && decision != ConnectionStates.HandoffDecision.NeedStartService)
                 { SetHandoff(ConnectionStates.HandoffState.Blocked, HandoffMessage(decision), ToneWarn); return false; }
+#if CHEZHI_LICENSED
+                if (forPrepare)
+                {
+                    SetHandoff(ConnectionStates.HandoffState.Blocked, "授权候选版尚未验收管理员服务切换，暂不停止天翼后台服务。恢复天翼仍可用。", ToneWarn);
+                    return false;
+                }
+#endif
                 string instructions = forPrepare
                     ? "天翼客户端已退出，但后台服务仍运行。请确认已断开天翼并关闭移动热点。继续将请求管理员权限停止后台服务。" +
                         (fromConnect ? " 准备成功后将自动继续本次认证。" : "")
@@ -4461,6 +4812,20 @@ internal static class Program
                 if (HandoffCancelled(generation, fromConnect)) return false;
                 if (boot == null)
                 { SetHandoff(ConnectionStates.HandoffState.Blocked, "无法读取 Windows 启动代次，未执行服务切换。", ToneWarn); return false; }
+#if CHEZHI_LICENSED
+                if (forPrepare && (!await licenseGate.VerifyAsync(this, false) || HandoffCancelled(generation, fromConnect)))
+                {
+                    if (!HandoffCancelled(generation, fromConnect)) SetHandoff(ConnectionStates.HandoffState.Blocked, licenseGate.Message, ToneWarn);
+                    return false;
+                }
+                // Re-observe after the asynchronous license exchange.
+                if (forPrepare)
+                {
+                    observation = await Task.Run((Func<HandoffObservation>)ObserveHandoff);
+                    if (HandoffCancelled(generation, fromConnect) || observation.Decide(intent) != decision || !licenseGate.Allowed)
+                        return false;
+                }
+#endif
                 journal.Begin(forPrepare ? "prepare" : "restore", before, boot.Ticks, boot.Sequence);
                 state.SetService(ConnectionStates.ServiceState.Transitioning);
                 SetHandoff(forPrepare ? ConnectionStates.HandoffState.Preparing : ConnectionStates.HandoffState.Restoring, "请在弹出的管理员确认窗口中操作……", ToneBusy, true);

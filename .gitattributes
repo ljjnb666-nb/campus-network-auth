@@ -1,2 +1,10 @@
 # The Windows About dialog needs CRLF in this byte-for-byte embedded resource.
 /Licenses.txt text eol=crlf
+
+# Vendored SDK sources must retain the pinned upstream LF checkout bytes.
+# The licensed desktop CI compares full SHA-256 digests, not normalized text.
+/licensing/AuthorizationState.cs text eol=lf
+/licensing/WindowsDeviceKey.cs text eol=lf
+/licensing/DeviceEnrollment.cs text eol=lf
+/licensing/NativeLicenseClient.cs text eol=lf
+/licensing/LicenseCoordinator.cs text eol=lf

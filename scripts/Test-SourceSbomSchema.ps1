@@ -36,14 +36,14 @@ try {
     $schemas = @{}
     foreach ($name in $pins.Keys) {
         $file = Join-Path $temp $name
-        # Fetch the exact reviewed Git object, not the mutable 1.5 branch
-        # or tag. Decode its bytes without newline/encoding conversion.
+        # Use the immutable reviewed upstream commit as the transport.
+        # Raw downloads avoid unauthenticated REST API rate limits; the
+        # independently pinned Git blob ID remains the acceptance criterion.
+        # OutFile preserves bytes without text decoding or newline conversion.
         $expected = $pins[$name]
-        $blob = Invoke-RestMethod -Uri "https://api.github.com/repos/CycloneDX/specification/git/blobs/$expected" -Headers @{Accept='application/vnd.github+json'} -TimeoutSec 60
-        if ($blob.sha -cne $expected -or $blob.encoding -cne 'base64' -or -not $blob.content) { throw "Unexpected schema blob response: $name" }
-        $bytes = [Convert]::FromBase64String([string]$blob.content)
-        if ($bytes.Length -ne $blob.size) { throw "Schema blob size mismatch: $name" }
-        [IO.File]::WriteAllBytes($file, $bytes)
+        $revision = 'c320fc0f0b46873864927d9d5684eea7ba439728'
+        $uri = "https://raw.githubusercontent.com/CycloneDX/specification/$revision/schema/$name"
+        Invoke-WebRequest -Uri $uri -OutFile $file -TimeoutSec 60 -MaximumRetryCount 2 -RetryIntervalSec 2 -ErrorAction Stop
         Assert-GitBlobId ([IO.File]::ReadAllBytes($file)) $expected
         Write-Host "SCHEMA_BLOB_VERIFIED $name $expected"
         $schemas[$name] = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json -AsHashtable
