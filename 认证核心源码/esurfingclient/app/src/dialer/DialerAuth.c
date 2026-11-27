@@ -101,75 +101,59 @@ AuthStatus auth(void)
     LOG_DEBUG("Keep-Url: %s", cfg->keep_url);
     LOG_DEBUG("Term-Url: %s", cfg->term_url);
 
-    /**
-     * 2. 请求门户页面
-     *
-     * 两个作用: 拿响应头里的 School Id / Domain / Area; 以及从配置块的 ticket-url
-     * 里取 wlanuserip / wlanacip (last_location 里没有这两个参数时的兜底)。
-     */
-    curl_resp_t resp = get(g_prog_status[tl_thread_idx].last_location);
-    char* portal_ticket_url = NULL;
+    const char* location = g_prog_status[tl_thread_idx].last_location;
+    char* client_ip = extract_url_param(location, "wlanuserip");
+    char* ac_ip = extract_url_param(location, "wlanacip");
 
-    if (resp.http_code == HTTP_OK && resp.body_size > 0 && resp.body_data != NULL)
+    // 跟随门户重定向时已读取响应头。仅在地址参数或学校信息缺失时再次请求页面。
+    if (client_ip == NULL || ac_ip == NULL ||
+        g_school_id[0] == '\0' || g_school_domain[0] == '\0' || g_area[0] == '\0')
     {
-        const char portal_start_tag[] = "<!--//config.campus.js.chinatelecom.com";
-        const char portal_end_tag[] = "//config.campus.js.chinatelecom.com-->";
-
-        char* portal_config = extract_between_tags(resp.body_data, portal_start_tag, portal_end_tag);
-        if (portal_config != NULL)
+        curl_resp_t resp = get(location);
+        if (resp.http_code == HTTP_OK && resp.body_size > 0 && resp.body_data != NULL)
         {
-            char* raw_ticket_url = xml_parser(portal_config, "ticket-url");
-            if (raw_ticket_url != NULL)
+            if (client_ip == NULL || ac_ip == NULL)
             {
-                portal_ticket_url = clean_cdata(raw_ticket_url);
-                s_secure_free_string(raw_ticket_url);
+                char* portal_config = extract_between_tags(resp.body_data,
+                    "<!--//config.campus.js.chinatelecom.com", "//config.campus.js.chinatelecom.com-->");
+                if (portal_config != NULL)
+                {
+                    char* raw_ticket_url = xml_parser(portal_config, "ticket-url");
+                    if (raw_ticket_url != NULL)
+                    {
+                        char* ticket_url = clean_cdata(raw_ticket_url);
+                        if (ticket_url != NULL)
+                        {
+                            if (client_ip == NULL) client_ip = extract_url_param(ticket_url, "wlanuserip");
+                            if (ac_ip == NULL) ac_ip = extract_url_param(ticket_url, "wlanacip");
+                            s_secure_free_string(ticket_url);
+                        }
+                        s_secure_free_string(raw_ticket_url);
+                    }
+                    s_secure_free_string(portal_config);
+                }
             }
-            s_secure_free_string(portal_config);
         }
+        else
+        {
+            LOG_WARN("门户页面没拿到 (状态码 %d), 只用 last_location 里的参数", resp.http_code);
+        }
+        curl_resp_free(&resp);
     }
-    else
+    if (client_ip == NULL || ac_ip == NULL)
     {
-        LOG_WARN("门户页面没拿到 (状态码 %d), 只用 last_location 里的参数", resp.http_code);
-    }
-    curl_resp_free(&resp);
-
-    /**
-     * 3. client_ip / ac_ip: ticket 请求必需
-     *
-     * last_location 的查询串优先 (302 那一跳通常就带着), 取不到再从门户给的
-     * ticket-url 里取。
-     */
-    char* client_ip = extract_url_param(g_prog_status[tl_thread_idx].last_location, "wlanuserip");
-    if (client_ip == NULL && portal_ticket_url != NULL)
-    {
-        client_ip = extract_url_param(portal_ticket_url, "wlanuserip");
-    }
-    if (client_ip == NULL)
-    {
-        LOG_ERROR("提取 Client IP 失败");
-        s_secure_free_string(portal_ticket_url);
+        LOG_ERROR("提取 %s IP 失败", client_ip == NULL ? "Client" : "AC");
+        s_secure_free_string(client_ip);
+        s_secure_free_string(ac_ip);
         return AUTH_FAILED;
     }
     snprintf(cfg->client_ip, IP_LEN, "%s", safe_str(client_ip));
     s_secure_free_string(client_ip);
     LOG_DEBUG("Client IP: %s", cfg->client_ip);
 
-    char* ac_ip = extract_url_param(g_prog_status[tl_thread_idx].last_location, "wlanacip");
-    if (ac_ip == NULL && portal_ticket_url != NULL)
-    {
-        ac_ip = extract_url_param(portal_ticket_url, "wlanacip");
-    }
-    if (ac_ip == NULL)
-    {
-        LOG_ERROR("提取 AC IP 失败");
-        s_secure_free_string(portal_ticket_url);
-        return AUTH_FAILED;
-    }
     snprintf(cfg->ac_ip, IP_LEN, "%s", safe_str(ac_ip));
     s_secure_free_string(ac_ip);
     LOG_DEBUG("AC IP: %s", cfg->ac_ip);
-
-    s_secure_free_string(portal_ticket_url);
 
     /**
      * 4. ticket_url: 带 wlanuserip / wlanacip, 不带 portal_node
