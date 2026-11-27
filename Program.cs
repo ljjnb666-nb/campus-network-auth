@@ -1531,6 +1531,9 @@ internal static class Program
         private readonly CredentialStore credentials;
         private readonly ConnectionState state = new ConnectionState();
         private readonly bool isSelfTest;
+#if CHEZHI_LICENSED
+        private readonly DesktopLicenseGate licenseGate = new DesktopLicenseGate();
+#endif
         private Icon appIcon;
         private bool resourcesDisposed;
         // 核心结构化事件归档（EPHEMERAL_EVENT v1，协议见 docs/EphemeralExperimental.md）：
@@ -1984,6 +1987,9 @@ internal static class Program
                 if (disposing && !resourcesDisposed)
                 {
                     resourcesDisposed = true;
+#if CHEZHI_LICENSED
+                    licenseGate.Dispose();
+#endif
                     userStopped = true; taskGeneration++; activeTask = null;
                     idleCheckLifetime.Cancel();
                     idleCheckLifetime.Dispose();
@@ -3783,6 +3789,13 @@ internal static class Program
             bool ready = false;
             try
             {
+#if CHEZHI_LICENSED
+                if (!await licenseGate.VerifyAsync(this, !automaticRetry) || HandoffCancelled(generation, true))
+                {
+                    if (!HandoffCancelled(generation, true)) SetHandoff(ConnectionStates.HandoffState.Blocked, licenseGate.Message, ToneWarn);
+                    return;
+                }
+#endif
                 var observation = await WaitForHandoffAsync(ConnectionStates.HandoffIntent.Connect, generation, true);
                 if (observation == null || HandoffCancelled(generation, true)) return;
                 var decision = observation.Decide(ConnectionStates.HandoffIntent.Connect);
@@ -3802,6 +3815,15 @@ internal static class Program
                     return;
                 }
                 if (HandoffCancelled(generation, true)) return;
+#if CHEZHI_LICENSED
+                // Handoff may have interrupted connectivity. Revalidate
+                // before launching; never treat a prior grant as offline permission.
+                if (!await licenseGate.VerifyAsync(this, false) || HandoffCancelled(generation, true))
+                {
+                    if (!HandoffCancelled(generation, true)) SetHandoff(ConnectionStates.HandoffState.Blocked, licenseGate.Message + " 可使用恢复天翼功能。", ToneWarn);
+                    return;
+                }
+#endif
                 // Keep preflight ownership until the synchronous launch has returned.
                 state.SetHandoff(ConnectionStates.HandoffState.None);
                 StartAuthProcess(isSelfTest && offlineLifecycleProbe ? "--ephemeral-probe" : "--ephemeral-auth");
@@ -3828,6 +3850,9 @@ internal static class Program
         {
             if (activeTask == null || userStopped || serviceBusy || exitRequested || powerSuspended) return;
             if (isSelfTest && mode == "--ephemeral-auth") throw new InvalidOperationException("Offline test cannot authenticate.");
+#if CHEZHI_LICENSED
+            if (mode == "--ephemeral-auth" && !licenseGate.Allowed) throw new InvalidOperationException("Online authorization required.");
+#endif
             if (running != null && !Object.ReferenceEquals(running, completedProcess)) return;
             try
             {
@@ -3996,6 +4021,9 @@ internal static class Program
             if (IsDisposed || Disposing || resourcesDisposed) return;
             bool checkIdleEnvironment = false;
             powerSuspended = suspended;
+#if CHEZHI_LICENSED
+            licenseGate.Invalidate();
+#endif
             taskGeneration++; // revoke stale environment checks and post-service continuation
             lastIdleObservation = null;
             state.SetNetwork(ConnectionStates.NetworkState.Unknown);
@@ -4423,6 +4451,13 @@ internal static class Program
             int? code = null;
             try
             {
+#if CHEZHI_LICENSED
+                if (forPrepare && (!await licenseGate.VerifyAsync(this, !fromConnect) || HandoffCancelled(generation, fromConnect)))
+                {
+                    if (!HandoffCancelled(generation, fromConnect)) SetHandoff(ConnectionStates.HandoffState.Blocked, licenseGate.Message, ToneWarn);
+                    return false;
+                }
+#endif
                 var intent = forPrepare ? ConnectionStates.HandoffIntent.Prepare : ConnectionStates.HandoffIntent.Restore;
                 SetHandoff(ConnectionStates.HandoffState.Checking, "正在检查天翼服务与进程……", ToneBusy, true);
                 var observation = await WaitForHandoffAsync(intent, generation, fromConnect);
@@ -4461,6 +4496,20 @@ internal static class Program
                 if (HandoffCancelled(generation, fromConnect)) return false;
                 if (boot == null)
                 { SetHandoff(ConnectionStates.HandoffState.Blocked, "无法读取 Windows 启动代次，未执行服务切换。", ToneWarn); return false; }
+#if CHEZHI_LICENSED
+                if (forPrepare && (!await licenseGate.VerifyAsync(this, false) || HandoffCancelled(generation, fromConnect)))
+                {
+                    if (!HandoffCancelled(generation, fromConnect)) SetHandoff(ConnectionStates.HandoffState.Blocked, licenseGate.Message, ToneWarn);
+                    return false;
+                }
+                // Re-observe after the asynchronous license exchange.
+                if (forPrepare)
+                {
+                    observation = await Task.Run((Func<HandoffObservation>)ObserveHandoff);
+                    if (HandoffCancelled(generation, fromConnect) || observation.Decide(intent) != decision || !licenseGate.Allowed)
+                        return false;
+                }
+#endif
                 journal.Begin(forPrepare ? "prepare" : "restore", before, boot.Ticks, boot.Sequence);
                 state.SetService(ConnectionStates.ServiceState.Transitioning);
                 SetHandoff(forPrepare ? ConnectionStates.HandoffState.Preparing : ConnectionStates.HandoffState.Restoring, "请在弹出的管理员确认窗口中操作……", ToneBusy, true);
