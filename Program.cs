@@ -1324,6 +1324,25 @@ internal static class Program
     }
 #endif
 
+#if CHEZHI_LICENSED && CHEZHI_LICENSE_UI_TEST
+    internal static async Task CheckOnlineMainWindowFixture(Guid id, string card)
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "ChezhiOnlineMainWindow-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using (var window = new MainWindow(dir, true, id))
+            {
+                window.Show();
+                await window.CheckOnlineLicenseForTest(card);
+                window.Dispose();
+                if (!window.CheckDisposedResourcesForTest() || corePath != null)
+                    throw new InvalidOperationException("Online main-window fixture cleanup failed.");
+            }
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+#endif
+
     private static int UiTests()
     {
         string dir = Path.Combine(Path.GetFullPath(Path.GetTempPath()), "ChezhiUiTest-" + Guid.NewGuid().ToString("N"));
@@ -1591,7 +1610,11 @@ internal static class Program
         private readonly ConnectionState state = new ConnectionState();
         private readonly bool isSelfTest;
 #if CHEZHI_LICENSED
+#if CHEZHI_LICENSE_UI_TEST
+        private readonly DesktopLicenseGate licenseGate;
+#else
         private readonly DesktopLicenseGate licenseGate = new DesktopLicenseGate();
+#endif
         private bool licenseManagementPending;
         private ToolStripItem trayLicenseReplace, trayLicenseForget;
 #endif
@@ -1652,8 +1675,17 @@ internal static class Program
         private static readonly Color ToneWarn = Color.FromArgb(217, 119, 6);
         private static readonly Color ToneFail = Color.FromArgb(220, 38, 38);
 
-        internal MainWindow(string credentialDirectory = null, bool selfTest = false)
+        internal MainWindow(string credentialDirectory = null, bool selfTest = false
+#if CHEZHI_LICENSED && CHEZHI_LICENSE_UI_TEST
+            , Guid? licenseFixture = null
+#endif
+            )
         {
+#if CHEZHI_LICENSED && CHEZHI_LICENSE_UI_TEST
+            if (!selfTest || !licenseFixture.HasValue || licenseFixture.Value == Guid.Empty)
+                throw new InvalidOperationException("Online UI fixture requires isolated self-test identity.");
+            licenseGate = new DesktopLicenseGate(licenseFixture.Value);
+#endif
             isSelfTest = selfTest;
             Text = "澈知科技 - 校园网连接";
             try { appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
@@ -2998,6 +3030,62 @@ internal static class Program
             if (Visible || IsDisposed || running != null) return false;
             ShowFromTray(); Application.DoEvents();
             return Visible && !licenseGate.Allowed && restore.Enabled;
+        }
+#endif
+
+#if CHEZHI_LICENSED && CHEZHI_LICENSE_UI_TEST
+        // Real MainWindow, real gate and signed loopback authorization;
+        // retain the existing self-test prohibition on actual authentication.
+        private void RequireFixture(bool condition, string label)
+        {
+            if (!condition) throw new InvalidOperationException(label);
+        }
+        internal async Task CheckOnlineLicenseForTest(string card)
+        {
+            RequireFixture(isSelfTest && !licenseGate.Allowed && running == null && corePath == null,
+                "main window initial state");
+            licenseGate.FixtureCard = card;
+            RequireFixture(await licenseGate.VerifyAsync(this, true) && licenseGate.Allowed,
+                "main window real authorization");
+            activeTask = new AuthTask("dummy-user", "dummy-pass", 1, false);
+            userStopped = false;
+            bool offlineDenied = false;
+            try { StartAuthProcess(); }
+            catch (InvalidOperationException ex) { offlineDenied = ex.Message == "Offline test cannot authenticate."; }
+            RequireFixture(offlineDenied && running == null && corePath == null,
+                "positive authorization did not reach offline safety boundary");
+            connectCheckPending = true;
+            RefreshOperationPermissions();
+            RequireFixture(stop.Enabled, "cancel not available");
+            BeginStop();
+            connectCheckPending = false;
+            RefreshOperationPermissions();
+            RequireFixture(!licenseGate.Allowed && userStopped && activeTask == null && restore.Enabled,
+                "main window cancellation failed to invalidate authorization");
+            activeTask = new AuthTask("dummy-user", "dummy-pass", 1, false);
+            userStopped = false;
+            bool denied = false;
+            try { StartAuthProcess(); }
+            catch (InvalidOperationException ex) { denied = ex.Message == "Online authorization required."; }
+            RequireFixture(denied && running == null && corePath == null,
+                "invalidated main window admission");
+            activeTask = null;
+            RequireFixture(await licenseGate.VerifyAsync(this, false) && licenseGate.Allowed,
+                "main window fresh online verification");
+            await ApplyPowerTransitionAsync(true);
+            RequireFixture(!licenseGate.Allowed && powerSuspended && !connect.Enabled,
+                "main window suspend did not invalidate");
+            await ApplyPowerTransitionAsync(false);
+            RequireFixture(!licenseGate.Allowed && !powerSuspended && restore.Enabled,
+                "main window resume restored stale authorization");
+            RequireFixture(await licenseGate.VerifyAsync(this, false) && licenseGate.Allowed,
+                "main window verification after resume");
+            Close();
+            RequireFixture(!Visible && !IsDisposed && licenseGate.Allowed && running == null,
+                "tray close changed authorized idle context");
+            ShowFromTray();
+            RequireFixture(Visible && licenseGate.Allowed, "tray reopen lost authorized idle context");
+            Console.WriteLine("PASS real MainWindow authorization, offline safety boundary, stop invalidation, suspend/resume and tray");
         }
 #endif
 
