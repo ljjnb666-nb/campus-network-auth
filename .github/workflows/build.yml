@@ -60,6 +60,23 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Renewal scheduling regression failed' }
           } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
 
+      - name: License card input canonicalization regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $temp = Join-Path $env:RUNNER_TEMP ('card-input-' + [Guid]::NewGuid().ToString('N'))
+          [void](New-Item -ItemType Directory -Path $temp)
+          try {
+            $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+            $src = (Resolve-Path -LiteralPath 'licensing/LicenseCardInput.cs').Path
+            $test = (Resolve-Path -LiteralPath 'licensing/LicenseCardInputSmoke.cs').Path
+            $exe = Join-Path $temp 'LicenseCardInputSmoke.exe'
+            & $csc /nologo /target:exe /platform:x64 /define:CHEZHI_CARD_INPUT_TEST "/out:$exe" $src $test
+            if ($LASTEXITCODE -ne 0) { throw 'Card input test compile failed' }
+            & $exe
+            if ($LASTEXITCODE -ne 0) { throw 'Card input regression failed' }
+          } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
+
       - name: Cache curl source package
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:

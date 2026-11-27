@@ -52,3 +52,29 @@ worker-owned copy is wiped afterward. No claim of secure erasure of all
 managed/native copies. No card persistence on failed verification. A failed
 save retries only on later verified success. Current Windows test is a
 scheduler unit regression, not full licensed GUI or server acceptance.
+
+## Security boundary audit (candidate hardening)
+Reviewed exact 7544bed (CI 46013818561 all four jobs passed). Confirmed
+the original --admin-prepare entry calls ChangeService(true) independently
+of the GUI coordinator, and the current core is embedded/extracted as an
+independent executable. The licensed candidate now denies privileged prepare
+at both CLI and service helper entry (28) and refuses service stop in the
+GUI before confirmation/journal/mutation. No new bypass ticket or unchecked
+IPC. Read-only ready observation still possible; restore unchanged.
+This temporarily removes the licensed candidate's ability to stop an active
+official service. Do not ship until privileged handoff and connectivity
+policy are resolved. Original stable legacy build unaffected. A separate
+resource-less compiled candidate executes exact deny/unknown CLI probes in
+CI, never real service changes. Direct execution of an extracted core or
+a modified/old binary is NOT solved by client-side licensing; server-side
+control of a proprietary service or a different product boundary would be
+necessary for strong enforcement against local owners. No DRM guarantee.
+
+Card input now matches the 25-character issuer format and is canonicalized
+before enrollment. Explicit replacement cancellation leaves previous
+context intact; confirmed valid replacement resets it. Stale load-error
+messages no longer override current online results. Connection/preparation
+refuse concurrent license management; restore remains available. New
+candidate compile/CLI probes and card format tests pending. Remaining:
+real licensed UI/PG/TPM/campus acceptance, ongoing-session enforcement,
+authenticated distribution, P5 capacity. No production release.

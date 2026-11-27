@@ -64,6 +64,7 @@ internal sealed class DesktopLicenseGate : IDisposable
         Task<bool> call=coordinator.VerifyAsync(op);
         bool ok=call!=null&&await call;
         if(closed||epoch!=generation)return false;
+        localMessage=null;
         renewal.Record(coordinator.Phase,clock.ElapsedMilliseconds);
         if(!ok||!Allowed)return false;
         activated=true;localMessage=null;
@@ -123,23 +124,26 @@ internal sealed class DesktopLicenseGate : IDisposable
         int epoch=generation;
         try
         {
-            if(replace){if(!interactive)return false;Reset();}
+            if(replace&&!interactive)return false;
             if(coordinator==null&&!replace)
             {
                 try{await LoadSavedAsync(epoch);}
                 catch(Exception){localMessage="已保存卡密或设备记录不可用，原记录未改动。请核对设备身份或手动输入卡密。";}
                 if(closed||epoch!=generation)return false;
             }
-            if(coordinator==null)
+            if(coordinator==null||replace)
             {
                 if(!interactive)return false;
                 using(var dialog=new ActivationDialog())
                 {
                     if(dialog.ShowDialog(owner)!=DialogResult.OK||closed||epoch!=generation)return false;
-                    byte[] card=new UTF8Encoding(false,true).GetBytes(dialog.Card);
+                    byte[] card;
+                    if(!LicenseCardInput.TryNormalize(dialog.Card,out card))return false;
+                    // Cancel or malformed input does not destroy the
+                    // prior context. Only confirmed valid replacement does.
+                    if(replace)Reset();
                     try
                     {
-                        if(card.Length==0||card.Length>100)return false;
                         var sdk=CreateClient();
                         bool first=dialog.FirstEnrollment,remember=dialog.Remember;
                         DeviceKeyPolicy policy=dialog.TpmRequired?DeviceKeyPolicy.TpmRequired:DeviceKeyPolicy.Software;
@@ -228,7 +232,13 @@ internal sealed class DesktopLicenseGate : IDisposable
             var actions=new FlowLayoutPanel{Dock=DockStyle.Fill,AutoSize=true,FlowDirection=FlowDirection.RightToLeft};
             var ok=new Button{Text="验证授权",AutoSize=true};var cancel=new Button{Text="取消",DialogResult=DialogResult.Cancel,AutoSize=true};
             ok.Click+=delegate{
-                if(String.IsNullOrWhiteSpace(card.Text))return;
+                byte[] normalized;
+                if(!LicenseCardInput.TryNormalize(card.Text,out normalized))
+                {
+                    MessageBox.Show(this,"请输入完整的 25 位授权卡密。","软件授权",MessageBoxButtons.OK,MessageBoxIcon.Warning);
+                    return;
+                }
+                Array.Clear(normalized,0,normalized.Length);
                 if(enroll.Checked&&MessageBox.Show(this,"确认这是首次登记？已有设备身份不得重新登记。","设备登记",MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes)return;
                 DialogResult=DialogResult.OK;Close();
             };

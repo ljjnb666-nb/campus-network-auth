@@ -41,7 +41,17 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        if (args.Length == 1 && args[0] == "--admin-prepare") return ChangeService(true);
+        if (args.Length == 1 && args[0] == "--admin-prepare")
+        {
+#if CHEZHI_LICENSED
+            // A process-local online grant is not a cross-process proof.
+            // Until the privileged handoff is independently validated,
+            // the licensed candidate must not stop the official service.
+            return 28;
+#else
+            return ChangeService(true);
+#endif
+        }
         if (args.Length == 1 && args[0] == "--admin-restore") return ChangeService(false);
         if (args.Length == 1 && args[0] == "--self-test-logic") return LogicTests();
         if (args.Length == 2 && args[0] == "--self-test-boot-sequence")
@@ -548,6 +558,9 @@ internal static class Program
 
     private static int ChangeService(bool prepare)
     {
+#if CHEZHI_LICENSED
+        if (prepare) return 28;
+#endif
         try
         {
             var principal = new WindowsPrincipal(WindowsIdentity.GetCurrent());
@@ -3748,6 +3761,9 @@ internal static class Program
         private async Task ConnectCommandAsync()
         {
             if (!CurrentPermissions().CanConnect) return;
+#if CHEZHI_LICENSED
+            if (licenseGate.Busy) { SetStatus("授权操作正在进行，请稍后。", ToneWarn); return; }
+#endif
             string invalid = ValidateAuthInput(account.Text, password.Text, channel.SelectedIndex + 1);
             if (invalid != null) { SetStatus(invalid, ToneWarn); return; }
             retryTimer.Stop();
@@ -4500,6 +4516,9 @@ internal static class Program
         {
             var rights = CurrentPermissions();
             if (exitRequested || (fromConnect ? !rights.CanPrepareForConnection : !rights.CanSwitch)) return false;
+#if CHEZHI_LICENSED
+            if (forPrepare && licenseGate.Busy) return false;
+#endif
             if (!fromConnect) { taskGeneration++; state.TrySetAuth(ConnectionStates.AuthState.Idle, "handoff request"); }
             if (!JournalAllowsNewAction()) return false;
             int generation = taskGeneration;
@@ -4534,6 +4553,13 @@ internal static class Program
                 }
                 if (decision != ConnectionStates.HandoffDecision.NeedStopService && decision != ConnectionStates.HandoffDecision.NeedStartService)
                 { SetHandoff(ConnectionStates.HandoffState.Blocked, HandoffMessage(decision), ToneWarn); return false; }
+#if CHEZHI_LICENSED
+                if (forPrepare)
+                {
+                    SetHandoff(ConnectionStates.HandoffState.Blocked, "授权候选版尚未验收管理员服务切换，暂不停止天翼后台服务。恢复天翼仍可用。", ToneWarn);
+                    return false;
+                }
+#endif
                 string instructions = forPrepare
                     ? "天翼客户端已退出，但后台服务仍运行。请确认已断开天翼并关闭移动热点。继续将请求管理员权限停止后台服务。" +
                         (fromConnect ? " 准备成功后将自动继续本次认证。" : "")
