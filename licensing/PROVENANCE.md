@@ -103,3 +103,24 @@ not a licensed release. No historical artifacts removed, no stable main
 change. Full positive licensed UI, actual server, TPM, elevated handoff
 and bootstrap, existing-session policy, installation trust and direct
 core threat model remain release blockers. Latest tests pending.
+
+## Positive desktop licensing fixture
+Exact prior 00f908d CI 46017274967: 4/4 PASS, including actual negative
+WinForms fixture and non-executable artifact upload. New independent
+Windows job checks out public SDK 57369b9097534530db1b018e2ff9adbaa24c6578,
+verifies all five vendored source digests against it, rebuilds the native
+DLL and loopback fixture, compiles actual DesktopLicenseGate plus modal
+ActivationDialog, and runs real CNG/DPAPI/HTTPS tests. Fixture factories,
+dialog automation and forced renewal scheduling compile only with
+CHEZHI_LICENSE_UI_TEST (and SDK/card test flags); production-shaped
+candidate build has none of those flags. No fake grant. Tests cover
+activation on a pre-enrolled fixture, user-consented save, cancellation
+of replacement, fresh validation after invalidation, actual renewal,
+denied replacement preserves saved record, new gate instance reload
+and validation, explicit forget and unchanged device. Hosted runner only,
+random isolated registry profile, cleanup; no production trust/root
+store changes, no core or SCM calls. No executable artifact. Exact
+new CI pending. This is not full MainWindow positive authentication,
+first enrollment confirmation dialog, actual PostgreSQL, reboot, TPM,
+or real campus handoff. Privileged prepare stays disabled; production
+release gates unchanged.

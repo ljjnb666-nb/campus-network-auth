@@ -19,6 +19,39 @@ internal sealed class DesktopLicenseGate : IDisposable
     private byte[] pendingCard,pendingFingerprint;
     private readonly System.Diagnostics.Stopwatch clock=System.Diagnostics.Stopwatch.StartNew();
     private readonly LicenseRenewalSchedule renewal=new LicenseRenewalSchedule();
+#if CHEZHI_LICENSE_UI_TEST
+    private readonly Guid fixture;
+    internal string FixtureCard;
+    internal bool FixtureRemember,FixtureCancel;
+    internal int FixtureDialogCount;
+    internal DesktopLicenseGate(Guid id)
+    {
+        if(id==Guid.Empty)throw new ArgumentException("fixture");
+        fixture=id;
+    }
+    internal void FixtureRenewDue()
+    {
+        renewal.Record(AuthorizationPhase.Authorized,clock.ElapsedMilliseconds-120000);
+    }
+#else
+    internal DesktopLicenseGate() {}
+#endif
+    private DeviceEnrollment Enrollment()
+    {
+#if CHEZHI_LICENSE_UI_TEST
+        return DeviceEnrollment.Fixture(fixture);
+#else
+        return new DeviceEnrollment();
+#endif
+    }
+    private LicenseCardStore CardStore()
+    {
+#if CHEZHI_LICENSE_UI_TEST
+        return LicenseCardStore.Fixture(fixture);
+#else
+        return new LicenseCardStore();
+#endif
+    }
     internal bool Busy {get{return busy;}}
     internal bool Allowed {get{return !closed && coordinator!=null && coordinator.CanStartProtectedOperation;}}
     internal void Invalidate()
@@ -50,7 +83,7 @@ internal sealed class DesktopLicenseGate : IDisposable
         byte[] copy=(byte[])pendingCard.Clone(),fp=(byte[])pendingFingerprint.Clone();
         try
         {
-            await Task.Run(delegate{new LicenseCardStore().Save(copy,fp,CandidateTrust.Scope);});
+            await Task.Run(delegate{CardStore().Save(copy,fp,CandidateTrust.Scope);});
             if(!closed&&epoch==generation)ClearPendingSave();
         }
         catch(Exception)
@@ -99,8 +132,8 @@ internal sealed class DesktopLicenseGate : IDisposable
             var result=new Loaded();
             try
             {
-                result.Key=new DeviceEnrollment().OpenExisting();
-                result.Card=new LicenseCardStore().Load(result.Key.Fingerprint,CandidateTrust.Scope);
+                result.Key=Enrollment().OpenExisting();
+                result.Card=CardStore().Load(result.Key.Fingerprint,CandidateTrust.Scope);
                 return result;
             }
             catch{result.Dispose();throw;}
@@ -136,6 +169,12 @@ internal sealed class DesktopLicenseGate : IDisposable
                 if(!interactive)return false;
                 using(var dialog=new ActivationDialog())
                 {
+#if CHEZHI_LICENSE_UI_TEST
+                    dialog.Shown+=delegate{
+                        FixtureDialogCount++;
+                        dialog.BeginInvoke((Action)delegate{dialog.FixtureFill(FixtureCard,FixtureRemember,FixtureCancel);});
+                    };
+#endif
                     if(dialog.ShowDialog(owner)!=DialogResult.OK||closed||epoch!=generation)return false;
                     byte[] card;
                     if(!LicenseCardInput.TryNormalize(dialog.Card,out card))return false;
@@ -148,7 +187,7 @@ internal sealed class DesktopLicenseGate : IDisposable
                         bool first=dialog.FirstEnrollment,remember=dialog.Remember;
                         DeviceKeyPolicy policy=dialog.TpmRequired?DeviceKeyPolicy.TpmRequired:DeviceKeyPolicy.Software;
                         WindowsDeviceKey key=await Task.Run(delegate{
-                            var enrollment=new DeviceEnrollment();
+                            var enrollment=Enrollment();
                             return first?enrollment.EnrollFirst(policy):enrollment.OpenExisting();
                         });
                         if(closed||epoch!=generation){key.Dispose();return false;}
@@ -170,7 +209,7 @@ internal sealed class DesktopLicenseGate : IDisposable
     {
         if(closed||busy)return false;
         busy=true;Reset();
-        try{await Task.Run(delegate{new LicenseCardStore().Forget();});localMessage="已清除本地卡密，设备身份未删除。";return !closed;}
+        try{await Task.Run(delegate{CardStore().Forget();});localMessage="已清除本地卡密，设备身份未删除。";return !closed;}
         catch(Exception){localMessage="清除本地卡密失败，请稍后重试。";return false;}
         finally{busy=false;}
     }
@@ -204,6 +243,16 @@ internal sealed class DesktopLicenseGate : IDisposable
         internal bool FirstEnrollment {get{return enroll.Checked;}}
         internal bool TpmRequired {get{return tpm.Checked;}}
         internal void ClearCard(){card.Clear();}
+#if CHEZHI_LICENSE_UI_TEST
+        internal void FixtureFill(string value,bool save,bool cancel)
+        {
+            if(cancel){DialogResult=DialogResult.Cancel;Close();return;}
+            card.Text=value;remember.Checked=save;
+            // Exercise the actual confirmation button and format validation;
+            // enrollment is prepared in the isolated fixture beforehand.
+            AcceptButton.PerformClick();
+        }
+#endif
         internal ActivationDialog()
         {
             Text="澈知科技 · 软件授权";
