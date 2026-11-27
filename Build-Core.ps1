@@ -4,7 +4,8 @@
     [string]$Gcc = '',
     [string]$Gxx = '',
     [string]$WorkDirectory = '',
-    [string]$OutputDirectory = ''
+    [string]$OutputDirectory = '',
+    [string]$RoslynCompilerPath = ''
 )
 $ErrorActionPreference = 'Stop'
 
@@ -48,8 +49,8 @@ $Gxx = Find-Tool $Gxx 'g++.exe' @('C:\msys64\ucrt64\bin\g++.exe')
 # PATH 里排在前的 GNU tar 会把 "D:\..." 盘符当成远程主机而失败
 $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
 if (-not (Test-Path -LiteralPath $tar -PathType Leaf)) { $tar = Find-Tool '' 'tar.exe' @() }
-$compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw '找不到 .NET Framework C# 编译器。' }
+$guiCompiler = & (Join-Path $PSScriptRoot 'scripts\Get-GuiCompiler.ps1') -CompilerPath $RoslynCompilerPath
+$compiler = $guiCompiler.Path
 
 $project = Join-Path $PSScriptRoot '认证核心源码\esurfingclient\app'
 foreach ($path in @((Join-Path $project 'CMakeLists.txt'), (Join-Path $PSScriptRoot 'Program.cs'), (Join-Path $PSScriptRoot 'CredentialStore.cs'), (Join-Path $PSScriptRoot 'ConnectionStates.cs'), (Join-Path $PSScriptRoot 'ServiceIdentity.cs'), (Join-Path $PSScriptRoot 'ServiceJournal.cs'), (Join-Path $PSScriptRoot 'chezhi.ico'), (Join-Path $PSScriptRoot 'Licenses.txt'), (Join-Path $PSScriptRoot 'app.manifest'), (Join-Path $PSScriptRoot 'app.config'))) {
@@ -115,8 +116,8 @@ $program = [regex]::Replace($program, $pattern, ('private const string CoreHash 
 $generatedProgram = Join-Path $work 'Program.generated.cs'
 Set-Content -LiteralPath $generatedProgram -Value $program -Encoding UTF8
 $result = Join-Path $build '澈知科技-源码重建.exe'
-$refs = @('/r:System.dll','/r:System.Core.dll','/r:System.Drawing.dll','/r:System.Windows.Forms.dll','/r:System.Web.Extensions.dll','/r:System.ServiceProcess.dll','/r:System.Management.dll','/r:System.Security.dll')
-$arguments = @('/nologo','/target:winexe','/optimize+','/platform:anycpu',('/win32icon:' + (Join-Path $PSScriptRoot 'chezhi.ico')),('/win32manifest:' + (Join-Path $PSScriptRoot 'app.manifest')),('/out:' + $result),('/resource:' + $core + ',Chezhi.AuthCore'),('/resource:' + (Join-Path $PSScriptRoot 'Licenses.txt') + ',Chezhi.Licenses'))
+$refs = $guiCompiler.References
+$arguments = $guiCompiler.Options + @("/pathmap:$PSScriptRoot=C:\rc-source,$work=C:\rc-generated",('/win32icon:' + (Join-Path $PSScriptRoot 'chezhi.ico')),('/win32manifest:' + (Join-Path $PSScriptRoot 'app.manifest')),('/out:' + $result),('/resource:' + $core + ',Chezhi.AuthCore'),('/resource:' + (Join-Path $PSScriptRoot 'Licenses.txt') + ',Chezhi.Licenses'))
 & $compiler $arguments $refs $generatedProgram (Join-Path $PSScriptRoot 'CredentialStore.cs') (Join-Path $PSScriptRoot 'ConnectionStates.cs') (Join-Path $PSScriptRoot 'ServiceIdentity.cs') (Join-Path $PSScriptRoot 'ServiceJournal.cs')
 if ($LASTEXITCODE -ne 0) { throw '桌面程序编译失败。' }
 [System.IO.File]::Copy($core, (Join-Path $build '认证核心-源码重建.exe'), $false)
@@ -153,6 +154,7 @@ $manifest = [ordered]@{
     builtAtUtc = (Get-Date).ToUniversalTime().ToString('o')
     toolchain  = $toolVersions
     cscPath    = $compiler
+    guiCompiler = $guiCompiler.Evidence
     dependencies = [ordered]@{
         curl = [ordered]@{
             version = $curlVersion

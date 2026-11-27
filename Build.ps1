@@ -1,11 +1,12 @@
 ﻿param(
     # 认证核心 exe 路径。缺省依次尝试仓库根目录 认证核心.exe、build-core\认证核心-源码重建.exe
-    [string]$CorePath = ''
+    [string]$CorePath = '',
+    [string]$RoslynCompilerPath = ''
 )
 $ErrorActionPreference = 'Stop'
 
-$compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw '找不到 .NET Framework C# 编译器（csc.exe）。' }
+$guiCompiler = & (Join-Path $PSScriptRoot 'scripts\Get-GuiCompiler.ps1') -CompilerPath $RoslynCompilerPath
+$compiler = $guiCompiler.Path
 
 $programPath = Join-Path $PSScriptRoot 'Program.cs'
 foreach ($path in @($programPath, (Join-Path $PSScriptRoot 'CredentialStore.cs'), (Join-Path $PSScriptRoot 'ConnectionStates.cs'), (Join-Path $PSScriptRoot 'ServiceIdentity.cs'), (Join-Path $PSScriptRoot 'ServiceJournal.cs'), (Join-Path $PSScriptRoot 'chezhi.ico'), (Join-Path $PSScriptRoot 'Licenses.txt'), (Join-Path $PSScriptRoot 'app.manifest'), (Join-Path $PSScriptRoot 'app.config'))) {
@@ -34,8 +35,8 @@ $tmpOut = Join-Path $PSScriptRoot 'build-core\澈知科技-new.exe'
 [void](New-Item -ItemType Directory -Path (Join-Path $PSScriptRoot 'build-core') -Force)
 if (Test-Path -LiteralPath $tmpOut) { Remove-Item -LiteralPath $tmpOut -Force }
 
-$refs = @('/r:System.dll','/r:System.Core.dll','/r:System.Drawing.dll','/r:System.Windows.Forms.dll','/r:System.Web.Extensions.dll','/r:System.ServiceProcess.dll','/r:System.Management.dll','/r:System.Security.dll')
-$arguments = @('/nologo','/target:winexe','/optimize+','/platform:anycpu',('/win32icon:' + (Join-Path $PSScriptRoot 'chezhi.ico')),('/win32manifest:' + (Join-Path $PSScriptRoot 'app.manifest')),('/out:' + $tmpOut),('/resource:' + $CorePath + ',Chezhi.AuthCore'),('/resource:' + (Join-Path $PSScriptRoot 'Licenses.txt') + ',Chezhi.Licenses'))
+$refs = $guiCompiler.References
+$arguments = $guiCompiler.Options + @("/pathmap:$PSScriptRoot=C:\rc-source",('/win32icon:' + (Join-Path $PSScriptRoot 'chezhi.ico')),('/win32manifest:' + (Join-Path $PSScriptRoot 'app.manifest')),('/out:' + $tmpOut),('/resource:' + $CorePath + ',Chezhi.AuthCore'),('/resource:' + (Join-Path $PSScriptRoot 'Licenses.txt') + ',Chezhi.Licenses'))
 & $compiler $arguments $refs $programPath (Join-Path $PSScriptRoot 'CredentialStore.cs') (Join-Path $PSScriptRoot 'ConnectionStates.cs') (Join-Path $PSScriptRoot 'ServiceIdentity.cs') (Join-Path $PSScriptRoot 'ServiceJournal.cs')
 if ($LASTEXITCODE -ne 0) { throw '编译失败。' }
 
@@ -57,6 +58,7 @@ $manifest = [ordered]@{
     gitCommit  = $gitSha
     builtAtUtc = (Get-Date).ToUniversalTime().ToString('o')
     compiler   = $compiler
+    guiCompiler = $guiCompiler.Evidence
     core       = [ordered]@{ path = $CorePath; sha256 = $actual }
     outputs    = @([ordered]@{ file = '澈知科技.exe'; sha256 = (Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash; bytes = (Get-Item -LiteralPath $out).Length })
 }
