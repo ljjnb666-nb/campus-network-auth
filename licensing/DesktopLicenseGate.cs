@@ -16,10 +16,15 @@ internal sealed class DesktopLicenseGate : IDisposable
     private bool closed,busy,activated;
     private int generation;
     private string localMessage;
+    private byte[] pendingCard,pendingFingerprint;
+    private readonly System.Diagnostics.Stopwatch clock=System.Diagnostics.Stopwatch.StartNew();
+    private readonly LicenseRenewalSchedule renewal=new LicenseRenewalSchedule();
+    internal bool Busy {get{return busy;}}
     internal bool Allowed {get{return !closed && coordinator!=null && coordinator.CanStartProtectedOperation;}}
     internal void Invalidate()
     {
         generation++;
+        renewal.Invalidate(clock.ElapsedMilliseconds);
         if(coordinator!=null){coordinator.NetworkChanged(false);coordinator.NetworkChanged(true);}
     }
     private static NativeLicenseClient CreateClient()
@@ -30,7 +35,55 @@ internal sealed class DesktopLicenseGate : IDisposable
     private void Reset()
     {
         if(coordinator!=null){coordinator.Dispose();coordinator=null;}
-        activated=false;
+        activated=false;renewal.Reset();ClearPendingSave();
+    }
+    private void ClearPendingSave()
+    {
+        if(pendingCard!=null){Array.Clear(pendingCard,0,pendingCard.Length);pendingCard=null;}
+        pendingFingerprint=null;
+    }
+    private async Task SaveAfterSuccessAsync(int epoch)
+    {
+        if(closed||epoch!=generation||!Allowed||pendingCard==null)return;
+        // The worker owns independent bytes: Dispose/Reset can clear the
+        // pending buffer without racing a DPAPI operation already begun.
+        byte[] copy=(byte[])pendingCard.Clone(),fp=(byte[])pendingFingerprint.Clone();
+        try
+        {
+            await Task.Run(delegate{new LicenseCardStore().Save(copy,fp,CandidateTrust.Scope);});
+            if(!closed&&epoch==generation)ClearPendingSave();
+        }
+        catch(Exception)
+        {
+            if(!closed&&epoch==generation)localMessage="授权已验证，但卡密保存失败，将在下次成功验证后重试。";
+        }
+        finally{Array.Clear(copy,0,copy.Length);}
+    }
+    private async Task<bool> CheckOnlineAsync(LicenseOperation op,int epoch)
+    {
+        Task<bool> call=coordinator.VerifyAsync(op);
+        bool ok=call!=null&&await call;
+        if(closed||epoch!=generation)return false;
+        renewal.Record(coordinator.Phase,clock.ElapsedMilliseconds);
+        if(!ok||!Allowed)return false;
+        activated=true;localMessage=null;
+        await SaveAfterSuccessAsync(epoch);
+        return !closed&&epoch==generation&&Allowed;
+    }
+    // Only the active-session timer calls this. No dialog, enrollment or
+    // activation attempt. The state machine, not the timer, grants admission.
+    internal async Task<bool> RenewIfDueAsync()
+    {
+        if(closed||busy||!activated||coordinator==null||!renewal.Due(clock.ElapsedMilliseconds))return false;
+        busy=true;localMessage=null;
+        int epoch=generation;
+        try{await CheckOnlineAsync(LicenseOperation.Renew,epoch);return true;}
+        catch(Exception)
+        {
+            if(!closed&&epoch==generation)renewal.Reset();
+            return true;
+        }
+        finally{busy=false;}
     }
     private sealed class Loaded : IDisposable
     {
@@ -98,24 +151,13 @@ internal sealed class DesktopLicenseGate : IDisposable
                         byte[] fingerprint=key.Fingerprint;
                         try{coordinator=new LicenseCoordinator(sdk,key,card);}
                         catch{key.Dispose();throw;}
-                        Task<bool> call=coordinator.VerifyAsync(LicenseOperation.Activate);
-                        bool ok=call!=null&&await call;
-                        if(closed||epoch!=generation||!ok||!Allowed)return false;
-                        activated=true;localMessage=null;
-                        if(remember)
-                        {
-                            try{await Task.Run(delegate{new LicenseCardStore().Save(card,fingerprint,CandidateTrust.Scope);});}
-                            catch(Exception){localMessage="授权已验证，但卡密保存失败。本次运行仍可使用。";}
-                        }
-                        return !closed&&epoch==generation&&Allowed;
+                        if(remember){pendingCard=(byte[])card.Clone();pendingFingerprint=fingerprint;}
+                        return await CheckOnlineAsync(LicenseOperation.Activate,epoch);
                     }
                     finally{Array.Clear(card,0,card.Length);dialog.ClearCard();}
                 }
             }
-            Task<bool> verified=coordinator.VerifyAsync(activated?LicenseOperation.Validate:LicenseOperation.Activate);
-            bool valid=verified!=null&&await verified;
-            if(closed||epoch!=generation||!valid||!Allowed)return false;
-            activated=true;return true;
+            return await CheckOnlineAsync(activated?LicenseOperation.Validate:LicenseOperation.Activate,epoch);
         }
         catch(Exception){return false;}
         finally{busy=false;}

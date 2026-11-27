@@ -25,3 +25,30 @@ open. Runtime/UI tests still required.
 Prior CI 46012569784: candidate x64 compile success, Linux/macOS audits
 success; synthetic SBOM failed due to GitHub public API rate limit at
 schema fetch; Windows job still running at verification time.
+
+## Renewal and consent retry candidate
+Prior 46013225140: actual x64 compile and DPAPI test steps passed; original
+offline UI and lifecycle/stress (100 each), Linux/macOS and synthetic SBOM
+passed; Windows full job incomplete at inspection. Existing UI tests exercise
+the legacy build, not the licensed candidate.
+
+Provisional policy: renew an established active session every 120 seconds,
+temporary failure retry no sooner than 60 seconds, denial/security/local/
+recovery/stopped states disable periodic retries. Scheduler is not a grant.
+No automatic activation or enrollment from timer. Existing running session is
+NOT automatically terminated on loss/denial/expiry; warning only and all new
+connection/preparation/retry attempts need fresh online proof. This is a
+non-release policy choice pending owner review, actual campus recovery tests
+and a decision about ongoing-session enforcement. Server denial is generic,
+not proof of a specific revocation. Network/power/stop invalidates outstanding
+grant and result; re-observe local handoff after online prelaunch await.
+Separate tray status is available even while connected.
+
+Remember consent and card/fingerprint remain in memory for the same fixed
+context after unsuccessful initial activation; next verified success saves.
+Reset/replacement/forget/dispose clear pending buffer. Save already initiated
+after verified success can finish during shutdown/invalidation; independent
+worker-owned copy is wiped afterward. No claim of secure erasure of all
+managed/native copies. No card persistence on failed verification. A failed
+save retries only on later verified success. Current Windows test is a
+scheduler unit regression, not full licensed GUI or server acceptance.

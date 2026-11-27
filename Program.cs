@@ -1898,7 +1898,11 @@ internal static class Program
             trayStop = trayMenu.Items.Add("停止认证", null, delegate { ShowFromTray(); StopClicked(stop, EventArgs.Empty); });
             trayMenu.Items.Add("清除已保存账号", null, delegate { ShowFromTray(); ForgetCredentials(); });
 #if CHEZHI_LICENSED
-            trayMenu.Items.Add("授权状态 / 更换卡密", null, async delegate {
+            trayMenu.Items.Add("查看授权状态", null, delegate {
+                ShowFromTray();
+                MessageBox.Show(this, licenseGate.Message, "软件授权", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            });
+            trayMenu.Items.Add("更换授权卡密", null, async delegate {
                 ShowFromTray();
                 if (serviceBusy || connectCheckPending || activeTask != null || exitRequested)
                 { SetStatus("请先停止认证及待处理连接，再更换授权卡密。", ToneWarn); return; }
@@ -1984,6 +1988,22 @@ internal static class Program
                 if (IsDisposed || Disposing) return;
                 // Expiry must not wait behind a slow WMI/SCM observation.
                 ExpireNetworkEvidence(evidenceClock.ElapsedMilliseconds);
+#if CHEZHI_LICENSED
+                // Existing session remains usable for safe recovery; no
+                // fresh protected operation may bypass the online gate.
+                if (!isSelfTest && !serviceBusy && !connectCheckPending && !stopping &&
+                    !exitRequested && !powerSuspended && activeTask != null &&
+                    running != null && !Object.ReferenceEquals(running, completedProcess))
+                {
+                    int licenseEpoch = taskGeneration;
+                    Process licenseProcess = running;
+                    bool attempted = await licenseGate.RenewIfDueAsync();
+                    if (IsDisposed || Disposing || resourcesDisposed) return;
+                    if (attempted && licenseEpoch == taskGeneration && Object.ReferenceEquals(running, licenseProcess) &&
+                        !licenseGate.Allowed && !stopping && !userStopped && !exitRequested && !serviceBusy && !connectCheckPending)
+                        SetStatus(licenseGate.Message + " 当前会话暂不强制中断；新连接需重新验证。", ToneWarn);
+                }
+#endif
                 if (pendingServiceChild != null) await PollTimedOutServiceAsync();
                 else if (!isSelfTest && !serviceBusy && !connectCheckPending && !retryTimer.Enabled && activeTask == null)
                     await RunPreConnectCheckAsync(false, true);
@@ -3845,6 +3865,17 @@ internal static class Program
                     return;
                 }
 #endif
+#if CHEZHI_LICENSED
+                // Authorization awaited network I/O after the previous
+                // observation. Re-observe local handoff before launch.
+                observation = await Task.Run((Func<HandoffObservation>)ObserveHandoff);
+                if (HandoffCancelled(generation, true)) return;
+                if (observation.Decide(ConnectionStates.HandoffIntent.Connect) != ConnectionStates.HandoffDecision.Ready || !licenseGate.Allowed)
+                {
+                    SetHandoff(ConnectionStates.HandoffState.Blocked, "授权或天翼环境已变化，请重新检查；可恢复天翼。", ToneWarn);
+                    return;
+                }
+#endif
                 // Keep preflight ownership until the synchronous launch has returned.
                 state.SetHandoff(ConnectionStates.HandoffState.None);
                 StartAuthProcess(isSelfTest && offlineLifecycleProbe ? "--ephemeral-probe" : "--ephemeral-auth");
@@ -4008,6 +4039,9 @@ internal static class Program
                     System.Threading.Interlocked.Exchange(ref networkChangeQueued, 0);
                     if (IsDisposed || Disposing || resourcesDisposed) return;
                     lastIdleObservation = null;
+#if CHEZHI_LICENSED
+                    licenseGate.Invalidate();
+#endif
                     InvalidateNetworkEvidence("检测到网络接口变化，当前可达性待重新确认。");
                     // Do not start/restart a core, change a service or revoke an authorized handoff.
                     // Existing retry rules and idle observation timer remain responsible.
@@ -4310,6 +4344,9 @@ internal static class Program
         {
             if (serviceBusy) { SetStatus("正在进行系统服务切换，完成后才能停止或退出。", ToneWarn); return; }
             // Cancellation intent is independent of process existence and invalidates outstanding checks.
+#if CHEZHI_LICENSED
+            licenseGate.Invalidate();
+#endif
             userStopped = true; taskGeneration++; retryTimer.Stop(); activeTask = null;
             state.SetNetwork(ConnectionStates.NetworkState.Unknown); UpdateConnectionPill();
             if (running == null || running.HasExited)
