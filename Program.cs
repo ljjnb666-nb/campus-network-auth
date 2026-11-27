@@ -1592,6 +1592,8 @@ internal static class Program
         private readonly bool isSelfTest;
 #if CHEZHI_LICENSED
         private readonly DesktopLicenseGate licenseGate = new DesktopLicenseGate();
+        private bool licenseManagementPending;
+        private ToolStripItem trayLicenseReplace, trayLicenseForget;
 #endif
         private Icon appIcon;
         private bool resourcesDisposed;
@@ -1961,24 +1963,11 @@ internal static class Program
                 ShowFromTray();
                 MessageBox.Show(this, licenseGate.Message, "软件授权", MessageBoxButtons.OK, MessageBoxIcon.Information);
             });
-            trayMenu.Items.Add("更换授权卡密", null, async delegate {
-                ShowFromTray();
-                if (serviceBusy || connectCheckPending || activeTask != null || exitRequested)
-                { SetStatus("请先停止认证及待处理连接，再更换授权卡密。", ToneWarn); return; }
-                if (MessageBox.Show(this, licenseGate.Message + "\n\n是否输入或更换授权卡密？", "软件授权",
-                    MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
-                {
-                    bool ok = await licenseGate.VerifyAsync(this, true, true);
-                    if (!IsDisposed && !Disposing) SetStatus(licenseGate.Message, ok ? ToneOk : ToneWarn);
-                }
+            trayLicenseReplace = trayMenu.Items.Add("更换授权卡密", null, async delegate {
+                ShowFromTray(); await ManageLicenseAsync(false);
             });
-            trayMenu.Items.Add("清除已保存授权卡密", null, async delegate {
-                ShowFromTray();
-                if (serviceBusy || connectCheckPending || activeTask != null || exitRequested) return;
-                if (MessageBox.Show(this, "仅清除本地卡密，不解绑服务器或删除设备密钥。确定？", "软件授权",
-                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-                bool ok = await licenseGate.ForgetAsync();
-                if (!IsDisposed && !Disposing) SetStatus(licenseGate.Message, ok ? ToneInfo : ToneWarn);
+            trayLicenseForget = trayMenu.Items.Add("清除已保存授权卡密", null, async delegate {
+                ShowFromTray(); await ManageLicenseAsync(true);
             });
 #endif
             trayMenu.Items.Add("导出诊断信息", null, delegate { ShowFromTray(); ExportDiagnostics(); });
@@ -2974,6 +2963,21 @@ internal static class Program
         {
             if (!isSelfTest || licenseGate.Allowed || licenseGate.Busy ||
                 !CurrentPermissions().CanSwitch || !restore.Enabled) return false;
+            if (!LicenseManagementContextValid()) return false;
+            licenseManagementPending = true;
+            RefreshOperationPermissions();
+            if (connect.Enabled || prepare.Enabled || !restore.Enabled ||
+                trayLicenseReplace.Enabled || trayLicenseForget.Enabled) return false;
+            if (!PumpTaskForTest(ConnectCommandAsync(), 3000) || activeTask != null || running != null) return false;
+            licenseManagementPending = false;
+            RefreshOperationPermissions();
+            if (!trayLicenseReplace.Enabled || !trayLicenseForget.Enabled) return false;
+            powerSuspended = true;
+            if (LicenseManagementContextValid()) return false;
+            RefreshOperationPermissions();
+            if (trayLicenseReplace.Enabled || trayLicenseForget.Enabled) return false;
+            powerSuspended = false;
+            RefreshOperationPermissions();
             activeTask = new AuthTask("dummy-user", "dummy-pass", 1, false);
             userStopped = false;
             bool denied = false;
@@ -3702,12 +3706,59 @@ internal static class Program
                 owned, stopping, force, exitRequested || powerSuspended, userStopped);
         }
 
+#if CHEZHI_LICENSED
+        // A modal confirmation pumps messages. Reserve the management slot
+        // before showing it and recheck the context afterwards.
+        private bool LicenseManagementContextValid()
+        {
+            return !resourcesDisposed && !IsDisposed && !Disposing && !exitRequested &&
+                !powerSuspended && !serviceBusy && !connectCheckPending &&
+                !retryTimer.Enabled && !stopping && activeTask == null &&
+                (running == null || Object.ReferenceEquals(running, completedProcess)) &&
+                !licenseGate.Busy;
+        }
+
+        private async Task ManageLicenseAsync(bool forget)
+        {
+            if (licenseManagementPending || !LicenseManagementContextValid()) return;
+            licenseManagementPending = true;
+            int generation = ++taskGeneration;
+            RefreshOperationPermissions();
+            try
+            {
+                string prompt = forget ? "仅清除本地卡密，不解绑服务器或删除设备密钥。确定？" :
+                    licenseGate.Message + "\n\n是否输入或更换授权卡密？";
+                if (MessageBox.Show(this, prompt, "软件授权", MessageBoxButtons.YesNo,
+                    forget ? MessageBoxIcon.Warning : MessageBoxIcon.Information) != DialogResult.Yes) return;
+                if (generation != taskGeneration || !LicenseManagementContextValid()) return;
+                bool ok = forget ? await licenseGate.ForgetAsync() : await licenseGate.VerifyAsync(this, true, true);
+                if (!resourcesDisposed && !IsDisposed && !Disposing && !exitRequested &&
+                    !powerSuspended && generation == taskGeneration)
+                    SetStatus(licenseGate.Message, ok ? (forget ? ToneInfo : ToneOk) : ToneWarn);
+            }
+            finally
+            {
+                licenseManagementPending = false;
+                RefreshOperationPermissions();
+            }
+        }
+#endif
+
         private void RefreshOperationPermissions()
         {
             if (IsDisposed || Disposing || resourcesDisposed) return;
             var rights = CurrentPermissions();
             connect.Enabled = rights.CanConnect;
             prepare.Enabled = restore.Enabled = rights.CanSwitch;
+#if CHEZHI_LICENSED
+            if (licenseManagementPending || licenseGate.Busy)
+            {
+                connect.Enabled = false; prepare.Enabled = false;
+            }
+            bool manage = !licenseManagementPending && LicenseManagementContextValid();
+            if (trayLicenseReplace != null) trayLicenseReplace.Enabled = manage;
+            if (trayLicenseForget != null) trayLicenseForget.Enabled = manage;
+#endif
             stop.Enabled = rights.Stop != ConnectionStates.StopIntent.None;
             switch (rights.Stop)
             {
@@ -3836,7 +3887,7 @@ internal static class Program
         {
             if (!CurrentPermissions().CanConnect) return;
 #if CHEZHI_LICENSED
-            if (licenseGate.Busy) { SetStatus("授权操作正在进行，请稍后。", ToneWarn); return; }
+            if (licenseManagementPending || licenseGate.Busy) { SetStatus("授权操作正在进行，请稍后。", ToneWarn); return; }
 #endif
             string invalid = ValidateAuthInput(account.Text, password.Text, channel.SelectedIndex + 1);
             if (invalid != null) { SetStatus(invalid, ToneWarn); return; }
@@ -4596,7 +4647,7 @@ internal static class Program
             var rights = CurrentPermissions();
             if (exitRequested || (fromConnect ? !rights.CanPrepareForConnection : !rights.CanSwitch)) return false;
 #if CHEZHI_LICENSED
-            if (forPrepare && licenseGate.Busy) return false;
+            if (forPrepare && (licenseManagementPending || licenseGate.Busy)) return false;
 #endif
             if (!fromConnect) { taskGeneration++; state.TrySetAuth(ConnectionStates.AuthState.Idle, "handoff request"); }
             if (!JournalAllowsNewAction()) return false;
