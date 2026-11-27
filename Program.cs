@@ -1897,6 +1897,27 @@ internal static class Program
             trayMenu.Items.Add("打开主窗口", null, delegate { ShowFromTray(); });
             trayStop = trayMenu.Items.Add("停止认证", null, delegate { ShowFromTray(); StopClicked(stop, EventArgs.Empty); });
             trayMenu.Items.Add("清除已保存账号", null, delegate { ShowFromTray(); ForgetCredentials(); });
+#if CHEZHI_LICENSED
+            trayMenu.Items.Add("授权状态 / 更换卡密", null, async delegate {
+                ShowFromTray();
+                if (serviceBusy || connectCheckPending || activeTask != null || exitRequested)
+                { SetStatus("请先停止认证及待处理连接，再更换授权卡密。", ToneWarn); return; }
+                if (MessageBox.Show(this, licenseGate.Message + "\n\n是否输入或更换授权卡密？", "软件授权",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                {
+                    bool ok = await licenseGate.VerifyAsync(this, true, true);
+                    if (!IsDisposed && !Disposing) SetStatus(licenseGate.Message, ok ? ToneOk : ToneWarn);
+                }
+            });
+            trayMenu.Items.Add("清除已保存授权卡密", null, async delegate {
+                ShowFromTray();
+                if (serviceBusy || connectCheckPending || activeTask != null || exitRequested) return;
+                if (MessageBox.Show(this, "仅清除本地卡密，不解绑服务器或删除设备密钥。确定？", "软件授权",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+                bool ok = await licenseGate.ForgetAsync();
+                if (!IsDisposed && !Disposing) SetStatus(licenseGate.Message, ok ? ToneInfo : ToneWarn);
+            });
+#endif
             trayMenu.Items.Add("导出诊断信息", null, delegate { ShowFromTray(); ExportDiagnostics(); });
             trayRecover = trayMenu.Items.Add("核对遗留服务事务", null, async delegate { ShowFromTray(); await RecoverInterruptedJournalAsync(); });
             trayMenu.Opening += delegate { RefreshOperationPermissions(); };

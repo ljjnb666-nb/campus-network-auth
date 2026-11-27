@@ -60,7 +60,7 @@ internal static class CandidateTrust {
     $exe=Join-Path $out 'CheZhi-LicensedCandidate.exe'
     $csc=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
     $refs=@('/r:System.dll','/r:System.Core.dll','/r:System.Drawing.dll','/r:System.Windows.Forms.dll','/r:System.Web.Extensions.dll','/r:System.ServiceProcess.dll','/r:System.Management.dll','/r:System.Security.dll')
-    $sources=@('Program.cs','CredentialStore.cs','ConnectionStates.cs','ServiceIdentity.cs','ServiceJournal.cs','licensing/AuthorizationState.cs','licensing/WindowsDeviceKey.cs','licensing/DeviceEnrollment.cs','licensing/NativeLicenseClient.cs','licensing/LicenseCoordinator.cs','licensing/DesktopLicenseGate.cs') | ForEach-Object { (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot $_)).Path }
+    $sources=@('Program.cs','CredentialStore.cs','ConnectionStates.cs','ServiceIdentity.cs','ServiceJournal.cs','licensing/AuthorizationState.cs','licensing/WindowsDeviceKey.cs','licensing/DeviceEnrollment.cs','licensing/NativeLicenseClient.cs','licensing/LicenseCoordinator.cs','licensing/DesktopLicenseGate.cs','licensing/LicenseCardStore.cs') | ForEach-Object { (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot $_)).Path }
     $arguments=@('/nologo','/target:winexe','/platform:x64','/optimize+','/define:CHEZHI_LICENSED',"/out:$exe",('/win32icon:'+(Join-Path $PSScriptRoot 'chezhi.ico')),('/win32manifest:'+(Join-Path $PSScriptRoot 'app.manifest')),("/resource:$coreCopy"+',Chezhi.AuthCore'),('/resource:'+(Join-Path $PSScriptRoot 'Licenses.txt')+',Chezhi.Licenses'))
     & $csc $arguments $refs $sources $trust
     if ($LASTEXITCODE -ne 0) { throw 'Licensed candidate compile failed' }
