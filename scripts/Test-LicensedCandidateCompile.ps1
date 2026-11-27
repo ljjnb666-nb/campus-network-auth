@@ -81,4 +81,15 @@ internal static class CandidateTrust {
         if ($p.ExitCode -ne 0) { throw "Licensed UI negative fixture failed: $($p.ExitCode)" }
     } finally { $p.Dispose() }
     Write-Host 'PASS licensed negative-only UI/core admission, cancellation, restore availability, tray and disposal (no service/network changes)'
+    # Standalone journal fixture cannot call the production service helper.
+    $journalSources=@('ServiceJournal.cs','CredentialStore.cs','licensing/JournalProcessSmoke.cs') | ForEach-Object {(Resolve-Path -LiteralPath (Join-Path $root $_)).Path}
+    $journalExe=Join-Path $temp 'journal-process-smoke.exe'
+    & $csc /nologo /target:exe /platform:x64 /define:CHEZHI_JOURNAL_PROCESS_TEST "/out:$journalExe" /r:System.dll /r:System.Core.dll /r:System.Security.dll /r:System.Web.Extensions.dll $journalSources
+    if ($LASTEXITCODE -ne 0) { throw 'Journal process fixture compilation failed' }
+    $p=Start-Process -FilePath $journalExe -PassThru -NoNewWindow
+    try {
+        if (-not $p.WaitForExit(45000)) { $p.Kill(); [void]$p.WaitForExit(5000); throw 'Journal process fixture timed out' }
+        if ($p.ExitCode -ne 0) { throw "Journal process fixture failed: $($p.ExitCode)" }
+    } finally { $p.Dispose() }
+    Write-Host 'PASS isolated cross-process journal regression'
 } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
