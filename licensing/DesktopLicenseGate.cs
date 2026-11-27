@@ -22,8 +22,9 @@ internal sealed class DesktopLicenseGate : IDisposable
 #if CHEZHI_LICENSE_UI_TEST
     private readonly Guid fixture;
     internal string FixtureCard;
-    internal bool FixtureRemember,FixtureCancel;
-    internal int FixtureDialogCount;
+    internal bool FixtureRemember,FixtureCancel,FixtureFirst;
+    internal bool FixtureConfirmFirst=true;
+    internal int FixtureDialogCount,FixtureConfirmationCount;
     internal DesktopLicenseGate(Guid id)
     {
         if(id==Guid.Empty)throw new ArgumentException("fixture");
@@ -172,7 +173,8 @@ internal sealed class DesktopLicenseGate : IDisposable
 #if CHEZHI_LICENSE_UI_TEST
                     dialog.Shown+=delegate{
                         FixtureDialogCount++;
-                        dialog.BeginInvoke((Action)delegate{dialog.FixtureFill(FixtureCard,FixtureRemember,FixtureCancel);});
+                        dialog.FixtureConfirmEnrollment=delegate{FixtureConfirmationCount++;return FixtureConfirmFirst;};
+                        dialog.BeginInvoke((Action)delegate{dialog.FixtureFill(FixtureCard,FixtureRemember,FixtureCancel,FixtureFirst);});
                     };
 #endif
                     if(dialog.ShowDialog(owner)!=DialogResult.OK||closed||epoch!=generation)return false;
@@ -244,13 +246,17 @@ internal sealed class DesktopLicenseGate : IDisposable
         internal bool TpmRequired {get{return tpm.Checked;}}
         internal void ClearCard(){card.Clear();}
 #if CHEZHI_LICENSE_UI_TEST
-        internal void FixtureFill(string value,bool save,bool cancel)
+        // Test-only response to the confirmation prompt. The production
+        // binary never contains this delegate or the scripted UI input.
+        internal Func<bool> FixtureConfirmEnrollment;
+        internal void FixtureFill(string value,bool save,bool cancel,bool first)
         {
-            if(cancel){DialogResult=DialogResult.Cancel;Close();return;}
-            card.Text=value;remember.Checked=save;
-            // Exercise the actual confirmation button and format validation;
-            // enrollment is prepared in the isolated fixture beforehand.
+            card.Text=value;remember.Checked=save;enroll.Checked=first;
+            if(cancel){CancelButton.PerformClick();return;}
             AcceptButton.PerformClick();
+            // Declining a confirmation should leave the dialog open.
+            // Close it via the actual cancel button to finish the test.
+            if(DialogResult!=DialogResult.OK&&!IsDisposed)CancelButton.PerformClick();
         }
 #endif
         internal ActivationDialog()
@@ -288,7 +294,14 @@ internal sealed class DesktopLicenseGate : IDisposable
                     return;
                 }
                 Array.Clear(normalized,0,normalized.Length);
-                if(enroll.Checked&&MessageBox.Show(this,"确认这是首次登记？已有设备身份不得重新登记。","设备登记",MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes)return;
+                if(enroll.Checked)
+                {
+#if CHEZHI_LICENSE_UI_TEST
+                    if(FixtureConfirmEnrollment==null||!FixtureConfirmEnrollment())return;
+#else
+                    if(MessageBox.Show(this,"确认这是首次登记？已有设备身份不得重新登记。","设备登记",MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes)return;
+#endif
+                }
                 DialogResult=DialogResult.OK;Close();
             };
             actions.Controls.Add(ok);actions.Controls.Add(cancel);panel.Controls.Add(actions,0,6);
