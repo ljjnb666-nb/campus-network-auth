@@ -124,3 +124,59 @@ new CI pending. This is not full MainWindow positive authentication,
 first enrollment confirmation dialog, actual PostgreSQL, reboot, TPM,
 or real campus handoff. Privileged prepare stays disabled; production
 release gates unchanged.
+
+## P4.4 consolidated evidence review — 2026-11-27
+
+Disposition: **CONDITIONAL_PASS for isolated engineering evidence;
+HOLD for complete integration acceptance, merge and distribution.**
+This is a source/log review, not a separate Windows rerun or an external
+independent security certification. The review covers exact candidate
+`1a163e1f5c9f907ba5ef73919818edcdd1f08933`, base
+`bf7eb8aaf523c953a6b232290eb1adaa546d9ec8`. CI
+[46027343488](https://github.com/ljjnb666-nb/campus-network-auth/actions/runs/46027343488)
+completed 5/5; logs identify the PR merge checkout (35e96a8).
+Earlier sections describe historical increments; this section supersedes
+their pending-test and pre-enrollment statements, not release restrictions.
+
+### Evidence ledger
+
+- Windows build job 140602033984: resource-less x64 licensed compilation,
+  denied privileged prepare/self-test commands, negative MainWindow/core
+  admission, cancellation, restore control availability, tray/disposal,
+  DPAPI roundtrip/tamper/identity/scope mismatch/forget, card format,
+  injected-clock expiry/rollback/revision/denial and retry scheduling.
+- Online job 140602034489: actual modal dialog plus pinned real Go DLL,
+  CNG software provider, DPAPI, signed HTTPS loopback fixture. First
+  enrollment through the dialog, test-only confirmation response, duplicate
+  rejection, save/cancel/reload/forget/manual activation, fresh validation,
+  renewal, denied replacement, dispatch-boundary invalidation/disposal,
+  no stale-result save, pending intent/key exception faults, damaged record,
+  lost/replaced key, same-process concurrent first enrollment.
+  The five vendored source SHA256 comparisons remain mandatory; SDK pin
+  57369b9097534530db1b018e2ff9adbaa24c6578 remains unchanged.
+- Linux 140602034664, macOS 140602034279, synthetic SBOM 140602034436:
+  success. Raw schema retrieval pins upstream commit and retains Git blob
+  checks and negative controls. Windows schema verification also passed.
+- Legacy offline UI/lifecycle suites: 11/11, 100 lifecycle cycles,
+  100 measured UI stress cycles, 256 operation-matrix cases. These are
+  regression evidence for the legacy build, NOT licensed positive UI tests.
+- Workflow artifact 15212807435: upload allowlist is eight non-executable
+  notice/evidence files; legacy source SBOM explicitly incomplete. No
+  licensed release executable or signed release attestation produced.
+
+### Remaining gates (do not waive on CI success)
+
+| Gate | Required closure evidence |
+| --- | --- |
+| P4.4 positive MainWindow integration | Real authorization gate wired into actual main-window lifecycle with inert test core boundary; no real service mutation; observe positive admission, cancellation and stale-result denial. |
+| P4.5 privileged boundary | Preserve denial of licensed privileged prepare until an independently reviewed authorized cross-process design exists. Restore/cleanup remain available. |
+| Connectivity bootstrap and session policy | Explicit owner decision and authorized environment tests; no unauthorized access or automatic disruption. Current established sessions warning-only on expiry/denial; new operations require fresh online proof. |
+| Production trust and distribution | Authenticated trust manifest, protected installation, pinned DLL/dependencies, licensed artifact SBOM, signing and reproducible package validation. Compile-only trust is unusable. |
+| Real service integration | Approved live PostgreSQL-backed licensing environment, actual revocation/expiry, TPM-required failure without downgrade, process restart and recovery; loopback memory fixture is not evidence of these. |
+| Local enforcement scope | Old/modified binaries, extracted core and hostile same-user/admin are outside current client-side boundary; do not claim tamper-proof DRM. |
+| P5/P6 | Capacity, recovery, monitoring and authorized field acceptance before release. |
+
+No code change in this review entry. No merge, release, service action,
+production credentials or real campus test. Preserve Draft until remaining
+gates are explicitly resolved. Subsequent changes require a new exact-head
+CI/evidence review; the above evidence must not be attributed to future SHAs.
