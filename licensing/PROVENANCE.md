@@ -231,3 +231,38 @@ Use an inert test operation for cross-process validation; do not remove
 the prepare refusal or test against a real campus service until the
 authorized environment and policy have been explicitly approved.
 No new handoff protocol is implemented by this entry. P4.5 remains open.
+
+## P4.5 isolated engineering freeze and P4.6 entry
+
+Exact dafe57103e4194adb0276c0cad2c2d707699a381, base
+bf7eb8aaf523c953a6b232290eb1adaa546d9ec8, CI
+[46035724970](https://github.com/ljjnb666-nb/campus-network-auth/actions/runs/46035724970)
+5/5 PASS. Windows job 140630507221 checked out merge ad85fd6; actual
+logs confirm concurrent CLI denial and isolated negative fixture
+entrypoint restrictions, JOURNAL_FAILURE_RECOVERY_PASS cases=25,
+real isolated process termination after pending commit, preserved
+recovery responsibility and rejection of stale cross-process completion.
+Boot evidence is injected, not an actual reboot. The journal tests
+exercise cooperating writers; they do not authenticate hostile peers
+or imply permission to alter a third-party service.
+
+Disposition: freeze the defined P4.5 fail-closed and recovery regression
+scope as CONDITIONAL_PASS. **Privileged admission remains BLOCKED**:
+no authenticated cross-process protocol for real service mutation,
+alternate-account elevation, authorized field environment or production
+trust. No weakening of the prepare refusal. Do not repeat unchanged
+isolated regression work as a substitute for closing this blocker.
+No merge or release approval.
+
+P4.6 entry: isolated non-release evidence staging now validates eight
+fixed notice/JSON files, rejects invalid file types/reparse points,
+uses a fresh separate staging directory and checks copy digests.
+Success upload uses that directory instead of build output containing
+executables. Failure evidence retains the preexisting explicit file
+allowlist; neither path is a licensed package. New CI is pending.
+This is a build isolation guard, not a signing or full provenance
+verification scheme. P4.6 real release build remains blocked by
+production trust, permission scope, signing, dependency evidence and
+authorized environment acceptance. P5 standalone licensing service
+capacity and recovery work can proceed independently of the client
+privilege blocker.
