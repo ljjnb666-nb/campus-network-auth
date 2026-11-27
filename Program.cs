@@ -639,6 +639,11 @@ internal static class Program
 
     private static int ChangeServiceUnderGate(bool prepare)
     {
+#if CHEZHI_LICENSED
+        // The mutation boundary itself must remain closed even if a future
+        // caller skips the CLI wrapper or the outer mutex entrypoint.
+        if (prepare) return 28;
+#endif
         try
         {
             if (!ServiceInstalled())
@@ -690,6 +695,7 @@ internal static class Program
                 case 21: return "天翼服务文件路径或数字签名身份未通过验证；未执行切换。请核对官方客户端。";
                 case 26: return "未安装天翼后台服务，请检查官方客户端安装。";
                 case 27: return "另一个服务切换正在执行，或无法确认切换互斥状态；未执行新的服务修改。";
+                case 28: return "管理员准备连接尚未通过授权验收；未执行服务修改。恢复天翼功能不受此限制。";
                 case 22: return "仍有天翼客户端或认证进程在运行，请先断开并完全退出。";
                 case 23: return "移动热点或 Wi-Fi Direct 仍在使用（或状态未知），请先关闭热点。";
                 case 24: return "天翼服务正在切换中，请稍后再试。";
@@ -1303,6 +1309,9 @@ internal static class Program
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            // Each independent prepare boundary must deny before SCM/WMI.
+            // This fixture must never exercise restore or real service mutation.
+            if (ChangeService(true) != 28 || ChangeServiceUnderGate(true) != 28) return 1;
             bool denied = false;
             try { LaunchCore("--ephemeral-auth", "dummy-user", "dummy-pass", 1, null); }
             catch (InvalidOperationException ex) { denied = ex.Message == "Online authorization required."; }
