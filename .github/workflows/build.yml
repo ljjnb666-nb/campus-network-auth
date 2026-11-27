@@ -510,19 +510,16 @@ jobs:
         run: |
           'NON_RELEASE: legacy offline regression evidence only; no licensed binary or release attestation' | Set-Content -LiteralPath 'build-core/LICENSING_CANDIDATE_NOTICE.txt' -Encoding UTF8
 
+      - name: Stage isolated non-release evidence
+        shell: pwsh
+        run: |
+          ./scripts/Stage-LicensingAuditEvidence.ps1 -Source build-core -Destination (Join-Path $env:RUNNER_TEMP 'licensed-audit-evidence')
+
       - name: Upload non-executable integration audit evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: chezhi-licensing-integration-audit-only
-          path: |
-            build-core/LICENSING_CANDIDATE_NOTICE.txt
-            build-core/build-manifest.json
-            build-core/sbom.cdx.json
-            build-core/pe-imports.json
-            build-core/repeatability.json
-            build-core/build-toolchain-evidence.json
-            build-core/build-evidence.json
-            build-core/gui-compiler-candidate.json
+          path: ${{ runner.temp }}/licensed-audit-evidence/
           if-no-files-found: error
 
       - name: Preserve non-executable audit evidence when a gate fails
