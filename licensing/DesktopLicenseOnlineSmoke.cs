@@ -91,6 +91,65 @@ internal static class DesktopLicenseOnlineSmoke
         using(WindowsDeviceKey key=enrollment.OpenExisting())
             Check(Convert.ToBase64String(key.Fingerprint)==Convert.ToBase64String(fp),"identity changed");
     }
+    // Use the primary fixture's existing bound identity. Cancel at the UI
+    // dispatch boundary before the caller can consume the native result.
+    // This is not a deterministic network delay or process-kill test.
+    private static async Task RunLifecycle(Form owner,Guid id)
+    {
+        var enrollment=DeviceEnrollment.Fixture(id);
+        var store=LicenseCardStore.Fixture(id);
+        byte[] fp;
+        using(WindowsDeviceKey key=enrollment.OpenExisting())fp=key.Fingerprint;
+        store.Forget();
+        using(var gate=new DesktopLicenseGate(id))
+        {
+            gate.FixtureCard=FixtureCard;gate.FixtureRemember=true;
+            int dispatches=0;
+            gate.FixtureAfterDispatch=delegate{
+                dispatches++;
+                Check(gate.Busy,"dispatch not busy");
+                gate.Invalidate();
+                Check(!gate.Allowed,"invalidation retained grant");
+                Task<bool> duplicate=gate.VerifyAsync(owner,false);
+                Check(duplicate.IsCompleted&&!duplicate.Result,"duplicate verification admitted");
+            };
+            Check(!await gate.VerifyAsync(owner,true)&&!gate.Allowed&&!gate.Busy&&dispatches==1,
+                "invalidated activation result admitted");
+            Check(store.Load(fp,CandidateTrust.Scope)==null,"invalidated activation saved card");
+            gate.FixtureAfterDispatch=null;
+            Check(await gate.VerifyAsync(owner,false)&&gate.Allowed,"fresh activation after invalidation failed");
+            byte[] saved=store.Load(fp,CandidateTrust.Scope);
+            Check(saved!=null,"fresh verified activation did not save");
+            Array.Clear(saved,0,saved.Length);
+            gate.FixtureRenewDue();
+            gate.FixtureAfterDispatch=delegate{dispatches++;gate.Invalidate();};
+            Check(await gate.RenewIfDueAsync()&&!gate.Allowed&&!gate.Busy&&dispatches==2,
+                "invalidated renewal restored grant");
+            gate.FixtureAfterDispatch=null;
+            Check(await gate.VerifyAsync(owner,false)&&gate.Allowed,"fresh validation after invalidated renewal failed");
+            Check(await gate.ForgetAsync()&&!gate.Allowed,"lifecycle fixture forget failed");
+        }
+        using(var gate=new DesktopLicenseGate(id))
+        {
+            gate.FixtureCard=FixtureCard;gate.FixtureRemember=true;
+            bool dispatched=false;
+            gate.FixtureAfterDispatch=delegate{dispatched=true;gate.Dispose();};
+            Check(!await gate.VerifyAsync(owner,true)&&dispatched&&!gate.Allowed&&!gate.Busy,
+                "disposed activation restored grant");
+            Check(!await gate.VerifyAsync(owner,false)&&!await gate.RenewIfDueAsync()&&!await gate.ForgetAsync(),
+                "closed gate accepted operation");
+            Check(store.Load(fp,CandidateTrust.Scope)==null,"disposed activation saved card");
+        }
+        using(var gate=new DesktopLicenseGate(id))
+        {
+            gate.FixtureCard=FixtureCard;
+            Check(await gate.VerifyAsync(owner,true)&&gate.Allowed,"new gate could not reopen identity after disposal");
+        }
+        Check(store.Load(fp,CandidateTrust.Scope)==null,"unremembered card persisted");
+        using(WindowsDeviceKey key=enrollment.OpenExisting())
+            Check(Convert.ToBase64String(fp)==Convert.ToBase64String(key.Fingerprint),"lifecycle changed identity");
+        Console.WriteLine("PASS dispatch invalidation, duplicate admission denial, renewal invalidation, disposal and fresh verification; no stale card save");
+    }
     // Independent random profiles; never mutate the primary fixture or
     // production registry/key names. These are exception injections, not
     // claims of process-kill or power-loss testing.
@@ -245,7 +304,7 @@ internal static class DesktopLicenseOnlineSmoke
             using(var owner=new Form{Text="Disposable licensing integration fixture",Width=500,Height=340})
             {
                 owner.Shown+=async delegate{
-                    try{await Run(owner,id);await RunEnrollmentFaults(owner);result=0;}
+                    try{await Run(owner,id);await RunLifecycle(owner,id);await RunEnrollmentFaults(owner);result=0;}
                     catch(Exception ex){Console.Error.WriteLine(ex.GetType().Name+": "+ex.Message);}
                     finally{owner.Close();}
                 };
