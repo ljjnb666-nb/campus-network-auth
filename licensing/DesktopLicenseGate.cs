@@ -229,11 +229,11 @@ internal sealed class DesktopLicenseGate : IDisposable
         {
             if(closed)return "授权已关闭。";
             if(busy)return "授权操作正在进行，请稍后。";
-            if(localMessage!=null)return localMessage;
-            if(coordinator==null)return "未完成授权，请核对卡密、设备身份及可信配置。";
+            if(coordinator==null)return localMessage??"未完成授权，请核对卡密、设备身份及可信配置。";
+            // A prior card-save warning must never hide expiry or denial.
             switch(coordinator.Phase)
             {
-                case AuthorizationPhase.Authorized:return "当前授权验证通过。";
+                case AuthorizationPhase.Authorized:return localMessage??"当前授权验证通过。";
                 case AuthorizationPhase.NetworkUnavailable:return "授权服务暂时不可达，请先通过官方客户端或热点联网后重试。";
                 case AuthorizationPhase.RetryLater:return "授权服务繁忙，请稍后重试。";
                 case AuthorizationPhase.Denied:return "授权请求被拒绝，请核对卡密与设备绑定。";
