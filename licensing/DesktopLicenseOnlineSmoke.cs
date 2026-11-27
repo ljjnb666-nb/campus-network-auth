@@ -24,20 +24,37 @@ internal static class DesktopLicenseOnlineSmoke
         return b;
     }
     private static void Check(bool value,string label){if(!value)throw new Exception(label);}
+    private static void CheckNoIdentity(DeviceEnrollment enrollment,string label)
+    {
+        using(RegistryKey record=Registry.CurrentUser.OpenSubKey(enrollment.FixturePath))
+            Check(record==null,label);
+    }
     private static async Task Run(Form owner,Guid id)
     {
         var enrollment=DeviceEnrollment.Fixture(id);
         var store=LicenseCardStore.Fixture(id);
         byte[] fp;
-        // First enrollment is a real CNG/DPAPI operation in an isolated
-        // profile; the actual modal dialog then reopens the enrolled key.
-        using(WindowsDeviceKey key=enrollment.EnrollFirst(DeviceKeyPolicy.Software))fp=key.Fingerprint;
+        // Start with no enrollment record: the actual dialog, not the
+        // test setup, must initiate the isolated CNG/DPAPI enrollment.
+        CheckNoIdentity(enrollment,"fixture identity already exists");
         using(var gate=new DesktopLicenseGate(id))
         {
             Check(!gate.Allowed,"initial grant");
             Check(!await gate.VerifyAsync(owner,false),"missing card admitted");
+            CheckNoIdentity(enrollment,"silent enrollment");
             gate.FixtureCard=FixtureCard;gate.FixtureRemember=true;
-            Check(await gate.VerifyAsync(owner,true)&&gate.Allowed&&gate.FixtureDialogCount==1,"dialog activation");
+            Check(!await gate.VerifyAsync(owner,true)&&!gate.Allowed,"implicit enrollment admitted");
+            CheckNoIdentity(enrollment,"manual card created identity without consent");
+            gate.FixtureFirst=true;gate.FixtureCancel=true;
+            Check(!await gate.VerifyAsync(owner,true)&&!gate.Allowed,"cancelled enrollment admitted");
+            CheckNoIdentity(enrollment,"cancelled enrollment created identity");
+            gate.FixtureCancel=false;gate.FixtureConfirmFirst=false;
+            Check(!await gate.VerifyAsync(owner,true)&&!gate.Allowed&&gate.FixtureConfirmationCount==1,"declined confirmation admitted");
+            CheckNoIdentity(enrollment,"declined enrollment created identity");
+            gate.FixtureConfirmFirst=true;
+            Check(await gate.VerifyAsync(owner,true)&&gate.Allowed&&gate.FixtureDialogCount==4&&gate.FixtureConfirmationCount==2,"explicit first enrollment and activation");
+            using(WindowsDeviceKey key=enrollment.OpenExisting())fp=key.Fingerprint;
+            gate.FixtureFirst=false;
             byte[] saved=store.Load(fp,CandidateTrust.Scope);
             Check(saved!=null&&System.Text.Encoding.ASCII.GetString(saved)==FixtureCard,"verified save");
             Array.Clear(saved,0,saved.Length);
@@ -63,6 +80,13 @@ internal static class DesktopLicenseOnlineSmoke
             Check(await gate.ForgetAsync()&&!gate.Allowed,"forget grant");
             Check(store.Load(fp,CandidateTrust.Scope)==null,"forget record");
             Check(!await gate.VerifyAsync(owner,false),"forgotten card restored");
+            Guid originalSlot=enrollment.FixtureSlot();
+            gate.FixtureCard=FixtureCard;gate.FixtureFirst=true;gate.FixtureRemember=true;
+            Check(!await gate.VerifyAsync(owner,true)&&!gate.Allowed&&gate.FixtureConfirmationCount==1,"duplicate enrollment admitted");
+            Check(enrollment.FixtureSlot()==originalSlot,"duplicate enrollment replaced slot");
+            Check(store.Load(fp,CandidateTrust.Scope)==null,"failed enrollment saved card");
+            gate.FixtureFirst=false;
+            Check(await gate.VerifyAsync(owner,true)&&gate.Allowed,"existing identity could not recover through manual activation");
         }
         using(WindowsDeviceKey key=enrollment.OpenExisting())
             Check(Convert.ToBase64String(key.Fingerprint)==Convert.ToBase64String(fp),"identity changed");
@@ -106,7 +130,7 @@ internal static class DesktopLicenseOnlineSmoke
                 };
                 Application.Run(owner);
             }
-            if(result==0)Console.WriteLine("PASS actual desktop modal activation, real DLL/CNG/TLS, verified DPAPI save, cancel, invalidate, renew, denial, reload and forget");
+            if(result==0)Console.WriteLine("PASS actual desktop modal first enrollment, explicit confirmation/cancel/decline, duplicate enrollment rejection, real DLL/CNG/TLS, verified DPAPI save, invalidate, renew, denial, reload, forget and manual recovery");
             return result;
         }
         catch(Exception ex){Console.Error.WriteLine(ex.GetType().Name+": "+ex.Message);return 1;}
