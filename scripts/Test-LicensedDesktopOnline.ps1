@@ -35,8 +35,9 @@ try {
     } finally {Pop-Location}
     $csc=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
     $sources=@('AuthorizationState.cs','WindowsDeviceKey.cs','DeviceEnrollment.cs','NativeLicenseClient.cs','LicenseCoordinator.cs','DesktopLicenseGate.cs','LicenseCardStore.cs','LicenseRenewalSchedule.cs','LicenseCardInput.cs','DesktopLicenseOnlineSmoke.cs') | ForEach-Object {(Resolve-Path -LiteralPath (Join-Path $root ('licensing/'+$_))).Path}
+    $sources+=@('Program.cs','CredentialStore.cs','ConnectionStates.cs','ServiceIdentity.cs','ServiceJournal.cs') | ForEach-Object {(Resolve-Path -LiteralPath (Join-Path $root $_)).Path}
     $exe=Join-Path $temp 'OnlineSmoke.exe'
-    & $csc /nologo /target:exe /platform:x64 /define:CHEZHI_LICENSED,CHEZHI_LICENSE_UI_TEST,CHEZHI_SDK_TEST,CHEZHI_CARD_TEST /r:System.Core.dll /r:System.Security.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll "/out:$exe" $sources
+    & $csc /nologo /target:exe /platform:x64 /main:DesktopLicenseOnlineSmoke /define:CHEZHI_LICENSED,CHEZHI_LICENSE_UI_TEST,CHEZHI_SDK_TEST,CHEZHI_CARD_TEST /r:System.dll /r:System.Core.dll /r:System.Security.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll /r:System.ServiceProcess.dll /r:System.Management.dll "/out:$exe" $sources
     if ($LASTEXITCODE -ne 0) {throw 'Desktop online fixture compile failed'}
     & (Join-Path $sdk 'sdk/windows/Run-OnlineSmoke.ps1') -Bin $temp
 } finally {Remove-Item -LiteralPath $temp -Recurse -Force}
