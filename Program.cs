@@ -52,13 +52,18 @@ internal static class Program
             return ChangeService(true);
 #endif
         }
+#if CHEZHI_LICENSED && CHEZHI_LICENSED_TEST
+        // Resource-less negative fixture has exactly one test entrypoint.
+        // It cannot restore a service, run legacy probes, or open the
+        // production startup path. The prepare refusal above is retained.
+        if (args.Length == 1 && args[0] == "--self-test-license-boundary") return LicensedBoundaryTests();
+        return 2;
+#else
         if (args.Length == 1 && args[0] == "--admin-restore") return ChangeService(false);
-#if CHEZHI_LICENSED && !CHEZHI_LICENSED_TEST
+#if CHEZHI_LICENSED
         // Production-shaped candidate accepts no offline self-test commands.
         if (args.Length != 0) return 2;
 #endif
-#if CHEZHI_LICENSED && CHEZHI_LICENSED_TEST
-        if (args.Length == 1 && args[0] == "--self-test-license-boundary") return LicensedBoundaryTests();
 #endif
         if (args.Length == 1 && args[0] == "--self-test-logic") return LogicTests();
         if (args.Length == 2 && args[0] == "--self-test-boot-sequence")
