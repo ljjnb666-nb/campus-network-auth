@@ -25,6 +25,7 @@ internal sealed class DesktopLicenseGate : IDisposable
     internal bool FixtureRemember,FixtureCancel,FixtureFirst;
     internal bool FixtureConfirmFirst=true;
     internal int FixtureDialogCount,FixtureConfirmationCount;
+    internal Action FixtureAfterDispatch;
     internal DesktopLicenseGate(Guid id)
     {
         if(id==Guid.Empty)throw new ArgumentException("fixture");
@@ -58,6 +59,8 @@ internal sealed class DesktopLicenseGate : IDisposable
     internal void Invalidate()
     {
         generation++;
+        // Status messages from a previous verified context are no longer current.
+        localMessage=null;
         renewal.Invalidate(clock.ElapsedMilliseconds);
         if(coordinator!=null){coordinator.NetworkChanged(false);coordinator.NetworkChanged(true);}
     }
@@ -96,6 +99,11 @@ internal sealed class DesktopLicenseGate : IDisposable
     private async Task<bool> CheckOnlineAsync(LicenseOperation op,int epoch)
     {
         Task<bool> call=coordinator.VerifyAsync(op);
+#if CHEZHI_LICENSE_UI_TEST
+        // Test-only UI-thread boundary after native dispatch and before
+        // consuming the result. The native task may already have completed.
+        if(call!=null&&FixtureAfterDispatch!=null)FixtureAfterDispatch();
+#endif
         bool ok=call!=null&&await call;
         if(closed||epoch!=generation)return false;
         localMessage=null;
