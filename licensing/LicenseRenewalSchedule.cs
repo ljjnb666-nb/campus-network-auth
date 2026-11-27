@@ -5,9 +5,9 @@ using Chezhi.Licensing;
 internal sealed class LicenseRenewalSchedule
 {
     private long due;
-    private bool armed;
+    private bool armed, invalidationDeferred;
     internal bool Due(long now){return armed && now>=due;}
-    internal void Reset(){armed=false;due=0;}
+    internal void Reset(){armed=false;due=0;invalidationDeferred=false;}
     internal void Record(AuthorizationPhase phase,long now)
     {
         long delay;
@@ -21,13 +21,15 @@ internal sealed class LicenseRenewalSchedule
             default:Reset();return;
         }
         due=now>Int64.MaxValue-delay?Int64.MaxValue:now+delay;
-        armed=true;
+        armed=true;invalidationDeferred=false;
     }
     // Invalidation requires fresh proof, not necessarily an immediate network
-    // request on every interface event. Preserve any longer retry backoff.
+    // request on every interface event. Preserve any longer retry backoff,
+    // but repeated notifications must not postpone a scheduled check forever.
     internal void Invalidate(long now)
     {
-        if(!armed)return;
+        if(!armed||invalidationDeferred)return;
+        invalidationDeferred=true;
         long earliest=now>Int64.MaxValue-60000?Int64.MaxValue:now+60000;
         if(due<earliest)due=earliest;
     }
