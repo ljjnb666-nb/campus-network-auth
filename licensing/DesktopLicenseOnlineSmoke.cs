@@ -91,6 +91,127 @@ internal static class DesktopLicenseOnlineSmoke
         using(WindowsDeviceKey key=enrollment.OpenExisting())
             Check(Convert.ToBase64String(key.Fingerprint)==Convert.ToBase64String(fp),"identity changed");
     }
+    // Independent random profiles; never mutate the primary fixture or
+    // production registry/key names. These are exception injections, not
+    // claims of process-kill or power-loss testing.
+    private sealed class InjectedEnrollmentFault : Exception {}
+    private static byte[] RecordBytes(DeviceEnrollment e)
+    {
+        using(RegistryKey k=Registry.CurrentUser.OpenSubKey(e.FixturePath))
+            return (byte[])k.GetValue("Enrollment");
+    }
+    private static void SetRecord(DeviceEnrollment e,byte[] bytes)
+    {
+        using(RegistryKey k=Registry.CurrentUser.OpenSubKey(e.FixturePath,true))
+        {
+            k.SetValue("Enrollment",bytes,RegistryValueKind.Binary);
+            k.Flush();
+        }
+    }
+    private static string KeyName(Guid slot){return "CheZhiTech.License.v1."+slot.ToString("N");}
+    private static bool KeyExists(Guid slot)
+    {return CngKey.Exists(KeyName(slot),CngProvider.MicrosoftSoftwareKeyStorageProvider);}
+    private static void DeleteKey(Guid slot)
+    {
+        if(KeyExists(slot))
+            using(CngKey key=CngKey.Open(KeyName(slot),CngProvider.MicrosoftSoftwareKeyStorageProvider))key.Delete();
+    }
+    private static void RejectRecovery(Func<WindowsDeviceKey> attempt,string label,bool allowCrypto)
+    {
+        try{using(WindowsDeviceKey key=attempt()){}}
+        catch(EnrollmentRecoveryRequired){return;}
+        catch(CryptographicException){if(allowCrypto)return;throw;}
+        throw new Exception(label);
+    }
+    private static async Task CheckBlockedProfile(Form owner,Guid id,DeviceEnrollment e,string label)
+    {
+        byte[] before=RecordBytes(e);
+        using(var gate=new DesktopLicenseGate(id))
+        {
+            Check(!await gate.VerifyAsync(owner,false)&&!gate.Allowed&&!gate.Busy,label+" silent");
+            gate.FixtureCard=FixtureCard;gate.FixtureRemember=true;
+            Check(!await gate.VerifyAsync(owner,true)&&!gate.Allowed&&!gate.Busy,label+" reopen");
+            gate.FixtureFirst=true;
+            Check(!await gate.VerifyAsync(owner,true)&&!gate.Allowed&&!gate.Busy,label+" reenroll");
+        }
+        Check(Convert.ToBase64String(before)==Convert.ToBase64String(RecordBytes(e)),label+" changed record");
+        using(RegistryKey card=Registry.CurrentUser.OpenSubKey(LicenseCardStore.Fixture(id).FixturePath))
+            Check(card==null,label+" created card record");
+    }
+    private static async Task RunEnrollmentFaults(Form owner)
+    {
+        foreach(int stage in new[]{1,2})
+        {
+            Guid id=Guid.NewGuid();
+            var e=DeviceEnrollment.Fixture(id);
+            try
+            {
+                bool injected=false;
+                e.FaultHook=delegate(int point){if(point==stage)throw new InjectedEnrollmentFault();};
+                try{using(WindowsDeviceKey key=e.EnrollFirst(DeviceKeyPolicy.Software)){}}
+                catch(InjectedEnrollmentFault){injected=true;}
+                Check(injected,"enrollment fault hook not reached");
+                Guid slot=e.FixtureSlot();
+                Check(KeyExists(slot)==(stage==2),"unexpected pending key state");
+                RejectRecovery(e.OpenExisting,"pending identity opened",false);
+                RejectRecovery(delegate{return e.EnrollFirst(DeviceKeyPolicy.Software);},"pending identity replaced",false);
+                await CheckBlockedProfile(owner,id,e,"pending stage "+stage);
+                Check(e.FixtureSlot()==slot&&KeyExists(slot)==(stage==2),"pending key or slot changed");
+            }
+            finally{Cleanup(id);}
+        }
+        Guid corruptId=Guid.NewGuid();
+        var corrupt=DeviceEnrollment.Fixture(corruptId);
+        byte[] original=null;
+        try
+        {
+            using(WindowsDeviceKey key=corrupt.EnrollFirst(DeviceKeyPolicy.Software)){}
+            Guid slot=corrupt.FixtureSlot();
+            original=RecordBytes(corrupt);
+            SetRecord(corrupt,new byte[]{1,2,3,4});
+            RejectRecovery(corrupt.OpenExisting,"corrupt identity opened",false);
+            await CheckBlockedProfile(owner,corruptId,corrupt,"corrupt record");
+            Check(KeyExists(slot),"corruption removed original key");
+        }
+        finally
+        {
+            if(original!=null)SetRecord(corrupt,original);
+            Cleanup(corruptId);
+        }
+        Guid lostId=Guid.NewGuid();
+        var lost=DeviceEnrollment.Fixture(lostId);
+        try
+        {
+            using(WindowsDeviceKey key=lost.EnrollFirst(DeviceKeyPolicy.Software)){}
+            Guid slot=lost.FixtureSlot();
+            DeleteKey(slot);
+            Check(!KeyExists(slot),"fixture key deletion failed");
+            RejectRecovery(lost.OpenExisting,"missing key reopened",true);
+            await CheckBlockedProfile(owner,lostId,lost,"lost key");
+            Check(lost.FixtureSlot()==slot&&!KeyExists(slot),"missing key recreated");
+            // Even a policy-compatible key in the original slot must not
+            // be accepted when its fingerprint differs from the record.
+            using(WindowsDeviceKey replacement=WindowsDeviceKey.Enroll(slot,DeviceKeyPolicy.Software)){}
+            RejectRecovery(lost.OpenExisting,"replacement fingerprint admitted",true);
+            await CheckBlockedProfile(owner,lostId,lost,"replaced key");
+            Check(lost.FixtureSlot()==slot&&KeyExists(slot),"replacement key mutated");
+        }
+        finally{Cleanup(lostId);}
+        Guid raceId=Guid.NewGuid();
+        try
+        {
+            Func<bool> attempt=delegate{
+                try{using(WindowsDeviceKey key=DeviceEnrollment.Fixture(raceId).EnrollFirst(DeviceKeyPolicy.Software)){}return true;}
+                catch(EnrollmentRecoveryRequired){return false;}
+            };
+            bool[] result=await Task.WhenAll(Task.Run(attempt),Task.Run(attempt));
+            Check(result[0]!=result[1],"concurrent enrollment did not produce exactly one winner");
+            using(WindowsDeviceKey key=DeviceEnrollment.Fixture(raceId).OpenExisting())
+                Check(key.Fingerprint.Length==32,"concurrent winner not reopenable");
+        }
+        finally{Cleanup(raceId);}
+        Console.WriteLine("PASS enrollment fault stages 1/2, corrupt DPAPI record, missing/replaced key, concurrent enrollment; blocked desktop recovery paths");
+    }
     private static void Cleanup(Guid id)
     {
         var e=DeviceEnrollment.Fixture(id);
@@ -124,7 +245,7 @@ internal static class DesktopLicenseOnlineSmoke
             using(var owner=new Form{Text="Disposable licensing integration fixture",Width=500,Height=340})
             {
                 owner.Shown+=async delegate{
-                    try{await Run(owner,id);result=0;}
+                    try{await Run(owner,id);await RunEnrollmentFaults(owner);result=0;}
                     catch(Exception ex){Console.Error.WriteLine(ex.GetType().Name+": "+ex.Message);}
                     finally{owner.Close();}
                 };
