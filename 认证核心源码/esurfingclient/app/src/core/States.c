@@ -142,13 +142,13 @@ child_t g_children[SUPERVISOR_MAX_CHILDREN];
 
 stop_flag_t g_supervisor_stop = 0;
 
-bool g_thread_keep_alive = false;
+atomic_bool g_thread_keep_alive = false;
 
-bool g_need_exit = false;
+atomic_bool g_need_exit = false;
 
 bool g_prog_enabled = false;
 
-bool g_need_restart = false;
+atomic_bool g_need_restart = false;
 
 bool g_cfg_loaded = false;
 

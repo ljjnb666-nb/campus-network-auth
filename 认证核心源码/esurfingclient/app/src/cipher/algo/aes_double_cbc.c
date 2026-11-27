@@ -2,6 +2,7 @@
 #include "cipher/CipherUtils.h"
 
 #include <stdint.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -154,6 +155,7 @@ static void aes_double_block_encrypt(const uint8_t sk[176], const uint8_t in[16]
                 for (int c = 0; c < 4; ++c)
                     t[r * 4 + c] = s[r * 4 + ((c + r) & 3)];
             memcpy(s, t, 16);
+            cipher_secure_zero(t, sizeof(t));
         }
         if (rnd < 10)
         {
@@ -171,6 +173,7 @@ static void aes_double_block_encrypt(const uint8_t sk[176], const uint8_t in[16]
     for (int r = 0; r < 4; ++r)
         for (int c = 0; c < 4; ++c)
             out[c * 4 + r] = s[r * 4 + c];
+    cipher_secure_zero(s, sizeof(s));
 }
 
 /* AES-128 block decrypt (standard inverse rounds, row-major state) */
@@ -190,6 +193,7 @@ static void aes_double_block_decrypt(const uint8_t sk[176], const uint8_t in[16]
                 for (int c = 0; c < 4; ++c)
                     t[r * 4 + c] = s[r * 4 + ((c - r + 4) & 3)];
             memcpy(s, t, 16);
+            cipher_secure_zero(t, sizeof(t));
         }
         for (int i = 0; i < 16; ++i) s[i] = AES_DOUBLE_INV_S[s[i]];
         for (int i = 0; i < 16; ++i) s[i] ^= sk[16 * rnd + i];
@@ -209,18 +213,21 @@ static void aes_double_block_decrypt(const uint8_t sk[176], const uint8_t in[16]
             for (int c = 0; c < 4; ++c)
                 t[r * 4 + c] = s[r * 4 + ((c - r + 4) & 3)];
         memcpy(s, t, 16);
+        cipher_secure_zero(t, sizeof(t));
     }
     for (int i = 0; i < 16; ++i) s[i] = AES_DOUBLE_INV_S[s[i]];
     for (int i = 0; i < 16; ++i) s[i] ^= sk[i];
     for (int r = 0; r < 4; ++r)
         for (int c = 0; c < 4; ++c)
             out[c * 4 + r] = s[r * 4 + c];
+    cipher_secure_zero(s, sizeof(s));
 }
 
 /* one layer (sub_27F0) with a4=0: IV-prefixed CBC */
 static uint8_t* aes_double_layer_encrypt(const uint8_t key[16], const uint8_t* data, int len,
                                          const uint8_t iv[16], int* out_len)
 {
+    if (len < 0 || len > INT_MAX - 31) return NULL;
     int total = (len + 15) & ~15;
     if (total == 0) total = 16;
     uint8_t *buf = s_calloc(1, (size_t)total + 32);
@@ -237,7 +244,10 @@ static uint8_t* aes_double_layer_encrypt(const uint8_t key[16], const uint8_t* d
         for (int i = 0; i < 16; ++i) t[i] = buf[16 + off + i] ^ prev[i];
         aes_double_block_encrypt(sk, t, buf + 16 + off);
         memcpy(prev, buf + 16 + off, 16);
+        cipher_secure_zero(t, sizeof(t));
     }
+    cipher_secure_zero(sk, sizeof(sk));
+    cipher_secure_zero(prev, sizeof(prev));
     *out_len = total + 16;
     return buf;
 }
@@ -260,7 +270,10 @@ static uint8_t* aes_double_layer_decrypt(const uint8_t key[16], const uint8_t* d
         aes_double_block_decrypt(sk, data + 16 + off, dec);
         for (int i = 0; i < 16; ++i) buf[off + i] = dec[i] ^ prev[i];
         memcpy(prev, data + 16 + off, 16);
+        cipher_secure_zero(dec, sizeof(dec));
     }
+    cipher_secure_zero(sk, sizeof(sk));
+    cipher_secure_zero(prev, sizeof(prev));
     *out_len = total;
     return buf;
 }
@@ -269,12 +282,13 @@ static uint8_t* aes_double_layer_decrypt(const uint8_t key[16], const uint8_t* d
 static uint8_t* aes_double_encrypt_raw(const uint8_t* key, const uint8_t* iv, const uint8_t* data,
                                        const size_t data_len, size_t* output_len)
 {
+    if (data_len > (size_t)INT_MAX - 64) return NULL;
     int l1 = 0;
     uint8_t *m1 = aes_double_layer_encrypt(key, data, (int)data_len, iv, &l1);
     if (!m1) return NULL;
     int l2 = 0;
     uint8_t *m2 = aes_double_layer_encrypt(key + 16, m1, l1, iv, &l2);
-    s_free(m1);
+    s_secure_free(m1, (size_t)l1 + 16);
     *output_len = (size_t)l2;
     return m2;
 }
@@ -283,12 +297,13 @@ static uint8_t* aes_double_encrypt_raw(const uint8_t* key, const uint8_t* iv, co
 static uint8_t* aes_double_decrypt_raw(const uint8_t* key, const uint8_t* data,
                                        const size_t data_len, size_t* output_len)
 {
+    if (data_len > (size_t)INT_MAX - 64) return NULL;
     int l1 = 0;
     uint8_t *m1 = aes_double_layer_decrypt(key + 16, data, (int)data_len, &l1);
     if (!m1) return NULL;
     int l0 = 0;
     uint8_t *pt = aes_double_layer_decrypt(key, m1, l1, &l0);
-    s_free(m1);
+    s_secure_free(m1, (size_t)l1);
     *output_len = (size_t)l0;
     return pt;
 }
@@ -301,7 +316,7 @@ static char* aes_double_cbc_encrypt(cipher_interface_t* self, const char* text)
     size_t out_len=0; uint8_t* out = aes_double_encrypt_raw(d->key, d->iv, (const uint8_t*)text, text_len, &out_len);
     if(!out) return NULL;
     char* hex = bytes_2_hex(out, out_len);
-    s_free(out);
+    s_secure_free(out, out_len + 16);
     return hex;
 }
 
@@ -312,14 +327,15 @@ static char* aes_double_cbc_decrypt(cipher_interface_t* self, const char* hex)
     size_t bytes_len=0; uint8_t* bytes = hex_2_bytes(hex, &bytes_len);
     if(!bytes) return NULL;
     size_t out_len=0; uint8_t* out = aes_double_decrypt_raw(d->key, bytes, bytes_len, &out_len);
-    s_free(bytes);
+    s_secure_free(bytes, bytes_len);
     if(!out) return NULL;
     /* zero-padded (not PKCS7): strip trailing zeros, keep as C string */
+    const size_t allocation_len = out_len;
     while(out_len > 0 && out[out_len - 1] == 0) out_len--;
     char* result = s_malloc(out_len + 1);
     memcpy(result, out, out_len);
     result[out_len] = '\0';
-    s_free(out);
+    s_secure_free(out, allocation_len);
     return result;
 }
 
@@ -327,7 +343,7 @@ static void aes_double_cbc_destroy(cipher_interface_t* self)
 {
     if(self)
     {
-        s_free(self->private_data);
+        s_secure_free(self->private_data, sizeof(aes_double_cbc_android_data_t));
         s_free(self);
     }
 }

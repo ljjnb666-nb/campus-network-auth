@@ -6,9 +6,17 @@
 #include "utils/runtime/Watchdog.h"
 #include "utils/log/Logger.h"
 
+#include <stdatomic.h>
+#include <stdlib.h>
+#include <stdio.h>
+
 #ifdef _WIN32
 #include <windows.h>
 extern bool get_service_mode(void);
+
+/* Provisional native join budget, not the GUI's complete stop timeout.
+ * All Windows worker joins consume the same 60-second window. */
+#define SHUTDOWN_JOIN_BUDGET_MS 60000u
 #else
 #include <stdlib.h>
 #endif
@@ -23,26 +31,114 @@ extern void restart_process(void);
 #endif
 #endif
 
+/* Checked variants are internal shutdown contracts. Legacy void wrappers
+ * remain available for existing callers. */
+extern bool watchdog_stop_checked(void);
+extern bool time_control_stop_checked(void);
+#ifndef __OPENWRT__
+extern bool net_traffic_stop_checked(void);
+extern bool net_probe_stop_checked(void);
+extern bool control_server_stop_checked(void);
+#endif
+
+typedef struct
+{
+    const char* name;
+    bool (*stop)(void);
+} shutdown_step_t;
+
+/* Return the first unconfirmed worker. Do not proceed to shared cleanup. */
+static const char* stop_sequence(const shutdown_step_t* steps, size_t count)
+{
+    for (size_t i = 0; i < count; ++i)
+        if (!steps[i].stop()) return steps[i].name;
+    return NULL;
+}
+
+static _Noreturn void shutdown_incomplete(const char* worker)
+{
+    fprintf(stderr, "[ERROR] worker stop unconfirmed: %s; shutdown incomplete\n", worker);
+    fflush(stderr);
+    _Exit(EXIT_FAILURE);
+}
+
+/* Ownership is transferred only after a confirmed successful join. */
+static bool reap_auth_thread(sim_thread_t** owner, int* code)
+{
+    if (*owner == NULL) return true;
+    if (sim_thread_join(*owner, code) != 0) return false;
+    sim_thread_destroy(*owner);
+    *owner = NULL;
+    return true;
+}
+
+static int shutdown_test_worker(void* arg)
+{
+    (void)arg;
+    return 23;
+}
+
+static int s_stop_test_calls;
+static bool shutdown_test_pass(void) { ++s_stop_test_calls; return true; }
+static bool shutdown_test_fail(void) { ++s_stop_test_calls; return false; }
+
+bool shutdown_resource_self_test(void)
+{
+    const shutdown_step_t pass[] = {
+        {"first", shutdown_test_pass}, {"second", shutdown_test_pass}
+    };
+    s_stop_test_calls = 0;
+    if (stop_sequence(pass, 2) != NULL || s_stop_test_calls != 2) return false;
+    const shutdown_step_t fail[] = {
+        {"first", shutdown_test_pass}, {"failed", shutdown_test_fail},
+        {"unreachable", shutdown_test_pass}
+    };
+    s_stop_test_calls = 0;
+    const char* rejected_step = stop_sequence(fail, 3);
+    if (rejected_step != fail[1].name || s_stop_test_calls != 2) return false;
+    int code = -1;
+    sim_thread_t* owner = NULL;
+    if (!reap_auth_thread(&owner, &code) || code != -1) return false;
+    owner = sim_thread_create(shutdown_test_worker, NULL);
+    if (owner == NULL) return false;
+    if (!reap_auth_thread(&owner, &code)) abort();
+    if (owner != NULL || code != 23 || !reap_auth_thread(&owner, NULL)) return false;
+    owner = sim_thread_create(shutdown_test_worker, NULL);
+    if (owner == NULL) return false;
+    if (sim_thread_join(owner, NULL) != 0) abort();
+    sim_thread_t* saved = owner;
+    const bool rejected = !reap_auth_thread(&owner, NULL) && owner == saved;
+    sim_thread_destroy(saved);
+    return rejected;
+}
+
 void shut(const int8_t exit_code)
 {
-    // 关闭流程只允许进入一次
-    // (Web 端触发的重启与信号/错误触发的关闭可能同时发生)
-    static volatile bool shutting_down = false;
-    if (shutting_down)
+    /**
+     * 关闭流程只允许进入一次 (多个线程可能同时触发关闭)。
+     * 原实现是 volatile bool 的 check-then-set —— 两个线程可同时通过判断,
+     * 双双进入关闭流程 (N01)。改用 C11 原子交换: 第一个抢到的执行收尾,
+     * 其余线程在此处直接返回。
+     */
+    static atomic_bool shutting_down = false;
+    if (atomic_exchange(&shutting_down, true))
     {
-        LOG_WARN("程序已在关闭流程中, 忽略重复的关闭请求");
-        return;
+        return; // logger may already have been finalized by the owner
     }
-    shutting_down = true;
+
+    /* Publish shutdown before any join or potentially blocking event output. */
+    atomic_store(&g_need_exit, true);
+#ifdef _WIN32
+    sim_thread_shutdown_budget_begin(SHUTDOWN_JOIN_BUDGET_MS);
+#endif
 
     /**
      * 关闭流程一开始就停掉看门狗: 接下来主循环不再打卡,
      * 不停的话它会把正常退出误判成卡死, 还会盖掉真正的退出原因
      */
-    watchdog_stop();
+    if (!watchdog_stop_checked()) shutdown_incomplete("watchdog");
 
     LOG_DEBUG("主程序正在关闭");
-    g_need_exit = true;
 
     /**
      * 监管进程的收尾是"先停子进程再退出", 而且它自己装了信号处理,
@@ -51,41 +147,54 @@ void shut(const int8_t exit_code)
      */
     if (g_prog_role == ROLE_SUPERVISOR)
     {
+#ifdef _WIN32
+        sim_thread_shutdown_budget_end();
+#endif
+        ephemeral_emit_event("exit", exit_code);
         return;
     }
 
-#ifndef __OPENWRT__
-    /**
-     * 先停网速采样/探测线程: 它们会写日志, 必须赶在日志收尾之前停干净。
-     */
-#ifndef __OPENWRT__
-    net_traffic_stop();
-    net_probe_stop();
-#endif
-
-    control_server_stop(); // 先停止接受控制请求
-#endif
-
-    if (g_thread_keep_alive)
+    atomic_store(&g_thread_keep_alive, false);
+    /* Request all account workers to stop before waiting for any of them. */
+    if (g_prog_status != NULL)
     {
-        LOG_DEBUG("关闭线程守护");
-        g_thread_keep_alive = false;
+        for (int i = 0; i < g_prog_cnt; ++i)
+            g_prog_status[i].runtime_status.is_running = false;
     }
-    time_control_stop(); // 等待时间控制定时线程退出
+
+    const shutdown_step_t workers[] = {
+#ifndef __OPENWRT__
+        {"traffic", net_traffic_stop_checked},
+        {"probe", net_probe_stop_checked},
+        {"control", control_server_stop_checked},
+#endif
+        {"scheduler", time_control_stop_checked}
+    };
+    const char* failed_worker = stop_sequence(workers, sizeof(workers) / sizeof(workers[0]));
+    if (failed_worker != NULL) shutdown_incomplete(failed_worker);
 
     LOG_DEBUG("清理资源中");
     LOG_DEBUG("关闭线程");
-    for (uint8_t i = 0; i < g_prog_cnt; i++)
+    if (g_prog_status != NULL)
     {
-        int result_code = 0;
-        g_prog_status[i].runtime_status.is_running = false;
-        if (g_prog_status[i].thread != NULL)
+        for (int i = 0; i < g_prog_cnt; ++i)
         {
-            sim_thread_join(g_prog_status[i].thread, &result_code);
-            LOG_DEBUG("认证线程 %" PRIu8 " 退出, 退出码: %d", i, result_code);
+            if (g_prog_status[i].thread == NULL) continue;
+            int result_code = 0;
+            if (!reap_auth_thread(&g_prog_status[i].thread, &result_code))
+            {
+                /* The worker may still access credentials/logging. Never wipe
+                 * shared state, restart, or report graceful completion here. */
+                shutdown_incomplete("authentication");
+            }
+            LOG_DEBUG("认证线程 %d 退出, 退出码: %d", i, result_code);
         }
     }
 
+#ifdef _WIN32
+    sim_thread_shutdown_budget_end();
+#endif
+    ephemeral_emit_event("exit", exit_code);
     LOG_INFO("退出程序, 退出码: %" PRIu8, exit_code);
     clean_logger();
     // 退出前擦除内存里的凭据 (账号/密码/票据), 不留给崩溃转储与换页文件
@@ -120,6 +229,8 @@ void shut(const int8_t exit_code)
  */
 static BOOL WINAPI console_handler(const DWORD ctrlType)
 {
+    if (ctrlType == CTRL_CLOSE_EVENT || ctrlType == CTRL_LOGOFF_EVENT || ctrlType == CTRL_SHUTDOWN_EVENT)
+        g_console_closed = 1;
     g_stop_requested = 1;
 
     /**

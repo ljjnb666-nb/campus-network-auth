@@ -2,6 +2,7 @@
 #include "cipher/CipherUtils.h"
 
 #include "utils/sim/SimEvp.h"
+#include <limits.h>
 
 typedef struct {
     uint8_t key1[24];
@@ -11,6 +12,7 @@ typedef struct {
 static uint8_t* desede_encrypt_ecb(const uint8_t* data, const size_t data_len,
                                    const uint8_t* key, size_t* out_len)
 {
+    if (data_len == 0 || data_len > (size_t)INT_MAX - 16) return NULL;
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
     if (!ctx) return NULL;
     if (EVP_EncryptInit_ex(ctx, EVP_des_ede3_ecb(), NULL, key, NULL) != 1)
@@ -31,21 +33,21 @@ static uint8_t* desede_encrypt_ecb(const uint8_t* data, const size_t data_len,
     int ciphertext_len = 0;
     if (EVP_EncryptUpdate(ctx, output, &len, padded_data, padded_len) != 1)
     {
-        s_free(padded_data);
-        s_free(output);
+        s_secure_free(padded_data, padded_len);
+        s_secure_free(output, padded_len);
         EVP_CIPHER_CTX_free(ctx);
         return NULL;
     }
     ciphertext_len = len;
     if (EVP_EncryptFinal_ex(ctx, output + len, &len) != 1)
     {
-        s_free(padded_data);
-        s_free(output);
+        s_secure_free(padded_data, padded_len);
+        s_secure_free(output, padded_len);
         EVP_CIPHER_CTX_free(ctx);
         return NULL;
     }
     ciphertext_len += len;
-    s_free(padded_data);
+    s_secure_free(padded_data, padded_len);
     EVP_CIPHER_CTX_free(ctx);
     *out_len = ciphertext_len;
     return output;
@@ -54,6 +56,7 @@ static uint8_t* desede_encrypt_ecb(const uint8_t* data, const size_t data_len,
 static uint8_t* desede_decrypt_ecb(const uint8_t* data, const size_t data_len,
                                    const uint8_t* key, size_t* out_len)
 {
+    if (data_len % 8 != 0 || data_len == 0 || data_len > (size_t)INT_MAX - 16) return NULL;
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
     if (!ctx) return NULL;
     if (EVP_DecryptInit_ex(ctx, EVP_des_ede3_ecb(), NULL, key, NULL) != 1)
@@ -67,14 +70,14 @@ static uint8_t* desede_decrypt_ecb(const uint8_t* data, const size_t data_len,
     int plaintext_len = 0;
     if (EVP_DecryptUpdate(ctx, output, &len, data, data_len) != 1)
     {
-        s_free(output);
+        s_secure_free(output, data_len);
         EVP_CIPHER_CTX_free(ctx);
         return NULL;
     }
     plaintext_len = len;
     if (EVP_DecryptFinal_ex(ctx, output + len, &len) != 1)
     {
-        s_free(output);
+        s_secure_free(output, data_len);
         EVP_CIPHER_CTX_free(ctx);
         return NULL;
     }
@@ -96,10 +99,10 @@ static char* desede_ecb_encrypt(cipher_interface_t* self, const char* text)
     if (!r1) return NULL;
     size_t r2_len;
     uint8_t* r2 = desede_encrypt_ecb(r1, r1_len, data->key2, &r2_len);
-    s_free(r1);
+    s_secure_free(r1, r1_len);
     if (!r2) return NULL;
     char* hex_result = bytes_2_hex(r2, r2_len);
-    s_free(r2);
+    s_secure_free(r2, r2_len);
     return hex_result;
 }
 
@@ -113,12 +116,13 @@ static char* desede_ecb_decrypt(cipher_interface_t* self, const char* hex)
     if (!bytes) return NULL;
     size_t r1_len;
     uint8_t* r1 = desede_decrypt_ecb(bytes, bytes_len, data->key2, &r1_len);
-    s_free(bytes);
+    s_secure_free(bytes, bytes_len);
     if (!r1) return NULL;
     size_t r2_len;
     uint8_t* r2 = desede_decrypt_ecb(r1, r1_len, data->key1, &r2_len);
-    s_free(r1);
+    s_secure_free(r1, r1_len);
     if (!r2) return NULL;
+    const size_t allocation_len = r2_len;
     while (r2_len > 0 && r2[r2_len - 1] == 0)
     {
         r2_len--;
@@ -126,7 +130,7 @@ static char* desede_ecb_decrypt(cipher_interface_t* self, const char* hex)
     char* result = s_malloc(r2_len + 1);
     memcpy(result, r2, r2_len);
     result[r2_len] = '\0';
-    s_free(r2);
+    s_secure_free(r2, allocation_len);
     return result;
 }
 
@@ -135,7 +139,7 @@ static void desede_ecb_destroy(cipher_interface_t* self)
 {
     if (self)
     {
-        s_free(self->private_data);
+        s_secure_free(self->private_data, sizeof(desede_ecb_data_t));
         s_free(self);
     }
 }

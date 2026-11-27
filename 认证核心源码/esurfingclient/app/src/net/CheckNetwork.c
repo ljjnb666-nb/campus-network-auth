@@ -1,6 +1,11 @@
+#ifdef _WIN32
+#include <winsock2.h>
+#endif
+
 #include "net/NetClient.h"
 
 #include "NetClientInternal.h"
+#include "core/States.h"
 
 #include "utils/log/Logger.h"
 #include "utils/sim/SimThread.h"
@@ -12,7 +17,13 @@
 #include <curl/curl.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <pthread.h>
+#include <time.h>
+#endif
 
 #define GENERATE_URL "http://connectivitycheck.platform.hicloud.com/generate_204"
 #define GENERATE_BAK_URL "http://connect.rom.miui.com/generate_204"
@@ -45,6 +56,7 @@ static size_t probe_sink(const char* ptr, size_t size, size_t nmemb, void* userd
     (void)ptr;
     (void)userdata;
 
+    if (size != 0 && nmemb > SIZE_MAX / size) return 0;
     return size * nmemb;
 }
 
@@ -297,12 +309,12 @@ static bool probe_add(CURLM* multi, const char* url, const char* host, const cha
 
     struct curl_slist* resolve = NULL;
 
-    curl_easy_setopt(handle, CURLOPT_URL, url);
-    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS, PROBE_CONNECT_TIMEOUT_MS);
-    curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS, PROBE_TOTAL_TIMEOUT_MS);
-    curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 0L);
-    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, probe_sink);
-    curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
+    if (curl_easy_setopt(handle, CURLOPT_URL, url) != CURLE_OK) goto setup_failed;
+    if (curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS, PROBE_CONNECT_TIMEOUT_MS) != CURLE_OK) goto setup_failed;
+    if (curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS, PROBE_TOTAL_TIMEOUT_MS) != CURLE_OK) goto setup_failed;
+    if (curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 0L) != CURLE_OK) goto setup_failed;
+    if (curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, probe_sink) != CURLE_OK) goto setup_failed;
+    if (curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L) != CURLE_OK) goto setup_failed;
     /**
      * 只要 IPv4
      *
@@ -310,7 +322,7 @@ static bool probe_add(CURLM* multi, const char* url, const char* host, const cha
      * 路由器上 IPv6 往往根本不通。让 curl 先试 IPv6, 每次都要白等一次连接超时
      * 才回落到 IPv4 —— 表现就是"检测经常超时"。
      */
-    curl_easy_setopt(handle, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+    if (curl_easy_setopt(handle, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4) != CURLE_OK) goto setup_failed;
 
 #ifdef __OPENWRT__
     /**
@@ -320,37 +332,225 @@ static bool probe_add(CURLM* multi, const char* url, const char* host, const cha
      * 全部走主路由表 —— 主线路的会话一死, 所有账号的探测都看到 302, 于是所有账号
      * 同时退登重登。探测必须和本账号的认证/心跳走同一条线路。
      */
-    curl_easy_setopt(handle, CURLOPT_OPENSOCKETFUNCTION, open_socket_callback);
+    if (curl_easy_setopt(handle, CURLOPT_OPENSOCKETFUNCTION, open_socket_callback) != CURLE_OK) goto setup_failed;
 #endif
 
     if (ip != NULL && host != NULL)
     {
         char entry[256];
-        snprintf(entry, sizeof(entry), "%s:80:%s", host, ip);
+        const int len = snprintf(entry, sizeof(entry), "%s:80:%s", host, ip);
+        if (len < 0 || (size_t)len >= sizeof(entry)) goto setup_failed;
 
         resolve = curl_slist_append(NULL, entry);
-        if (resolve == NULL)
-        {
-            curl_easy_cleanup(handle);
-            return false;
-        }
-        curl_easy_setopt(handle, CURLOPT_RESOLVE, resolve);
+        if (resolve == NULL) goto setup_failed;
+        if (curl_easy_setopt(handle, CURLOPT_RESOLVE, resolve) != CURLE_OK) goto setup_failed;
     }
 
-    if (curl_multi_add_handle(multi, handle) != CURLM_OK)
-    {
-        curl_slist_free_all(resolve);
-        curl_easy_cleanup(handle);
-        return false;
-    }
+    if (curl_multi_add_handle(multi, handle) != CURLM_OK) goto setup_failed;
 
     probes[*count].handle = handle;
     probes[*count].resolve = resolve;
     probes[*count].label = label;
-    probes[*count].code = CURLE_OK;
+    probes[*count].code = CURLE_AGAIN; // not completed yet
     (*count)++;
 
     return true;
+
+setup_failed:
+    curl_easy_cleanup(handle);
+    curl_slist_free_all(resolve);
+    return false;
+}
+
+static network_status_t probe_classify(CURLcode transfer, CURLcode info, long http_code)
+{
+    if (transfer != CURLE_OK || info != CURLE_OK) return STATUS_ERROR;
+    if (http_code == HTTP_NO_CONTENT || http_code == HTTP_MOVED_PERMANENTLY) return STATUS_OK;
+    if (http_code == HTTP_FOUND) return STATUS_NEED_AUTH;
+    return STATUS_ERROR;
+}
+
+/* Drain after EVERY perform, including the initial one and the final one
+ * with running == 0. Only completed, successful transfers can classify. */
+static network_status_t probe_drain(CURLM* multi, probe_t* probes, size_t count)
+{
+    network_status_t result = STATUS_ERROR;
+    int left = 0;
+    CURLMsg* msg;
+    while ((msg = curl_multi_info_read(multi, &left)) != NULL)
+    {
+        if (msg->msg != CURLMSG_DONE) continue;
+        for (size_t i = 0; i < count; ++i)
+        {
+            if (probes[i].handle != msg->easy_handle) continue;
+            probes[i].code = msg->data.result;
+            long http_code = 0;
+            const CURLcode info = curl_easy_getinfo(msg->easy_handle, CURLINFO_RESPONSE_CODE, &http_code);
+            const network_status_t observed = probe_classify(msg->data.result, info, http_code);
+            if (result == STATUS_ERROR) result = observed;
+            break;
+        }
+    }
+    return result;
+}
+
+/* Cancellation is opt-in: the background worker owns its running flag;
+ * synchronous callers retain the existing check_network_status contract. */
+static bool probe_cancelled(const atomic_bool* running)
+{
+    return running != NULL && !atomic_load(running);
+}
+
+static network_status_t probe_drive(CURLM* multi, probe_t* probes, size_t count,
+                                    const atomic_bool* keep_running)
+{
+    const uint64_t start = get_steady_tm_ms();
+    if (start == 0) return STATUS_ERROR;
+    int running = 0;
+    while (!probe_cancelled(keep_running))
+    {
+        if (curl_multi_perform(multi, &running) != CURLM_OK) break;
+        const network_status_t result = probe_drain(multi, probes, count);
+        if (probe_cancelled(keep_running)) break;
+        if (result != STATUS_ERROR || running == 0) return result;
+        const uint64_t now = get_steady_tm_ms();
+        if (now < start || now - start >= PROBE_TOTAL_TIMEOUT_MS + 1000) break;
+        const uint64_t left = PROBE_TOTAL_TIMEOUT_MS + 1000 - (now - start);
+        const int slice = keep_running != NULL ? 100 : 200;
+        int wait_fds = 0;
+        /* poll waits even when libcurl has no descriptors, unlike multi_wait. */
+        if (curl_multi_poll(multi, NULL, 0, left < (uint64_t)slice ? (int)left : slice,
+                            &wait_fds) != CURLM_OK) break;
+    }
+    return STATUS_ERROR;
+}
+
+/* No external requests. Exercise immediate completion with an invalid URL,
+ * plus the exact classification boundary used in production. */
+static int probe_test_thread(void* arg)
+{
+    int* value = arg;
+    *value = 42;
+    return 17;
+}
+
+static bool probe_thread_resource_self_test(void)
+{
+    if (sim_thread_create(NULL, NULL) != NULL || sim_thread_join(NULL, NULL) == 0 ||
+        sim_thread_detach(NULL) == 0) return false;
+    for (int i = 0; i < 64; ++i)
+    {
+        int value = 0;
+        int code = -1;
+        sim_thread_t* thread = sim_thread_create(probe_test_thread, &value);
+        if (thread == NULL) return false;
+        if (sim_thread_join(thread, &code) != 0)
+        {
+            /* A failed wait does not establish that the stack argument is safe
+             * to reclaim. This offline executable must stop immediately. */
+            abort();
+        }
+        const bool ok = value == 42 && code == 17 &&
+            sim_thread_join(thread, NULL) != 0 && sim_thread_detach(thread) != 0;
+        sim_thread_destroy(thread);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+#ifdef _WIN32
+/* A loopback listener with no response producer keeps the HTTP request
+ * pending. Cancel only after a real curl_multi_perform has started it. */
+static bool probe_pending_cancel_self_test(void)
+{
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return false;
+    SOCKET listener = INVALID_SOCKET;
+    CURLM* multi = NULL;
+    CURL* easy = NULL;
+    bool added = false, ok = false;
+    struct sockaddr_in addr = {0};
+    int addr_len = sizeof(addr);
+    char url[96];
+    int running = 0;
+    atomic_bool keep_running = true;
+
+    listener = socket(AF_INET, SOCK_STREAM, 0);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (listener == INVALID_SOCKET ||
+        bind(listener, (struct sockaddr*)&addr, sizeof(addr)) != 0 ||
+        listen(listener, 1) != 0 ||
+        getsockname(listener, (struct sockaddr*)&addr, &addr_len) != 0) goto done;
+
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/", (unsigned)ntohs(addr.sin_port));
+    multi = curl_multi_init();
+    easy = curl_easy_init();
+    if (multi == NULL || easy == NULL ||
+        curl_easy_setopt(easy, CURLOPT_URL, url) != CURLE_OK ||
+        curl_easy_setopt(easy, CURLOPT_PROXY, "") != CURLE_OK ||
+        curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT_MS, 2000L) != CURLE_OK ||
+        curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, 3000L) != CURLE_OK ||
+        curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, probe_sink) != CURLE_OK ||
+        curl_multi_add_handle(multi, easy) != CURLM_OK) goto done;
+
+    added = true;
+    if (curl_multi_perform(multi, &running) != CURLM_OK || running != 1) goto done;
+    probe_t probe = { .handle = easy, .code = CURLE_AGAIN };
+    atomic_store(&keep_running, false);
+    ok = probe_drive(multi, &probe, 1, &keep_running) == STATUS_ERROR &&
+         probe.code == CURLE_AGAIN;
+
+done:
+    if (added && curl_multi_remove_handle(multi, easy) != CURLM_OK) ok = false;
+    if (easy != NULL) curl_easy_cleanup(easy);
+    if (multi != NULL && curl_multi_cleanup(multi) != CURLM_OK) ok = false;
+    if (listener != INVALID_SOCKET && closesocket(listener) != 0) ok = false;
+    WSACleanup();
+    return ok;
+}
+#endif
+
+bool probe_resource_self_test(void)
+{
+    if (!probe_thread_resource_self_test()) return false;
+#ifdef _WIN32
+    if (!probe_pending_cancel_self_test()) return false;
+#endif
+    if (probe_sink(NULL, SIZE_MAX, 2, NULL) != 0 ||
+        probe_sink(NULL, 4, 8, NULL) != 32 ||
+        probe_classify(CURLE_OK, CURLE_OK, 204) != STATUS_OK ||
+        probe_classify(CURLE_OK, CURLE_OK, 301) != STATUS_OK ||
+        probe_classify(CURLE_OK, CURLE_OK, 302) != STATUS_NEED_AUTH ||
+        probe_classify(CURLE_OK, CURLE_OK, 500) != STATUS_ERROR ||
+        probe_classify(CURLE_PARTIAL_FILE, CURLE_OK, 204) != STATUS_ERROR ||
+        probe_classify(CURLE_OPERATION_TIMEDOUT, CURLE_OK, 302) != STATUS_ERROR ||
+        probe_classify(CURLE_OK, CURLE_BAD_FUNCTION_ARGUMENT, 204) != STATUS_ERROR)
+        return false;
+
+    CURLM* multi = curl_multi_init();
+    if (multi == NULL) return false;
+    CURL* handle = curl_easy_init();
+    if (handle == NULL) { curl_multi_cleanup(multi); return false; }
+    bool added = false;
+    bool ok = false;
+    if (curl_easy_setopt(handle, CURLOPT_URL, "://") == CURLE_OK &&
+        curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, probe_sink) == CURLE_OK &&
+        curl_multi_add_handle(multi, handle) == CURLM_OK)
+    {
+        added = true;
+        probe_t probe = { .handle = handle, .code = CURLE_AGAIN };
+        atomic_bool keep_running = false;
+        ok = probe_drive(multi, &probe, 1, &keep_running) == STATUS_ERROR &&
+            probe.code == CURLE_AGAIN; // no perform after cancellation
+        atomic_store(&keep_running, true);
+        ok = ok && probe_drive(multi, &probe, 1, &keep_running) == STATUS_ERROR &&
+            probe.code == CURLE_URL_MALFORMAT;
+    }
+    if (added) curl_multi_remove_handle(multi, handle);
+    curl_easy_cleanup(handle);
+    curl_multi_cleanup(multi);
+    return ok;
 }
 
 /**
@@ -361,7 +561,7 @@ static bool probe_add(CURLM* multi, const char* url, const char* host, const cha
  */
 static void probe_report_failure(const probe_t* probes, const size_t count)
 {
-    static uint64_t s_last_report_ms = 0;
+    static _Thread_local uint64_t s_last_report_ms = 0;
 
     const uint64_t now = get_steady_tm_ms();
     if (now - s_last_report_ms < PROBE_FAIL_REPORT_MS) return;
@@ -396,9 +596,10 @@ static void probe_report_failure(const probe_t* probes, const size_t count)
  *
  * @return STATUS_OK 拿到 204/301, STATUS_NEED_AUTH 拿到 302, 其余 STATUS_ERROR
  */
-static network_status_t probe_group(const probe_target_t* targets, const size_t count)
+static network_status_t probe_group(const probe_target_t* targets, const size_t count,
+                                    const atomic_bool* keep_running)
 {
-    if (targets == NULL || count == 0) return STATUS_ERROR;
+    if (targets == NULL || count == 0 || probe_cancelled(keep_running)) return STATUS_ERROR;
 
     CURLM* multi = curl_multi_init();
     if (multi == NULL) return STATUS_ERROR;
@@ -408,7 +609,7 @@ static network_status_t probe_group(const probe_target_t* targets, const size_t 
     size_t probe_count = 0;
     network_status_t result = STATUS_ERROR;
 
-    for (size_t i = 0; i < count && probe_count < PROBE_MAX; i++)
+    for (size_t i = 0; i < count && probe_count < PROBE_MAX && !probe_cancelled(keep_running); i++)
     {
         char host[128] = "";
         const bool has_host = url_host(targets[i].url, host, sizeof(host));
@@ -417,7 +618,7 @@ static network_status_t probe_group(const probe_target_t* targets, const size_t 
         if (known != NULL && known->ip_count > 0)
         {
             // 域名: 只发固定 IP 的各路, 不走系统 DNS
-            for (uint8_t k = 0; k < known->ip_count && probe_count < PROBE_MAX; k++)
+            for (uint8_t k = 0; k < known->ip_count && k < PROBE_IP_MAX && probe_count < PROBE_MAX && !probe_cancelled(keep_running); k++)
             {
                 snprintf(labels[probe_count], sizeof(labels[0]), "%s/ip%" PRIu8, targets[i].label, (uint8_t)(k + 1));
                 probe_add(multi, targets[i].url, host, known->ips[k], labels[probe_count], probes, &probe_count);
@@ -431,52 +632,11 @@ static network_status_t probe_group(const probe_target_t* targets, const size_t 
         }
     }
 
-    if (probe_count > 0)
+    if (probe_count > 0 && !probe_cancelled(keep_running))
     {
-        const uint64_t deadline = get_steady_tm_ms() + PROBE_TOTAL_TIMEOUT_MS + 1000;
-        int running = 0;
-
-        curl_multi_perform(multi, &running);
-
-        while (running > 0 && get_steady_tm_ms() < deadline)
-        {
-            int wait_fds = 0;
-            curl_multi_wait(multi, NULL, 0, 200, &wait_fds);
-            curl_multi_perform(multi, &running);
-
-            CURLMsg* msg = NULL;
-            int left = 0;
-            while ((msg = curl_multi_info_read(multi, &left)) != NULL)
-            {
-                if (msg->msg != CURLMSG_DONE) continue;
-
-                for (size_t i = 0; i < probe_count; i++)
-                {
-                    if (probes[i].handle == msg->easy_handle)
-                    {
-                        probes[i].code = msg->data.result;
-                    }
-                }
-
-                long http_code = 0;
-                curl_easy_getinfo(msg->easy_handle, CURLINFO_RESPONSE_CODE, &http_code);
-
-                if (http_code == HTTP_NO_CONTENT || http_code == HTTP_MOVED_PERMANENTLY)
-                {
-                    result = STATUS_OK;
-                    running = 0;
-                    break;
-                }
-                if (http_code == HTTP_FOUND)
-                {
-                    result = STATUS_NEED_AUTH;
-                    running = 0;
-                    break;
-                }
-            }
-        }
-
-        if (result == STATUS_ERROR) probe_report_failure(probes, probe_count);
+        result = probe_drive(multi, probes, probe_count, keep_running);
+        if (result == STATUS_ERROR && !probe_cancelled(keep_running))
+            probe_report_failure(probes, probe_count);
     }
 
     for (size_t i = 0; i < probe_count; i++)
@@ -487,16 +647,18 @@ static network_status_t probe_group(const probe_target_t* targets, const size_t 
     }
     curl_multi_cleanup(multi);
 
-    return result;
+    return probe_cancelled(keep_running) ? STATUS_ERROR : result;
 }
 
-network_status_t check_network_status(const bool connect_only)
+static network_status_t check_network_status_impl(const bool connect_only, const atomic_bool* keep_running)
 {
     /**
      * connect_only 只为兼容调用点保留: 探测统一发完整 GET 再看状态码 ——
      * 只建连接不请求的话拿不到 204/302, 也就分不清"能上网"和"需要认证"。
      */
     (void)connect_only;
+    if (probe_cancelled(keep_running) || g_prog_status == NULL || g_prog_cnt <= 0)
+        return STATUS_ERROR;
 
     /**
      * 联网探测目标来自配置 (probe_hosts), 没配就用内置的 hicloud / miui 两组。
@@ -520,14 +682,20 @@ network_status_t check_network_status(const bool connect_only)
     };
 
     const network_status_t status =
-        (internet_count > 0) ? probe_group(internet_targets, internet_count) : STATUS_ERROR;
+        (internet_count > 0) ? probe_group(internet_targets, internet_count, keep_running) : STATUS_ERROR;
+    if (probe_cancelled(keep_running)) return STATUS_ERROR;
     if (status != STATUS_ERROR) return status;
 
     /**
      * 外网都不通: 再并发试认证服务器 —— 能连上 (返回 302 或其它状态码) 说明
      * 人还在校园网里, 只是没过认证。
      */
-    return probe_group(auth_targets, sizeof(auth_targets) / sizeof(auth_targets[0]));
+    return probe_group(auth_targets, sizeof(auth_targets) / sizeof(auth_targets[0]), keep_running);
+}
+
+network_status_t check_network_status(const bool connect_only)
+{
+    return check_network_status_impl(connect_only, NULL);
 }
 
 /**
@@ -545,6 +713,14 @@ void log_network_state_change(const network_status_t status)
 {
     static _Thread_local network_status_t s_last_state = (network_status_t)-1;
 
+    static _Thread_local uint64_t s_last_event_ms = 0;
+    const uint64_t now = get_steady_tm_ms();
+    if (g_ephemeral_auth && (status != s_last_state || now - s_last_event_ms >= 10000))
+    {
+        ephemeral_emit_event(status == STATUS_OK ? "network_online" :
+            (status == STATUS_NEED_AUTH ? "network_required" : "network_unknown"), 0);
+        s_last_event_ms = now;
+    }
     if (status == s_last_state) return;
 
     s_last_state = status;
@@ -570,18 +746,29 @@ void log_network_state_change(const network_status_t status)
  * 接口只读缓存。
  * ------------------------------------------------------------------ */
 
-static volatile bool s_probe_running = false;
-static network_status_t s_probe_cached = STATUS_ERROR;
+static atomic_bool s_probe_running = false;
+static _Atomic(network_status_t) s_probe_cached = STATUS_ERROR;
 static sim_thread_t* s_probe_thread = NULL;
+#ifdef _WIN32
+static SRWLOCK s_probe_lifecycle = SRWLOCK_INIT;
+static void probe_lock(void) { AcquireSRWLockExclusive(&s_probe_lifecycle); }
+static void probe_unlock(void) { ReleaseSRWLockExclusive(&s_probe_lifecycle); }
+#else
+static pthread_mutex_t s_probe_lifecycle = PTHREAD_MUTEX_INITIALIZER;
+static void probe_lock(void) { pthread_mutex_lock(&s_probe_lifecycle); }
+static void probe_unlock(void) { pthread_mutex_unlock(&s_probe_lifecycle); }
+#endif
 
 static int probe_thread(void* arg)
 {
     (void)arg;
 
-    while (s_probe_running)
+    while (atomic_load(&s_probe_running))
     {
         const uint64_t started = get_steady_tm_ms();
-        s_probe_cached = check_network_status(true);
+        const network_status_t observed = check_network_status_impl(true, &s_probe_running);
+        if (!atomic_load(&s_probe_running)) return 0;
+        atomic_store(&s_probe_cached, observed);
         const uint64_t elapsed = get_steady_tm_ms() - started;
 
         /**
@@ -591,12 +778,12 @@ static int probe_thread(void* arg)
         if (elapsed >= 1000)
         {
             LOG_WARN("联网状态探测耗时 %" PRIu64 " 毫秒 (结果 %d): 有检测地址不可达, 已按短超时放弃并换下一个",
-                     elapsed, (int)s_probe_cached);
+                     elapsed, (int)observed);
         }
 
         for (int i = 0; i < PROBE_INTERVAL_MS / 100; i++)
         {
-            if (s_probe_running == false) return 0;
+            if (!atomic_load(&s_probe_running)) return 0;
             sleep_ms(100, false);
         }
     }
@@ -604,35 +791,114 @@ static int probe_thread(void* arg)
     return 0;
 }
 
-void net_probe_start(void)
+static bool start_probe_worker(sim_thread_func worker)
 {
-    if (s_probe_thread != NULL) return;
-
-    s_probe_running = true;
-    s_probe_thread = sim_thread_create(probe_thread, NULL);
-    if (s_probe_thread == NULL)
+    probe_lock();
+    if (s_probe_thread != NULL)
     {
-        s_probe_running = false;
-        LOG_WARN("联网状态探测线程创建失败, /api/status/online 会一直返回未知状态");
-        return;
+        const bool running = atomic_load(&s_probe_running);
+        probe_unlock();
+        return running;
     }
 
-    LOG_DEBUG("联网状态探测已启动 (后台, %d 毫秒一轮)", PROBE_INTERVAL_MS);
+    atomic_store(&s_probe_cached, STATUS_ERROR);
+    atomic_store(&s_probe_running, true);
+    s_probe_thread = sim_thread_create(worker, NULL);
+    const bool started = s_probe_thread != NULL;
+    if (!started) atomic_store(&s_probe_running, false);
+    probe_unlock();
+    return started;
+}
+
+void net_probe_start(void)
+{
+    if (!start_probe_worker(probe_thread))
+        LOG_WARN("联网状态探测线程创建失败或旧线程尚未回收");
+}
+
+bool net_probe_stop_checked(void)
+{
+    probe_lock();
+    atomic_store(&s_probe_running, false);
+    if (s_probe_thread != NULL)
+    {
+        if (sim_thread_join(s_probe_thread, NULL) != 0)
+        {
+            probe_unlock();
+            return false;
+        }
+        sim_thread_destroy(s_probe_thread);
+        s_probe_thread = NULL;
+    }
+    atomic_store(&s_probe_cached, STATUS_ERROR);
+    probe_unlock();
+    return true;
 }
 
 void net_probe_stop(void)
 {
-    if (s_probe_thread == NULL) return;
+    if (!net_probe_stop_checked())
+        LOG_ERROR("联网状态探测线程等待失败, 保留线程对象");
+}
 
-    s_probe_running = false;
-    int result_code = 0;
-    sim_thread_join(s_probe_thread, &result_code);
-    s_probe_thread = NULL;
+static int probe_lifecycle_test_worker(void* arg)
+{
+    (void)arg;
+    while (atomic_load(&s_probe_running))
+    {
+#ifdef _WIN32
+        Sleep(1);
+#else
+        const struct timespec delay = {0, 1000000L};
+        nanosleep(&delay, NULL);
+#endif
+    }
+    return 0;
+}
 
-    LOG_DEBUG("联网状态探测已停止");
+static int probe_lifecycle_test_stop(void* arg)
+{
+    (void)arg;
+    return net_probe_stop_checked() ? 0 : 1;
+}
+
+bool probe_lifecycle_self_test(void)
+{
+    atomic_bool cancelled_worker = false;
+    /* Must return before consulting account configuration or opening sockets. */
+    if (check_network_status_impl(true, &cancelled_worker) != STATUS_ERROR)
+        return false;
+    for (int i = 0; i < 16; ++i)
+    {
+        if (!start_probe_worker(probe_lifecycle_test_worker) ||
+            !start_probe_worker(probe_lifecycle_test_worker))
+        {
+            net_probe_stop_checked();
+            return false;
+        }
+        atomic_store(&s_probe_cached, STATUS_OK);
+        sim_thread_t* one = sim_thread_create(probe_lifecycle_test_stop, NULL);
+        sim_thread_t* two = sim_thread_create(probe_lifecycle_test_stop, NULL);
+        int rc1 = -1, rc2 = -1;
+        if (one != NULL)
+        {
+            if (sim_thread_join(one, &rc1) != 0) abort();
+            sim_thread_destroy(one);
+        }
+        if (two != NULL)
+        {
+            if (sim_thread_join(two, &rc2) != 0) abort();
+            sim_thread_destroy(two);
+        }
+        if (!net_probe_stop_checked() || rc1 != 0 || rc2 != 0 ||
+            s_probe_thread != NULL || atomic_load(&s_probe_running) ||
+            atomic_load(&s_probe_cached) != STATUS_ERROR) return false;
+    }
+    return true;
 }
 
 network_status_t net_probe_status(void)
 {
-    return s_probe_cached;
+    if (!atomic_load(&s_probe_running)) return STATUS_ERROR;
+    return atomic_load(&s_probe_cached);
 }

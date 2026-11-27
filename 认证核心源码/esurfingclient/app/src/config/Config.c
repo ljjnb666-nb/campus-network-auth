@@ -1,3 +1,4 @@
+#include "cipher/CipherUtils.h"
 #include "config/Config.h"
 
 #include "ConfigInternal.h"
@@ -88,17 +89,15 @@ static void clear_json_values(cJSON* item)
 {
     for (; item != NULL; item = item->next)
     {
+        /* cJSON reference nodes borrow their payload and children. */
+        if (item->type & cJSON_IsReference) continue;
         if (item->child) clear_json_values(item->child);
-        if (item->valuestring)
-        {
-            volatile char* p = item->valuestring;
-            while (*p) *p++ = 0;
-        }
+        if (item->valuestring) cipher_secure_zero(item->valuestring, strlen(item->valuestring) + 1);
     }
 }
 static void delete_cfg_json(cJSON* item)
 {
-    if (g_ephemeral_auth) clear_json_values(item);
+    clear_json_values(item);
     cJSON_Delete(item);
 }
 static void clear_ephemeral_input(void)
@@ -189,7 +188,8 @@ static bool write_cfg_json(const cJSON* cfg_json)
     if (!cfg_file)
     {
         LOG_ERROR("无法生成文件: %s", tmp_path);
-        free(cfg_text);
+        cipher_secure_zero(cfg_text, strlen(cfg_text) + 1);
+        cJSON_free(cfg_text);
         return false;
     }
     /**
@@ -204,7 +204,8 @@ static bool write_cfg_json(const cJSON* cfg_json)
     const bool written = (fprintf(cfg_file, "%s", cfg_text) > 0);
     fflush(cfg_file);
     fclose(cfg_file);
-    free(cfg_text);
+    cipher_secure_zero(cfg_text, strlen(cfg_text) + 1);
+    cJSON_free(cfg_text);
 
     if (written == false)
     {
@@ -302,7 +303,7 @@ static bool save_cfg_from_cfg(const cJSON* cfg_json)
     }
 
     const bool ok = write_cfg_json(root);
-    cJSON_Delete(root);
+    delete_cfg_json(root);
     return ok;
 }
 
@@ -330,7 +331,7 @@ bool save_cfg(const char* configs_str)
     {
         char* old_text = read_cfg_file();
         cJSON* old = (old_text != NULL) ? cJSON_Parse(old_text) : NULL;
-        free(old_text);
+        s_secure_free_string(old_text);
         cJSON* old_accounts = (old != NULL) ? cJSON_GetObjectItem(old, "accounts") : NULL;
         if (cJSON_IsArray(old_accounts))
         {
@@ -361,14 +362,14 @@ bool save_cfg(const char* configs_str)
                 }
             }
         }
-        cJSON_Delete(old);
+        delete_cfg_json(old);
     }
 
     // 落盘前补全缺失键, 免得手写/旧版配置缺字段
     complete_cfg(configs);
 
     const bool saved = write_cfg_json(configs);
-    cJSON_Delete(configs);
+    delete_cfg_json(configs);
 
     return saved;
 }
@@ -549,6 +550,58 @@ static account_state_t fill_account(const cJSON* account, const uint8_t cfg_no, 
     return ACCOUNT_READY;
 }
 
+/* cJSON strings are NUL-terminated; reject decoded NUL before parsing,
+ * including in object names. Respect escaped backslashes so a literal
+ * backslash followed by u0000 remains valid. Also reject raw controls
+ * inside strings and invalid UTF-8 before passing input to cJSON. */
+static bool validate_ephemeral_text(const char* input)
+{
+    const unsigned char* p = (const unsigned char*)input;
+    bool in_string = false;
+    while (*p)
+    {
+        unsigned char ch = *p++;
+        if (ch >= 0x80)
+        {
+            unsigned int extra;
+            unsigned char low = 0x80, high = 0xbf;
+            if (ch >= 0xc2 && ch <= 0xdf) extra = 1;
+            else if (ch >= 0xe0 && ch <= 0xef)
+            {
+                extra = 2;
+                if (ch == 0xe0) low = 0xa0;
+                if (ch == 0xed) high = 0x9f;
+            }
+            else if (ch >= 0xf0 && ch <= 0xf4)
+            {
+                extra = 3;
+                if (ch == 0xf0) low = 0x90;
+                if (ch == 0xf4) high = 0x8f;
+            }
+            else return false;
+            if (*p < low || *p > high) return false;
+            ++p;
+            for (unsigned int i = 1; i < extra; ++i)
+            {
+                if (*p < 0x80 || *p > 0xbf) return false;
+                ++p;
+            }
+            continue;
+        }
+        if (in_string && ch == '\\')
+        {
+            if (*p == '\0') return false;
+            if (*p == 'u' && strncmp((const char*)p, "u0000", 5) == 0) return false;
+            if (strchr("\"\\/bfnrtu", *p) == NULL) return false;
+            ++p;
+            continue;
+        }
+        if (ch == '"') in_string = !in_string;
+        else if (ch < 0x20 && (in_string || (ch != '\t' && ch != '\r' && ch != '\n'))) return false;
+    }
+    return !in_string;
+}
+
 bool load_cfg(void)
 {
     /* Subsequent loads reuse the validated in-memory account; there is no file. */
@@ -572,6 +625,7 @@ bool load_cfg(void)
             LOG_FATAL("分配内存失败");
             return false;
         }
+        runtime_status_init(&g_prog_status[0].runtime_status);
     }
 #ifdef __OPENWRT__
 
@@ -593,12 +647,16 @@ bool load_cfg(void)
     cJSON* cfg_json = NULL;
     if (g_ephemeral_auth)
     {
-        cJSON* input = cJSON_Parse(g_ephemeral_input);
+        cJSON* input = validate_ephemeral_text(g_ephemeral_input) ?
+            cJSON_ParseWithOpts(g_ephemeral_input, NULL, 1) : NULL;
         clear_ephemeral_input();
         const cJSON* user = input ? cJSON_GetObjectItemCaseSensitive(input, "username") : NULL;
         const cJSON* pass = input ? cJSON_GetObjectItemCaseSensitive(input, "password") : NULL;
         const cJSON* channel = input ? cJSON_GetObjectItemCaseSensitive(input, "channel") : NULL;
-        if (!cJSON_IsString(user) || !cJSON_IsString(pass) || !cJSON_IsNumber(channel) ||
+        // Exactly three case-sensitive fields. Duplicate or unknown keys
+        // cannot coexist with all three required fields at this size.
+        if (!cJSON_IsObject(input) || cJSON_GetArraySize(input) != 3 ||
+            !cJSON_IsString(user) || !cJSON_IsString(pass) || !cJSON_IsNumber(channel) ||
             !user->valuestring[0] || !pass->valuestring[0] ||
             strlen(user->valuestring) >= USR_LEN || strlen(pass->valuestring) >= PWD_LEN ||
             channel->valuedouble != channel->valueint || channel->valueint < 1 || channel->valueint > 5)
@@ -664,7 +722,7 @@ bool load_cfg(void)
     fclose(cfg_file);
 
     cfg_json = cJSON_Parse(cfg_data);
-    free(cfg_data);
+    s_secure_free(cfg_data, (size_t)len + 1);
     }
     if (!cfg_json)
     {
@@ -761,13 +819,16 @@ bool load_cfg(void)
         usable = false;
     }
 
-    // 账号数超 255 会把 uint8_t 计数回绕, 先按 int 校验再截断
+    // g_prog_cnt/valid_cnt are signed int8_t, not uint8_t.
     const int cnt_raw = cJSON_GetArraySize(accounts);
-    if (cnt_raw > 255)
-    {
-        LOG_WARN("账号数量 %d 超过 255, 仅加载前 255 个", cnt_raw);
-    }
-    const uint8_t cnt = (uint8_t)cnt_raw;
+#ifdef __OPENWRT__
+    const int max_accounts = INT8_MAX;
+#else
+    const int max_accounts = UINT8_MAX;
+#endif
+    if (cnt_raw > max_accounts)
+        LOG_WARN("账号数量 %d 超过 %d, 仅加载前 %d 个", cnt_raw, max_accounts, max_accounts);
+    const uint8_t cnt = (uint8_t)(cnt_raw > max_accounts ? max_accounts : cnt_raw);
 
     int8_t valid_cnt = 0;
 
@@ -781,15 +842,21 @@ bool load_cfg(void)
         LOG_DEBUG("OpenWRT 环境, 会尝试加载所有有效配置");
     }
 
-    prog_status_t* new_prog_status = realloc(g_prog_status, sizeof(prog_status_t) * cnt);
+    /* Keep a global configuration slot even for an empty account list.
+     * Allocation/initialization must occur with all readers quiescent. */
+    const size_t slots = cnt > 0 ? cnt : 1;
+    prog_status_t* new_prog_status = realloc(g_prog_status, sizeof(prog_status_t) * slots);
     if (new_prog_status)
     {
         g_prog_status = new_prog_status;
-        memset(g_prog_status, 0, sizeof(prog_status_t) * cnt);
+        memset(g_prog_status, 0, sizeof(prog_status_t) * slots);
+        for (size_t i = 0; i < slots; ++i)
+            runtime_status_init(&g_prog_status[i].runtime_status);
     }
     else
     {
         LOG_FATAL("重分配内存失败");
+        delete_cfg_json(cfg_json);
         return false;
     }
 

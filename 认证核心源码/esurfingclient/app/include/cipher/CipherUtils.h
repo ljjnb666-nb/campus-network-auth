@@ -20,6 +20,23 @@ void* s_calloc(size_t count, size_t size);
 
 void s_free(void* ptr);
 
+/* Length is the owned allocation size (or the initialized sensitive extent).
+ * Never pass a string length in place of a known binary buffer size. */
+void s_secure_free(void* ptr, size_t len);
+
+/* C-string extent only; use s_secure_free with the original allocation
+ * length for binary or fixed-capacity buffers. */
+static inline void s_secure_free_string(char* ptr)
+{
+    if (ptr) s_secure_free(ptr, strlen(ptr) + 1);
+}
+
+static inline void cipher_secure_zero(void* ptr, size_t len)
+{
+    volatile unsigned char* p = (volatile unsigned char*)ptr;
+    while (len != 0) { *p++ = 0; --len; }
+}
+
 size_t s_strlen(const char* str);
 
 uint8_t* pkcs7_padding(const uint8_t* data, size_t data_len, size_t block_size, size_t* out_len);

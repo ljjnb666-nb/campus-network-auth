@@ -1,4 +1,4 @@
-#include "utils/sim/SimEvp.h"
+#include "SimEvpInternal.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -125,6 +125,7 @@ static void md5_transform(uint32_t state[4], const uint8_t block[64])
     state[1] += b;
     state[2] += c;
     state[3] += d;
+    simssl_secure_zero(x, sizeof(x));
 }
 
 struct myssl_md_st
@@ -154,7 +155,11 @@ EVP_MD_CTX* EVP_MD_CTX_new(void)
 
 void EVP_MD_CTX_free(EVP_MD_CTX* ctx)
 {
-    if (ctx) free(ctx);
+    if (ctx)
+    {
+        simssl_secure_zero(ctx, sizeof(*ctx));
+        free(ctx);
+    }
 }
 
 int EVP_DigestInit_ex(EVP_MD_CTX* ctx, const EVP_MD* type, void* impl)
@@ -182,11 +187,12 @@ int EVP_DigestUpdate(EVP_MD_CTX* ctx, const void* data, size_t len)
     idx = (size_t)(ctx->count % 64);
     ctx->count += len;
 
-    if (idx + len >= 64)
+    if (len >= 64 - idx)
     {
         size_t part = 64 - idx;
         memcpy(ctx->buffer + idx, p, part);
         md5_transform(ctx->state, ctx->buffer);
+        simssl_secure_zero(ctx->buffer, sizeof(ctx->buffer));
         p += part;
         len -= part;
         while (len >= 64)
@@ -233,6 +239,7 @@ int EVP_DigestFinal_ex(EVP_MD_CTX* ctx, unsigned char* md, unsigned int* size)
         md[i * 4 + 3] = (uint8_t)((ctx->state[i] >> 24) & 0xFF);
     }
     if (size) *size = 16;
+    simssl_secure_zero(ctx->buffer, sizeof(ctx->buffer));
     return 1;
 }
 

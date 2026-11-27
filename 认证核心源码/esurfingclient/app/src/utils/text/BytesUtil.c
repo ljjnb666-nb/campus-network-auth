@@ -1,3 +1,4 @@
+#include "cipher/CipherUtils.h"
 #include "utils/text/TextUtils.h"
 
 #include "core/States.h"
@@ -32,7 +33,9 @@ char* bytes2base64(const uint8_t* in, const size_t len)
 {
     if (in == NULL && len > 0) return NULL;
 
-    const size_t olen = 4 * ((len + 2) / 3);
+    const size_t groups = len / 3 + (len % 3 != 0);
+    if (groups > (SIZE_MAX - 1) / 4) return NULL;
+    const size_t olen = 4 * groups;
     char* out = malloc(olen + 1);
     if (!out) return NULL;
 
@@ -69,7 +72,9 @@ char* bytes2base64(const uint8_t* in, const size_t len)
 
 uint8_t* base642bytes(const char* in, size_t* out_len)
 {
-    if (in == NULL || out_len == NULL) return NULL;
+    if (out_len == NULL) return NULL;
+    *out_len = 0;
+    if (in == NULL) return NULL;
 
     const size_t in_len = strlen(in);
 
@@ -103,14 +108,14 @@ uint8_t* base642bytes(const char* in, size_t* out_len)
         /* 前两个字符必须是合法 Base64 字符，不能是 '=' */
         if (v0 < 0 || v1 < 0)
         {
-            free(out);
+            s_secure_free(out, max_out);
             return NULL;
         }
 
         /* -1 表示非法字符 */
         if (v2 == -1 || v3 == -1)
         {
-            free(out);
+            s_secure_free(out, max_out);
             return NULL;
         }
 
@@ -120,14 +125,14 @@ uint8_t* base642bytes(const char* in, size_t* out_len)
             /* 第三个是 '='，第四个也必须是 '=' */
             if (v3 != -2)
             {
-                free(out);
+                s_secure_free(out, max_out);
                 return NULL;
             }
 
             /* 填充只能出现在最后一个 4 字符块 */
             if (i + 4 != in_len)
             {
-                free(out);
+                s_secure_free(out, max_out);
                 return NULL;
             }
         }
@@ -136,7 +141,7 @@ uint8_t* base642bytes(const char* in, size_t* out_len)
             /* 第四个是 '='，第三个必须是有效字符，且必须是最后一块 */
             if (i + 4 != in_len)
             {
-                free(out);
+                s_secure_free(out, max_out);
                 return NULL;
             }
         }

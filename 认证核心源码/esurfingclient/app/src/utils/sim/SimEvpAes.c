@@ -78,6 +78,7 @@ void aes128_expand_key(const uint8_t key[16], uint8_t rk[176])
             rcon = aes_gmul(rcon, 0x02);
         }
         for (j = 0; j < 4; j++) rk[i + j] = (uint8_t)(rk[i - 16 + j] ^ t[j]);
+        simssl_secure_zero(t, sizeof(t));
     }
 }
 
@@ -108,6 +109,7 @@ static void aes_shift_rows(uint8_t s[16])
         for (c = 0; c < 4; c++)
             t[r + 4 * c] = s[r + 4 * ((c + r) & 3)];
     memcpy(s, t, 16);
+    simssl_secure_zero(t, sizeof(t));
 }
 
 static void aes_inv_shift_rows(uint8_t s[16])
@@ -118,6 +120,7 @@ static void aes_inv_shift_rows(uint8_t s[16])
         for (c = 0; c < 4; c++)
             t[r + 4 * c] = s[r + 4 * ((c - r + 4) & 3)];
     memcpy(s, t, 16);
+    simssl_secure_zero(t, sizeof(t));
 }
 
 static void aes_mix_columns(uint8_t s[16])
@@ -166,6 +169,7 @@ void aes128_encrypt_block_rk(const uint8_t rk[176], const uint8_t in[16], uint8_
     aes_shift_rows(s);
     aes_add_round_key(s, rk + 160);
     memcpy(out, s, 16);
+    simssl_secure_zero(s, sizeof(s));
 }
 
 void aes128_decrypt_block_rk(const uint8_t rk[176], const uint8_t in[16], uint8_t out[16])
@@ -186,6 +190,7 @@ void aes128_decrypt_block_rk(const uint8_t rk[176], const uint8_t in[16], uint8_
     aes_inv_sub_bytes(s);
     aes_add_round_key(s, rk);
     memcpy(out, s, 16);
+    simssl_secure_zero(s, sizeof(s));
 }
 
 void simssl_aes128_encrypt_block(const unsigned char key[16], const unsigned char in[16],
@@ -194,6 +199,7 @@ void simssl_aes128_encrypt_block(const unsigned char key[16], const unsigned cha
     uint8_t rk[176];
     aes128_expand_key(key, rk);
     aes128_encrypt_block_rk(rk, in, out);
+    simssl_secure_zero(rk, sizeof(rk));
 }
 
 void simssl_aes128_decrypt_block(const unsigned char key[16], const unsigned char in[16],
@@ -202,6 +208,7 @@ void simssl_aes128_decrypt_block(const unsigned char key[16], const unsigned cha
     uint8_t rk[176];
     aes128_expand_key(key, rk);
     aes128_decrypt_block_rk(rk, in, out);
+    simssl_secure_zero(rk, sizeof(rk));
 }
 
 static const EVP_CIPHER g_aes_128_ecb = {.alg = MYSSL_ALG_AES_128_ECB, .block_size = 16, .key_len = 16, .iv_len = 0, .name = "AES-128-ECB"};

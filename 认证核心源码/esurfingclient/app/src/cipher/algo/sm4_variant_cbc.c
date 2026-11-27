@@ -2,6 +2,7 @@
 #include "cipher/CipherUtils.h"
 
 #include <stdint.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -33,11 +34,6 @@ static const uint8_t SM4_VARIANT_S[256] = {
     0xd6,0x90,0xe9,0xfe,0xcc,0xe1,0x3d,0xb7,0x16,0xb6,0x14,0xc2,0x28,0xfb,0x2c,0x05,0x2b,0x67,0x9a,0x76,0x2a,0xbe,0x04,0xc3,0xaa,0x44,0x13,0x26,0x49,0x86,0x06,0x99,0x9c,0x42,0x50,0xf4,0x91,0xef,0x98,0x7a,0x33,0x54,0x0b,0x43,0xed,0xcf,0xac,0x62,0xe4,0xb3,0x1c,0xa9,0xc9,0x08,0xe8,0x95,0x80,0xdf,0x94,0xfa,0x75,0x8f,0x3f,0xa6,0x47,0x07,0xa7,0xfc,0xf3,0x73,0x17,0xba,0x83,0x59,0x3c,0x19,0xe6,0x85,0x4f,0xa8,0x68,0x6b,0x81,0xb2,0x71,0x64,0xda,0x8b,0xf8,0xeb,0x0f,0x4b,0x70,0x56,0x9d,0x35,0x1e,0x24,0x0e,0x5e,0x63,0x58,0xd1,0xa2,0x25,0x22,0x7c,0x3b,0x01,0x21,0x78,0x87,0xd4,0x00,0x46,0x57,0x9f,0xd3,0x27,0x52,0x4c,0x36,0x02,0xe7,0xa0,0xc4,0xc8,0x9e,0xea,0xbf,0x8a,0xd2,0x40,0xc7,0x38,0xb5,0xa3,0xf7,0xf2,0xce,0xf9,0x61,0x15,0xa1,0xe0,0xae,0x5d,0xa4,0x9b,0x34,0x1a,0x55,0xad,0x93,0x32,0x30,0xf5,0x8c,0xb1,0xe3,0x1d,0xf6,0xe2,0x2e,0x82,0x66,0xca,0x60,0xc0,0x29,0x23,0xab,0x0d,0x53,0x4e,0x6f,0xd5,0xdb,0x37,0x45,0xde,0xfd,0x8e,0x2f,0x03,0xff,0x6a,0x72,0x6d,0x6c,0x5b,0x51,0x8d,0x1b,0xaf,0x92,0xbb,0xdd,0xbc,0x7f,0x11,0xd9,0x5c,0x41,0x1f,0x10,0x5a,0xd8,0x0a,0xc1,0x31,0x88,0xa5,0xcd,0x7b,0xbd,0x2d,0x74,0xd0,0x12,0xb8,0xe5,0xb4,0xb0,0x89,0x69,0x97,0x4a,0x0c,0x96,0x77,0x7e,0x65,0xb9,0xf1,0x09,0xc5,0x6e,0xc6,0x84,0x18,0xf0,0x7d,0xec,0x3a,0xdc,0x4d,0x20,0x79,0xee,0x5f,0x3e,0xd7,0xcb,0x39,0x48
 };
 
-static uint32_t sm4_variant_bswap32(uint32_t x)
-{
-    return ((x & 0xFF) << 24) | ((x & 0xFF00) << 8) | ((x >> 8) & 0xFF00) | (x >> 24);
-}
-
 static uint32_t sm4_variant_rd32be(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
@@ -54,7 +50,7 @@ static void sm4_variant_keysched(const uint8_t key[16], uint32_t rk[32], int mod
 {
     uint32_t K[4];
     for (int i = 0; i < 4; ++i)
-        K[i] = sm4_variant_bswap32(((const uint32_t *)key)[i]) ^ SM4_VARIANT_FK[i];
+        K[i] = sm4_variant_rd32be(key + 4 * i) ^ SM4_VARIANT_FK[i];
     for (int i = 0; i < 32; ++i)
     {
         uint32_t t = K[1] ^ K[2] ^ K[3] ^ SM4_VARIANT_CK[i];
@@ -78,6 +74,7 @@ static void sm4_variant_keysched(const uint8_t key[16], uint32_t rk[32], int mod
             rk[31 - i] = t;
         }
     }
+    cipher_secure_zero(K, sizeof(K));
 }
 
 /* one 16-byte block (sub_1FA0, forward transform, same for enc/dec) */
@@ -108,6 +105,8 @@ static void sm4_variant_block(uint32_t rk[32], const uint8_t in[16], uint8_t out
     sm4_variant_wr32be(out + 4, store[30]);
     sm4_variant_wr32be(out + 8, store[29]);
     sm4_variant_wr32be(out + 12, store[28]);
+    cipher_secure_zero(X, sizeof(X));
+    cipher_secure_zero(store, sizeof(store));
 }
 
 /* sub_2304: CBC encrypt with PKCS7 pad */
@@ -115,6 +114,7 @@ static uint8_t* sm4_variant_encrypt_raw(const uint8_t* key, const uint8_t* iv, c
                                         const size_t data_len, size_t* output_len)
 {
     const int pad = (int)(SM4_VARIANT_CBC_BLOCK_SIZE - (data_len & 0xF));
+    if (data_len > (size_t)INT_MAX - 16) return NULL;
     const int total = (int)data_len + pad;
     uint8_t *buf = s_calloc(1, (size_t)total);
     if (!buf) return NULL;
@@ -130,7 +130,10 @@ static uint8_t* sm4_variant_encrypt_raw(const uint8_t* key, const uint8_t* iv, c
         for (int i = 0; i < 16; ++i) t[i] = buf[off + i] ^ prev[i];
         sm4_variant_block(rk, t, buf + off);
         memcpy(prev, buf + off, 16);
+        cipher_secure_zero(t, sizeof(t));
     }
+    cipher_secure_zero(rk, sizeof(rk));
+    cipher_secure_zero(prev, sizeof(prev));
     *output_len = (size_t)total;
     return buf;
 }
@@ -155,9 +158,13 @@ static uint8_t* sm4_variant_decrypt_raw(const uint8_t* key, const uint8_t* iv, c
         sm4_variant_block(rk, t, dec);
         for (int i = 0; i < 16; ++i) buf[off + i] = dec[i] ^ prev[i];
         memcpy(prev, t, 16);
+        cipher_secure_zero(t, sizeof(t));
+        cipher_secure_zero(dec, sizeof(dec));
     }
+    cipher_secure_zero(rk, sizeof(rk));
+    cipher_secure_zero(prev, sizeof(prev));
     const int pad = buf[data_len - 1];
-    if (pad < 1 || pad > 16) { s_free(buf); return NULL; }
+    if (pad < 1 || pad > 16) { s_secure_free(buf, data_len); return NULL; }
     *output_len = data_len - (size_t)pad;
     return buf;
 }
@@ -170,7 +177,7 @@ static char* sm4_variant_cbc_encrypt(cipher_interface_t* self, const char* text)
     size_t out_len=0; uint8_t* out = sm4_variant_encrypt_raw(d->key, d->iv, (const uint8_t*)text, text_len, &out_len);
     if(!out) return NULL;
     char* hex = bytes_2_hex(out, out_len);
-    s_free(out);
+    s_secure_free(out, out_len);
     return hex;
 }
 
@@ -181,12 +188,12 @@ static char* sm4_variant_cbc_decrypt(cipher_interface_t* self, const char* hex)
     size_t bytes_len=0; uint8_t* bytes = hex_2_bytes(hex, &bytes_len);
     if(!bytes) return NULL;
     size_t out_len=0; uint8_t* out = sm4_variant_decrypt_raw(d->key, d->iv, bytes, bytes_len, &out_len);
-    s_free(bytes);
+    s_secure_free(bytes, bytes_len);
     if(!out) return NULL;
     char* result = s_malloc(out_len + 1);
     memcpy(result, out, out_len);
     result[out_len] = '\0';
-    s_free(out);
+    s_secure_free(out, bytes_len);
     return result;
 }
 
@@ -194,7 +201,7 @@ static void sm4_variant_cbc_destroy(cipher_interface_t* self)
 {
     if(self)
     {
-        s_free(self->private_data);
+        s_secure_free(self->private_data, sizeof(sm4_variant_cbc_android_data_t));
         s_free(self);
     }
 }

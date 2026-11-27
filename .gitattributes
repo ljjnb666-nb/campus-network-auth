@@ -1,0 +1,2 @@
+# The Windows About dialog needs CRLF in this byte-for-byte embedded resource.
+/Licenses.txt text eol=crlf

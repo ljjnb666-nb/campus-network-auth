@@ -10,12 +10,38 @@
 #include <cJSON/cJSON.h>
 
 #include "ControlInternal.h"
+#include "utils/time/TimeUtils.h"
+#include <stdatomic.h>
+#include <stdlib.h>
+#ifndef _WIN32
+#include <pthread.h>
+#endif
 
 #define TL_IDX_CONTROL (-3)
 
 #define CTL_TIMEOUT_MS 1000
 
-static volatile bool s_server_running = false;
+static atomic_bool s_server_running = false;
+
+#ifdef _WIN32
+static SRWLOCK s_lifecycle = SRWLOCK_INIT;
+static SRWLOCK s_wsa_lock = SRWLOCK_INIT;
+static void lifecycle_lock(void) { AcquireSRWLockExclusive(&s_lifecycle); }
+static void lifecycle_unlock(void) { ReleaseSRWLockExclusive(&s_lifecycle); }
+#else
+static pthread_mutex_t s_lifecycle = PTHREAD_MUTEX_INITIALIZER;
+static void lifecycle_lock(void) { pthread_mutex_lock(&s_lifecycle); }
+static void lifecycle_unlock(void) { pthread_mutex_unlock(&s_lifecycle); }
+#endif
+
+/* An absolute deadline must not be extended by a peer sending more bytes.
+ * A failed/backwards clock observation conservatively ends the wait. */
+static long remaining_ms(uint64_t start, uint64_t now, long timeout_ms)
+{
+    if (timeout_ms <= 0 || start == 0 || now < start) return 0;
+    const uint64_t elapsed = now - start;
+    return elapsed >= (uint64_t)timeout_ms ? 0 : timeout_ms - (long)elapsed;
+}
 
 static ctl_sock_t s_listen_sock = CTL_INVALID_SOCK;
 
@@ -38,13 +64,15 @@ bool ctl_net_init(void)
      * 属于记账式泄漏。初始化一次就够, 进程退出时由系统统一回收。
      */
     static bool s_wsa_ready = false;
-    if (s_wsa_ready) return true;
-
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return false;
-
-    s_wsa_ready = true;
-    return true;
+    AcquireSRWLockExclusive(&s_wsa_lock);
+    if (!s_wsa_ready)
+    {
+        WSADATA wsa;
+        s_wsa_ready = WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+    }
+    const bool ready = s_wsa_ready;
+    ReleaseSRWLockExclusive(&s_wsa_lock);
+    return ready;
 }
 #else
 bool ctl_net_init(void)
@@ -61,6 +89,10 @@ bool ctl_net_init(void)
  */
 static int ctl_wait_readable(const ctl_sock_t sock, const long timeout_ms)
 {
+    if (sock == CTL_INVALID_SOCK || timeout_ms < 0) return -1;
+#ifndef _WIN32
+    if (sock < 0 || sock >= FD_SETSIZE) return -1;
+#endif
     fd_set read_set;
     FD_ZERO(&read_set);
     FD_SET(sock, &read_set);
@@ -69,7 +101,11 @@ static int ctl_wait_readable(const ctl_sock_t sock, const long timeout_ms)
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
-    const int ready = select((int)sock + 1, &read_set, NULL, NULL, &tv);
+#ifdef _WIN32
+    const int ready = select(0, &read_set, NULL, NULL, &tv);
+#else
+    const int ready = select(sock + 1, &read_set, NULL, NULL, &tv);
+#endif
     if (ready <= 0) return ready;
 
     return FD_ISSET(sock, &read_set) ? 1 : 0;
@@ -77,6 +113,10 @@ static int ctl_wait_readable(const ctl_sock_t sock, const long timeout_ms)
 
 int ctl_wait_writable(const ctl_sock_t sock, const long timeout_ms)
 {
+    if (sock == CTL_INVALID_SOCK || timeout_ms < 0) return -1;
+#ifndef _WIN32
+    if (sock < 0 || sock >= FD_SETSIZE) return -1;
+#endif
     fd_set write_set;
     FD_ZERO(&write_set);
     FD_SET(sock, &write_set);
@@ -85,7 +125,11 @@ int ctl_wait_writable(const ctl_sock_t sock, const long timeout_ms)
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
-    const int ready = select((int)sock + 1, NULL, &write_set, NULL, &tv);
+#ifdef _WIN32
+    const int ready = select(0, NULL, &write_set, NULL, &tv);
+#else
+    const int ready = select(sock + 1, NULL, &write_set, NULL, &tv);
+#endif
     if (ready <= 0) return ready;
 
     return FD_ISSET(sock, &write_set) ? 1 : 0;
@@ -124,21 +168,29 @@ bool control_port_available(const uint16_t port)
  */
 size_t ctl_read_line(const ctl_sock_t sock, char* buf, const size_t buf_len)
 {
+    if (buf == NULL || buf_len == 0) return 0;
     size_t used = 0;
+    const uint64_t start = get_steady_tm_ms();
 
     while (used + 1 < buf_len)
     {
-        if (ctl_wait_readable(sock, CTL_TIMEOUT_MS) != 1) break;
+        const long left = remaining_ms(start, get_steady_tm_ms(), CTL_TIMEOUT_MS);
+        if (left == 0 || ctl_wait_readable(sock, left) != 1) break;
 
         const int n = recv(sock, buf + used, (int)(buf_len - 1 - used), 0);
         if (n <= 0) break;
 
         used += (size_t)n;
-        if (memchr(buf, '\n', used) != NULL) break;
+        if (memchr(buf, '\n', used) != NULL)
+        {
+            buf[used] = '\0';
+            return used;
+        }
     }
 
-    buf[used] = '\0';
-    return used;
+    /* Do not dispatch or parse a truncated frame. */
+    buf[0] = '\0';
+    return 0;
 }
 
 /**
@@ -150,17 +202,15 @@ size_t ctl_read_line(const ctl_sock_t sock, char* buf, const size_t buf_len)
 void ctl_wait_close(const ctl_sock_t sock, const long timeout_ms)
 {
     char sink[64];
-    long waited = 0;
+    const uint64_t start = get_steady_tm_ms();
 
-    while (waited < timeout_ms)
+    while (true)
     {
-        const int ready = ctl_wait_readable(sock, 100);
+        const long left = remaining_ms(start, get_steady_tm_ms(), timeout_ms);
+        if (left == 0) return;
+        const int ready = ctl_wait_readable(sock, left > 100 ? 100 : left);
         if (ready < 0) return;
-        if (ready == 0)
-        {
-            waited += 100;
-            continue;
-        }
+        if (ready == 0) continue;
 
         const int n = recv(sock, sink, (int)sizeof(sink), 0);
         if (n <= 0) return; // 0 = FIN, -1 = RST / 错误
@@ -176,10 +226,55 @@ void ctl_wait_close(const ctl_sock_t sock, const long timeout_ms)
  * @param reply 输出缓冲
  * @param reply_len 缓冲长度
  */
+/* Only serialize a read-only diagnostic snapshot. No command dispatch,
+ * credential or access-control decisions are made here. */
+static char* render_status_snapshot(uint8_t account, bool is_authed, bool is_running,
+                                    bool is_time_disabled, const char* boot_id,
+                                    unsigned fail_at)
+{
+    unsigned step = 0;
+    cJSON* root = NULL;
+    cJSON* data = NULL;
+    char* text = NULL;
+    if (++step == fail_at || !(root = cJSON_CreateObject())) goto cleanup;
+    if (++step == fail_at || !(data = cJSON_CreateObject())) goto cleanup;
+    if (++step == fail_at || !cJSON_AddNumberToObject(data, "account", account)) goto cleanup;
+    if (++step == fail_at || !cJSON_AddBoolToObject(data, "is_authed", is_authed)) goto cleanup;
+    if (++step == fail_at || !cJSON_AddBoolToObject(data, "is_running", is_running)) goto cleanup;
+    if (++step == fail_at || !cJSON_AddBoolToObject(data, "is_time_disabled", is_time_disabled)) goto cleanup;
+    if (++step == fail_at || !cJSON_AddStringToObject(data, "bootId", boot_id)) goto cleanup;
+    if (++step == fail_at || !cJSON_AddBoolToObject(root, "ok", true)) goto cleanup;
+    if (++step == fail_at || !cJSON_AddItemToObject(root, "data", data)) goto cleanup;
+    data = NULL; /* ownership transferred */
+    if (++step != fail_at) text = cJSON_PrintUnformatted(root);
+cleanup:
+    cJSON_Delete(data);
+    cJSON_Delete(root);
+    return text;
+}
+
+static bool status_snapshot_self_test(void)
+{
+    char* text = render_status_snapshot(1, false, false, false, "fixture", 0);
+    if (!text) return false;
+    cJSON* root = cJSON_Parse(text);
+    cJSON_free(text);
+    const cJSON* data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    const cJSON* boot = cJSON_GetObjectItemCaseSensitive(data, "bootId");
+    const bool ok = cJSON_IsObject(data) && cJSON_IsString(boot) &&
+        strcmp(boot->valuestring, "fixture") == 0;
+    cJSON_Delete(root);
+    if (!ok) return false;
+    for (unsigned i = 1; i <= 10; ++i)
+    {
+        text = render_status_snapshot(1, false, false, false, "fixture", i);
+        if (text) { cJSON_free(text); return false; }
+    }
+    return true;
+}
+
 static void ctl_reply_status(char* reply, const size_t reply_len)
 {
-    cJSON* root = cJSON_CreateObject();
-    cJSON* data = cJSON_CreateObject();
 
     /**
      * 这里读的是认证线程在写的运行时状态。
@@ -199,19 +294,12 @@ static void ctl_reply_status(char* reply, const size_t reply_len)
         is_time_disabled = g_prog_status[0].runtime_status.is_time_disabled;
     }
 
-    cJSON_AddNumberToObject(data, "account", account);
-    cJSON_AddBoolToObject(data, "is_authed", is_authed);
-    cJSON_AddBoolToObject(data, "is_running", is_running);
-    cJSON_AddBoolToObject(data, "is_time_disabled", is_time_disabled);
-    cJSON_AddStringToObject(data, "bootId", boot_id_get());
-
-    cJSON_AddBoolToObject(root, "ok", true);
-    cJSON_AddItemToObject(root, "data", data);
-
-    char* text = cJSON_PrintUnformatted(root);
+    char* text = render_status_snapshot(account, is_authed, is_running,
+                                        is_time_disabled, boot_id_get(), 0);
+    /* Keep the existing empty-line failure representation. Never return
+     * a partially constructed successful diagnostic document. */
     snprintf(reply, reply_len, "%s\n", safe_str(text));
-    free(text);
-    cJSON_Delete(root);
+    cJSON_free(text);
 }
 
 /**
@@ -373,9 +461,10 @@ static int ctl_server_app(void* arg)
 
     LOG_DEBUG("控制通道服务线程已启动");
 
-    while (s_server_running)
+    while (atomic_load(&s_server_running))
     {
         if (ctl_wait_readable(s_listen_sock, 1000) != 1) continue;
+        if (!atomic_load(&s_server_running)) break;
 
         const ctl_sock_t client = accept(s_listen_sock, NULL, NULL);
         if (client == CTL_INVALID_SOCK) continue;
@@ -388,8 +477,10 @@ static int ctl_server_app(void* arg)
     return 0;
 }
 
-bool control_server_start(const uint16_t port)
+static bool start_locked(const uint16_t port)
 {
+    if (s_server_thread != NULL)
+        return atomic_load(&s_server_running) && s_server_port == port;
     if (ctl_net_init() == false)
     {
         LOG_ERROR("网络库初始化失败, 控制通道无法启动");
@@ -416,7 +507,10 @@ bool control_server_start(const uint16_t port)
     int exclusive = 1;
     if (setsockopt(s_listen_sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&exclusive, sizeof(exclusive)) != 0)
     {
-        LOG_WARN("控制通道设置 SO_EXCLUSIVEADDRUSE 失败");
+        LOG_ERROR("控制通道设置 SO_EXCLUSIVEADDRUSE 失败, 拒绝监听");
+        ctl_close(s_listen_sock);
+        s_listen_sock = CTL_INVALID_SOCK;
+        return false;
     }
 #else
     int reuse = 1;
@@ -449,13 +543,13 @@ bool control_server_start(const uint16_t port)
         return false;
     }
 
-    s_server_running = true;
+    atomic_store(&s_server_running, true);
     s_server_port = port;
     s_server_thread = sim_thread_create(ctl_server_app, NULL);
     if (s_server_thread == NULL)
     {
         LOG_ERROR("控制通道线程创建失败");
-        s_server_running = false;
+        atomic_store(&s_server_running, false);
         ctl_close(s_listen_sock);
         s_listen_sock = CTL_INVALID_SOCK;
         return false;
@@ -466,21 +560,107 @@ bool control_server_start(const uint16_t port)
     return true;
 }
 
-void control_server_stop(void)
+bool control_server_start(const uint16_t port)
 {
-    if (s_server_thread == NULL) return;
+    lifecycle_lock();
+    const bool ok = start_locked(port);
+    lifecycle_unlock();
+    return ok;
+}
 
-    s_server_running = false;
-
-    int result_code = 0;
-    sim_thread_join(s_server_thread, &result_code);
-    s_server_thread = NULL;
+static bool stop_locked(void)
+{
+    atomic_store(&s_server_running, false);
+    if (s_server_thread != NULL)
+    {
+        if (sim_thread_join(s_server_thread, NULL) != 0) return false;
+        sim_thread_destroy(s_server_thread);
+        s_server_thread = NULL;
+    }
 
     if (s_listen_sock != CTL_INVALID_SOCK)
     {
         ctl_close(s_listen_sock);
         s_listen_sock = CTL_INVALID_SOCK;
     }
+    return true;
+}
+
+bool control_server_stop_checked(void)
+{
+    lifecycle_lock();
+    const bool ok = stop_locked();
+    lifecycle_unlock();
+    return ok;
+}
+
+void control_server_stop(void)
+{
+    if (!control_server_stop_checked()) LOG_ERROR("控制通道线程等待失败, 保留线程与套接字");
+}
+
+/* A kernel-assigned loopback port, no control command dispatch, no external
+ * network or account state. Exercise the production frame/close readers. */
+static bool loopback_reader_self_test(void)
+{
+    if (!ctl_net_init()) return false;
+    ctl_sock_t listener = CTL_INVALID_SOCK, peer = CTL_INVALID_SOCK, accepted = CTL_INVALID_SOCK;
+    bool ok = false;
+    struct sockaddr_in addr = {0};
+#ifdef _WIN32
+    int len = sizeof(addr);
+#else
+    socklen_t len = sizeof(addr);
+#endif
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (listener == CTL_INVALID_SOCK ||
+        bind(listener, (struct sockaddr*)&addr, sizeof(addr)) != 0 ||
+        listen(listener, 1) != 0 ||
+        getsockname(listener, (struct sockaddr*)&addr, &len) != 0) goto done;
+    peer = socket(AF_INET, SOCK_STREAM, 0);
+    if (peer == CTL_INVALID_SOCK ||
+        connect(peer, (struct sockaddr*)&addr, sizeof(addr)) != 0) goto done;
+    accepted = accept(listener, NULL, NULL);
+    if (accepted == CTL_INVALID_SOCK) goto done;
+
+    char frame[16] = {0};
+    if (send(peer, "x", 1, 0) != 1 ||
+        ctl_read_line(accepted, frame, sizeof(frame)) != 0 || frame[0] != '\0') goto done;
+    if (send(peer, "{}\n", 3, 0) != 3 ||
+        ctl_read_line(accepted, frame, sizeof(frame)) != 3 ||
+        strcmp(frame, "{}\n") != 0) goto done;
+    if (send(peer, "data", 4, 0) != 4) goto done;
+    ctl_wait_close(accepted, 50);
+    /* The peer is still open. Expiring the wait is not a socket close. */
+    if (send(peer, "{}\n", 3, 0) != 3 ||
+        ctl_read_line(accepted, frame, sizeof(frame)) != 3 ||
+        strcmp(frame, "{}\n") != 0) goto done;
+    ok = true;
+
+done:
+    if (accepted != CTL_INVALID_SOCK) ctl_close(accepted);
+    if (peer != CTL_INVALID_SOCK) ctl_close(peer);
+    if (listener != CTL_INVALID_SOCK) ctl_close(listener);
+    return ok;
+}
+
+bool control_resource_self_test(void)
+{
+    char byte = 'x';
+    return remaining_ms(100, 100, 1000) == 1000 &&
+        remaining_ms(100, 1099, 1000) == 1 &&
+        remaining_ms(100, 1100, 1000) == 0 &&
+        remaining_ms(100, 1101, 1000) == 0 &&
+        remaining_ms(100, 99, 1000) == 0 &&
+        remaining_ms(0, 100, 1000) == 0 &&
+        remaining_ms(100, 100, 0) == 0 &&
+        ctl_read_line(CTL_INVALID_SOCK, NULL, 0) == 0 &&
+        ctl_read_line(CTL_INVALID_SOCK, &byte, 0) == 0 && byte == 'x' &&
+        ctl_read_line(CTL_INVALID_SOCK, &byte, 1) == 0 && byte == '\0' &&
+        status_snapshot_self_test() &&
+        loopback_reader_self_test();
 }
 
 void control_set_port(const uint16_t port)

@@ -16,6 +16,8 @@ size_t write_cb(const void* contents, size_t size, size_t nmemb, void* userdata)
 
 char* calc_md5(const char* data);
 
+bool net_callback_self_test(void);
+
 network_status_t curl_err_msg_out(CURLcode curl_code);
 
 void log_curl_error(CURL* curl, CURLcode code, const char* errbuf, const char* url, const char* func_name);

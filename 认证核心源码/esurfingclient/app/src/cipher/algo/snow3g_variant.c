@@ -2,6 +2,7 @@
 #include "cipher/CipherUtils.h"
 
 #include <stdint.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -34,11 +35,6 @@ static const uint8_t SNOW3G_S0[256] = {
 static const uint8_t SNOW3G_S1[256] = {
     0x55,0xc2,0x63,0x71,0x3b,0xc8,0x47,0x86,0x9f,0x3c,0xda,0x5b,0x29,0xaa,0xfd,0x77,0x8c,0xc5,0x94,0x0c,0xa6,0x1a,0x13,0x00,0xe3,0xa8,0x16,0x72,0x40,0xf9,0xf8,0x42,0x44,0x26,0x68,0x96,0x81,0xd9,0x45,0x3e,0x10,0x76,0xc6,0xa7,0x8b,0x39,0x43,0xe1,0x3a,0xb5,0x56,0x2a,0xc0,0x6d,0xb3,0x05,0x22,0x66,0xbf,0xdc,0x0b,0xfa,0x62,0x48,0xdd,0x20,0x11,0x06,0x36,0xc9,0xc1,0xcf,0xf6,0x27,0x52,0xbb,0x69,0xf5,0xd4,0x87,0x7f,0x84,0x4c,0xd2,0x9c,0x57,0xa4,0xbc,0x4f,0x9a,0xdf,0xfe,0xd6,0x8d,0x7a,0xeb,0x2b,0x53,0xd8,0x5c,0xa1,0x14,0x17,0xfb,0x23,0xd5,0x7d,0x30,0x67,0x73,0x08,0x09,0xee,0xb7,0x70,0x3f,0x61,0xb2,0x19,0x8e,0x4e,0xe5,0x4b,0x93,0x8f,0x5d,0xdb,0xa9,0xad,0xf1,0xae,0x2e,0xcb,0x0d,0xfc,0xf4,0x2d,0x46,0x6e,0x1d,0x97,0xe8,0xd1,0xe9,0x4d,0x37,0xa5,0x75,0x5e,0x83,0x9e,0xab,0x82,0x9d,0xb9,0x1c,0xe0,0xcd,0x49,0x89,0x01,0xb6,0xbd,0x58,0x24,0xa2,0x5f,0x38,0x78,0x99,0x15,0x90,0x50,0xb8,0x95,0xe4,0xd0,0x91,0xc7,0xce,0xed,0x0f,0xb4,0x6f,0xa0,0xcc,0xf0,0x02,0x4a,0x79,0xc3,0xde,0xa3,0xef,0xea,0x51,0xe6,0x6b,0x18,0xec,0x1b,0x2c,0x80,0xf7,0x74,0xe7,0xff,0x21,0x5a,0x6a,0x54,0x1e,0x41,0x31,0x92,0x35,0xc4,0x33,0x07,0x0a,0xba,0x7e,0x0e,0x34,0x88,0xb1,0x98,0x7c,0xf3,0x3d,0x60,0x6c,0x7b,0xca,0xd3,0x1f,0x32,0x65,0x04,0x28,0x64,0xbe,0x85,0x9b,0x2f,0x59,0x8a,0xd7,0xb0,0x25,0xac,0xaf,0x12,0x03,0xe2,0xf2
 };
-
-static uint32_t snow3g_bswap32(uint32_t x)
-{
-    return ((x & 0xFF) << 24) | ((x & 0xFF00) << 8) | ((x >> 8) & 0xFF00) | (x >> 24);
-}
 
 static uint32_t snow3g_sbox(uint32_t x)
 {
@@ -86,7 +82,7 @@ static void snow3g_keyschedule(uint32_t *c, const uint8_t *key, const uint8_t *i
     uint32_t v16 = c[6];
     int rounds = 32;
     do {
-        c[2] = (uint16_t)v10 | ((uint16_t)(v9 >> 15) << 16);
+        c[2] = (uint16_t)v10 | ((uint32_t)(uint16_t)(v9 >> 15) << 16);
         c[3] = (v12 >> 15) | (v11 << 16);
         c[4] = (v14 >> 15) | (v13 << 16);
         c[5] = (v16 >> 15) | (v15 << 16);
@@ -139,7 +135,7 @@ static void snow3g_generate(uint32_t *c, const uint8_t *in, int blocks, uint8_t 
     const uint32_t v4 = (c[15] >> 15) | (c[17] << 16);
     const uint32_t v5 = (c[11] >> 15) | (c[13] << 16);
     const uint32_t v6 = (c[6] >> 15) | (c[8] << 16);
-    c[2] = (uint16_t)c[20] | ((uint16_t)(c[21] >> 15) << 16);
+    c[2] = (uint16_t)c[20] | ((uint32_t)(uint16_t)(c[21] >> 15) << 16);
     c[3] = v4;
     c[4] = v5;
     c[5] = v6;
@@ -182,19 +178,20 @@ static void snow3g_generate(uint32_t *c, const uint8_t *in, int blocks, uint8_t 
         c[21] = v26;
         if (i >= blocks)
             break;
-        c[2] = (uint16_t)v16 | ((uint16_t)(v26 >> 15) << 16);
+        c[2] = (uint16_t)v16 | ((uint32_t)(uint16_t)(v26 >> 15) << 16);
         c[3] = (v14 << 16) | (old_c16 >> 15);
         c[4] = ((uint32_t)v19_lo << 16) | ((uint32_t)(r_hi & 0xFFFFFFFF) >> 15);
         c[5] = (v24 << 16) | (v13 >> 15);
         const uint32_t ks = snow3g_fsm(c) ^ c[5];
-        const uint32_t pt = snow3g_bswap32(((const uint32_t *)in)[i]);
-        ((uint32_t *)out)[i] = snow3g_bswap32(pt ^ ks);
+        const uint32_t pt = bytes_2_uint32_be(in + (size_t)i * 4);
+        uint32_2_bytes_be(pt ^ ks, out + (size_t)i * 4);
     }
 }
 
 static uint8_t* snow3g_encrypt_raw(const uint8_t* key, const uint8_t* iv, const uint8_t* data,
                                    const size_t data_len, size_t* output_len)
 {
+    if (data_len > (size_t)INT_MAX - 3) return NULL;
     const int pad = (data_len & 3) ? 4 - (int)(data_len & 3) : 0;
     const int total = pad + (int)data_len;
     uint8_t* buf = s_calloc(1, total ? (size_t)total : 1);
@@ -203,6 +200,7 @@ static uint8_t* snow3g_encrypt_raw(const uint8_t* key, const uint8_t* iv, const 
     uint32_t c[SNOW3G_CELLS];
     snow3g_keyschedule(c, key, iv);
     snow3g_generate(c, buf, total / 4, buf);
+    cipher_secure_zero(c, sizeof(c));
     *output_len = (size_t)total;
     return buf;
 }
@@ -210,12 +208,14 @@ static uint8_t* snow3g_encrypt_raw(const uint8_t* key, const uint8_t* iv, const 
 static uint8_t* snow3g_decrypt_raw(const uint8_t* key, const uint8_t* iv, const uint8_t* data,
                                    const size_t data_len, size_t* output_len)
 {
+    if (data_len > INT_MAX) return NULL;
     uint8_t* buf = s_malloc(data_len ? data_len : 1);
     if(!buf) return NULL;
     memcpy(buf, data, data_len);
     uint32_t c[SNOW3G_CELLS];
     snow3g_keyschedule(c, key, iv);
     snow3g_generate(c, buf, (int)data_len / 4, buf);
+    cipher_secure_zero(c, sizeof(c));
     *output_len = data_len;
     return buf;
 }
@@ -228,7 +228,7 @@ static char* snow3g_variant_encrypt(cipher_interface_t* self, const char* text)
     size_t out_len=0; uint8_t* out = snow3g_encrypt_raw(d->key, d->iv, (const uint8_t*)text, text_len, &out_len);
     if(!out) return NULL;
     char* hex = bytes_2_hex(out, out_len);
-    s_free(out);
+    s_secure_free(out, out_len ? out_len : 1);
     return hex;
 }
 
@@ -239,13 +239,14 @@ static char* snow3g_variant_decrypt(cipher_interface_t* self, const char* hex)
     size_t bytes_len=0; uint8_t* bytes = hex_2_bytes(hex, &bytes_len);
     if(!bytes) return NULL;
     size_t out_len=0; uint8_t* out = snow3g_decrypt_raw(d->key, d->iv, bytes, bytes_len, &out_len);
-    s_free(bytes);
+    s_secure_free(bytes, bytes_len);
     if(!out) return NULL;
+    const size_t allocation_len = out_len ? out_len : 1;
     while(out_len > 0 && out[out_len - 1] == 0) out_len--;
     char* result = s_malloc(out_len + 1);
     memcpy(result, out, out_len);
     result[out_len] = '\0';
-    s_free(out);
+    s_secure_free(out, allocation_len);
     return result;
 }
 
@@ -253,7 +254,7 @@ static void snow3g_variant_destroy(cipher_interface_t* self)
 {
     if(self)
     {
-        s_free(self->private_data);
+        s_secure_free(self->private_data, sizeof(snow3g_variant_android_data_t));
         s_free(self);
     }
 }

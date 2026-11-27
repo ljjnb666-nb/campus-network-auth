@@ -1,4 +1,6 @@
 #include "LoggerInternal.h"
+#include "LogArchiveFile.h"
+#include "LogPrivateFile.h"
 
 #include "core/States.h"
 #include "utils/platform/PlatformUtils.h"
@@ -6,6 +8,10 @@
 #include "utils/time/TimeUtils.h"
 
 #include <inttypes.h>
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 static const char s_rotate_file_name[] = ".rotate.log";
 
@@ -14,68 +20,13 @@ static const char s_rotate_file_name[] = ".rotate.log";
 static uint32_t s_rotate_seq = 0;
 
 /**
- * @brief 获取路径当前的文件身份
- *
- * 设备号 + inode 唯一标识一个文件, 重命名之后路径会指向新的 inode,
- * 据此可以判断自己手上的句柄是否已经落在被轮转掉的旧文件上
- * @param path 文件路径
- * @param dev 设备号 (Windows 为卷序列号)
- * @param ino inode (Windows 为文件索引)
- * @return 是否获取成功
- */
-static bool get_file_id(const char* path, uint64_t* dev, uint64_t* ino)
-{
-#ifdef _WIN32
-    HANDLE handle = CreateFileA(path, GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (handle == INVALID_HANDLE_VALUE) return false;
-
-    BY_HANDLE_FILE_INFORMATION info;
-    const bool ok = GetFileInformationByHandle(handle, &info) != 0;
-    CloseHandle(handle);
-    if (ok == false) return false;
-
-    *dev = (uint64_t)info.dwVolumeSerialNumber;
-    *ino = ((uint64_t)info.nFileIndexHigh << 32) | (uint64_t)info.nFileIndexLow;
-    return true;
-#else
-    struct stat st;
-    if (stat(path, &st) != 0) return false;
-
-    *dev = (uint64_t)st.st_dev;
-    *ino = (uint64_t)st.st_ino;
-    return true;
-#endif
-}
-
-/**
  * @brief 以追加方式打开一个日志文件
  * @param path 文件路径
  * @return 文件句柄 (失败返回 NULL)
  */
 static FILE* open_log_handle(const char* path)
 {
-    FILE* handle = fopen(path, "a");
-    if (handle == NULL) return NULL;
-
-#ifndef _WIN32
-    /**
-     * 设成 exec 时自动关闭:
-     * 监管者 fork 出子进程时会继承这里的句柄, 而子进程自己还要再开一份,
-     * 不关掉的话子进程会一直白占着一个 fd
-     * (Windows 侧用 CreateProcess 且不继承句柄, 无需处理)
-     */
-    const int fd = fileno(handle);
-    if (fd >= 0)
-    {
-        fcntl(fd, F_SETFD, FD_CLOEXEC);
-        // 日志可能含票据等敏感内容, 收紧为仅属主可读写 (umask 只会更严不会更松)
-        fchmod(fd, 0600);
-    }
-#endif
-
-    return handle;
+    return open_private_log_stream(path);
 }
 
 /**
@@ -91,7 +42,7 @@ bool open_log_file(void)
     g_logger_cfg.lines_since_check = 0;
     g_logger_cfg.file_dev = 0;
     g_logger_cfg.file_ino = 0;
-    get_file_id(g_logger_cfg.log_file, &g_logger_cfg.file_dev, &g_logger_cfg.file_ino);
+    get_stream_id(g_logger_cfg.file_handle, &g_logger_cfg.file_dev, &g_logger_cfg.file_ino);
     return true;
 }
 
@@ -104,7 +55,7 @@ bool open_log_file(void)
  */
 static bool reopen_if_rotated(void)
 {
-    // 拿不到身份信息时无从比较, 退化为仅按自身行数计数
+    // 拿不到句柄身份时不推断路径与句柄一致
     if (!g_logger_cfg.file_handle || g_logger_cfg.file_ino == 0) return false;
 
     uint64_t dev = 0;
@@ -128,9 +79,8 @@ static bool reopen_if_rotated(void)
 /**
  * @brief 日志轮转
  *
- * 轮转是"无主"的: 任何进程都可以发起, 并发安全由 rename 的原子性保证.
- * 同时发起时只有一个进程的 rename 会成功, 其余进程拿到失败,
- * 把失败直接当作"已被其它进程轮转"处理即可, 因此不需要锁或额外的协调
+ * 归档操作禁止覆盖已有目标，但路径身份检查与重命名之间仍有竞争窗口。
+ * 这不是完整的跨进程事务；不能仅凭原子重命名推断源路径身份不变。
  */
 void rotate(void)
 {
@@ -150,6 +100,18 @@ void rotate(void)
      * 否则会把别的进程刚轮转出来的新 run.log 再轮转一次
      */
     if (reopen_if_rotated() || g_logger_cfg.file_handle == NULL) return;
+    if (g_logger_cfg.file_ino == 0)
+    {
+        /* Keep writing the current stream rather than archive an unknown
+         * source. Retry identification on a subsequent rotation check. */
+        if (!get_stream_id(g_logger_cfg.file_handle, &g_logger_cfg.file_dev,
+            &g_logger_cfg.file_ino))
+        {
+            g_logger_cfg.cur_lines = 0;
+            return;
+        }
+        if (reopen_if_rotated() || g_logger_cfg.file_handle == NULL) return;
+    }
 
     char cur_tm[32];
     get_fmt_time(cur_tm, FILE_FORMAT);
@@ -164,10 +126,10 @@ void rotate(void)
      * 时间戳只有秒级精度, 多个进程可能在同一秒内各自轮转,
      * 只靠时间戳必然重名, 而 rename 会覆盖同名目标, 那样一次就会丢掉一整份日志
      */
-    const uint16_t result = snprintf(rotate_file_name, sizeof(rotate_file_name), "%s%c%s-%lu-%" PRIu32 "%s",
+    const int result = snprintf(rotate_file_name, sizeof(rotate_file_name), "%s%c%s-%lu-%" PRIu32 "%s",
         safe_str(g_logger_cfg.log_dir), SEP, safe_str(cur_tm), proc_id, s_rotate_seq, s_rotate_file_name);
     s_rotate_seq++;
-    if (result >= (uint16_t)sizeof(rotate_file_name))
+    if (result < 0 || (size_t)result >= sizeof(rotate_file_name))
     {
         fprintf(stderr, "[ERROR] 轮转的文件名过长 (最大 %zu)\n", sizeof(rotate_file_name) - 1);
         g_logger_cfg.cur_lines = 0;
@@ -175,29 +137,14 @@ void rotate(void)
     }
 
     // Windows 无法重命名一个仍被自己打开的文件, 所以先关闭再改名
-    fclose(g_logger_cfg.file_handle);
+    const bool close_ok = fclose(g_logger_cfg.file_handle) == 0;
     g_logger_cfg.file_handle = NULL;
 
-    /**
-     * 关闭之后再确认一次: 关闭与重命名之间仍有窗口, 期间可能已被其它进程轮转.
-     * 不确认的话会把别的进程刚建好的新 run.log 改名走 (rename 会覆盖同名目标)
-     */
-    uint64_t dev = 0;
-    uint64_t ino = 0;
-    if (get_file_id(g_logger_cfg.log_file, &dev, &ino) == false ||
-        dev != g_logger_cfg.file_dev || ino != g_logger_cfg.file_ino)
+    if (close_ok && !archive_log_without_replace(g_logger_cfg.log_file, rotate_file_name,
+        g_logger_cfg.file_dev, g_logger_cfg.file_ino))
     {
-        if (open_log_file() == false)
-        {
-            fprintf(stderr, "[ERROR] 轮转后无法重新打开日志文件 %s\n", g_logger_cfg.log_file);
-        }
-        return;
-    }
-
-    if (rename(g_logger_cfg.log_file, rotate_file_name) != 0)
-    {
-        // 多半是已被其它进程抢先轮转, 属于正常竞争
-        fprintf(stderr, "[INFO] 日志轮转未生效 (可能已被其它进程轮转): %s\n", g_logger_cfg.log_file);
+        // 失败原因未确认；不把失败解释为另一进程已成功归档
+        fprintf(stderr, "[INFO] 日志轮转未完成（目标可能已存在或文件系统不支持）: %s\n", g_logger_cfg.log_file);
     }
 
     if (open_log_file() == false)

@@ -1,3 +1,4 @@
+#include "cipher/CipherUtils.h"
 #include "DialerInternal.h"
 
 #include "net/NetClient.h"
@@ -34,18 +35,14 @@ static char* dialer_encrypt_payload(const XmlChoose kind)
     }
 
     char* encrypt = session_encrypt(xml);
-    free(xml);
+    s_secure_free(xml, XML_BUFFER_SIZE);
     if (encrypt == NULL)
     {
         LOG_ERROR("报文加密失败 (类型 %d)", (int)kind);
         return NULL;
     }
 
-    // 登录密文里是账号密码 (密钥内嵌于客户端, 密文等价明文), 不进日志
-    if (kind != LOGIN)
-    {
-        LOG_TRACE("发送加密内容 (类型 %d): %s", (int)kind, encrypt);
-    }
+    LOG_TRACE("报文加密完成 (类型 %d, 长度 %zu)", (int)kind, strlen(encrypt));
     return encrypt;
 }
 
@@ -72,7 +69,7 @@ char* dialer_request_plain(const XmlChoose kind, const char* url, const char* wh
     }
 
     curl_resp_t resp = post(url, encrypt);
-    free(encrypt);
+    s_secure_free_string(encrypt);
 
     if (resp.http_code != HTTP_OK || resp.body_size == 0 || resp.body_data == NULL)
     {
@@ -90,11 +87,7 @@ char* dialer_request_plain(const XmlChoose kind, const char* url, const char* wh
         curl_resp_free(&resp);
         return NULL;
     }
-    // 登录响应密文不落日志 (密钥内嵌于客户端, 密文等价明文)
-    if (kind != LOGIN)
-    {
-        LOG_TRACE("%s响应内容: %s", safe_str(what), resp.body_data);
-    }
+    LOG_TRACE("%s响应长度: %zu", safe_str(what), resp.body_size);
 
     char* plain = session_decrypt(resp.body_data);
     curl_resp_free(&resp);
@@ -154,7 +147,7 @@ char* dialer_request_ticket(const XmlChoose kind, const char* url, const char* w
         if (encrypt == NULL) return NULL;
 
         curl_resp_t resp = post(url, encrypt);
-        free(encrypt);
+        s_secure_free_string(encrypt);
 
         if (resp.http_code != HTTP_OK || resp.body_size == 0 || resp.body_data == NULL)
         {
@@ -221,7 +214,7 @@ bool term(void)
         if (retry > 5)
         {
             LOG_ERROR("超过最多重试次数, 返回");
-            free(encrypt);
+            s_secure_free_string(encrypt);
             curl_resp_free(&resp);
             return false;
         }
@@ -231,7 +224,7 @@ bool term(void)
         curl_resp_free(&resp); // 丢掉上一次的响应体, 否则重试会把它漏掉
         resp = post(g_prog_status[tl_thread_idx].auth_cfg.term_url, encrypt); // 向 term_url 发送加密数据 (重试)
     }
-    free(encrypt);
+    s_secure_free_string(encrypt);
     curl_resp_free(&resp);
 
     g_prog_status[tl_thread_idx].auth_cfg.auth_time = 0;
@@ -272,10 +265,10 @@ hb_result_t heartbeat(void)
         // 连不上 = 网络问题, 重认证也没用; 服务端有响应但不对 = 可能已被踢
         return (fail == DIALER_FAIL_NET) ? HB_NET_FAIL : HB_PROTO_FAIL;
     }
-    LOG_TRACE("心跳响应内容: %s", decrypted_data);
+    LOG_TRACE("心跳响应已解密 (内容不记录)");
 
     char* parsed_interval = xml_parser(decrypted_data, "interval"); // 获取心跳内容 (下一次重试时间)
-    free(decrypted_data);
+    s_secure_free_string(decrypted_data);
     if (parsed_interval == NULL)
     {
         LOG_ERROR("心跳内容解析失败");
@@ -293,7 +286,7 @@ hb_result_t heartbeat(void)
     }
     clamp_keep_retry();
 
-    free(parsed_interval);
+    s_secure_free_string(parsed_interval);
     return HB_OK;
 }
 
@@ -309,7 +302,7 @@ bool login(void)
      */
 
     char* parsed_keep_retry = xml_parser(decrypted_data, "keep-retry"); // 获取重试时间长度
-    free(decrypted_data);
+    s_secure_free_string(decrypted_data);
     if (parsed_keep_retry == NULL)
     {
         LOG_ERROR("解析 KeepRetry 失败");
@@ -327,7 +320,7 @@ bool login(void)
     }
     clamp_keep_retry();
 
-    free(parsed_keep_retry);
+    s_secure_free_string(parsed_keep_retry);
     LOG_DEBUG("下一次重试: %" PRIu64 " 秒后", g_prog_status[tl_thread_idx].auth_cfg.keep_retry);
     return true;
 }
@@ -395,6 +388,7 @@ WaitResult wait_need_auth(void)
                 ephemeral_online_reported = true;
                 fputs("EPHEMERAL_ONLINE\n", stderr);
                 fflush(stderr);
+                ephemeral_emit_event("online", 0);
             }
             retry_network = 1;
             sleep_ms(3000, false);

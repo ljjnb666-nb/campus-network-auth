@@ -39,7 +39,8 @@ typedef enum
 {
     RUN_SUCCESS = 0,
     RUN_FAILED = 1,
-    TIMEOUT_RETRY = 2
+    TIMEOUT_RETRY = 2,
+    RUN_NETWORK_EXHAUSTED = 3
 } RunStatus;
 
 /**
@@ -72,6 +73,7 @@ bool app_bootstrap(void)
     {
         g_prog_status = calloc(1, sizeof(prog_status_t));
         if (g_prog_status == NULL) return false;
+        runtime_status_init(&g_prog_status[0].runtime_status);
     }
 
     init_shutdown_hook();
@@ -297,6 +299,7 @@ static RunStatus run(void)
             reset();
             g_prog_status[tl_thread_idx].runtime_status.is_running = true;
         }
+        ephemeral_emit_event("auth_start", 0);
         if (auth() != AUTH_SUCCESS)
         {
             if (g_prog_status[tl_thread_idx].runtime_status.is_running == false)
@@ -324,6 +327,7 @@ static RunStatus run(void)
             uint64_t wait_minutes = 0;
             if (kind == AUTH_ERROR_FATAL)
             {
+                ephemeral_emit_event("auth_failed", 1);
                 /**
                  * 密码错 / 账号不存在 / 版本被停用 / 被限制共享 这类错误, 重试多少次都是同一个结果,
                  * 反而会因为反复失败触发服务端的登录频率限制, 所以停下来等用户处理:
@@ -360,7 +364,7 @@ static RunStatus run(void)
         if (retry_timeout > 5)
         {
             LOG_ERROR("超过最多重试次数");
-            return RUN_FAILED;
+            return RUN_NETWORK_EXHAUSTED;
         }
         LOG_WARN("网络错误, 等待 10 秒后重试, 重试: 第 %" PRIu8 " 次, 最多 5 次",
             retry_timeout);
@@ -425,11 +429,11 @@ int dialer_app(void* arg)
 
         const RunStatus run_status = run();
         // 如果 run 函数返回 RUN_FAILED 或需要重置, 则退出循环
-        if (run_status == RUN_FAILED)
+        if (run_status == RUN_FAILED || run_status == RUN_NETWORK_EXHAUSTED)
         {
             LOG_ERROR("线程出现错误, 正在退出");
             g_prog_status[tl_thread_idx].runtime_status.is_running = false;
-            exit_code = 1; // 认证进程据此退出, 交给外部监管者重新拉起
+            exit_code = run_status == RUN_NETWORK_EXHAUSTED ? DIALER_EXIT_NETWORK_EXHAUSTED : 1;
             break;
         }
         if (g_prog_status[tl_thread_idx].runtime_status.is_need_reauth)

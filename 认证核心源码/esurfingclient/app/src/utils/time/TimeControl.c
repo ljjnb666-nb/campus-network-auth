@@ -8,11 +8,51 @@
 #include "utils/log/Logger.h"
 
 #include <time.h>
+#include <stdatomic.h>
+#include <stdlib.h>
+#ifndef _WIN32
+#include <pthread.h>
+#endif
 
 #define WEEK_MILLIS 604800000LL
 #define MAX_SLEEP_SLICE_MS 10000
 
 static sim_thread_t* g_time_control_thread = NULL;
+static atomic_bool s_running = false;
+#ifdef _WIN32
+static SRWLOCK s_lifecycle = SRWLOCK_INIT;
+static void lifecycle_lock(void) { AcquireSRWLockExclusive(&s_lifecycle); }
+static void lifecycle_unlock(void) { ReleaseSRWLockExclusive(&s_lifecycle); }
+#else
+static pthread_mutex_t s_lifecycle = PTHREAD_MUTEX_INITIALIZER;
+static void lifecycle_lock(void) { pthread_mutex_lock(&s_lifecycle); }
+static void lifecycle_unlock(void) { pthread_mutex_unlock(&s_lifecycle); }
+#endif
+
+/* The scheduler's own wait must neither pet the authentication watchdog
+ * nor depend on another thread changing global account flags to stop it. */
+static void scheduler_wait(uint64_t ms)
+{
+    const uint64_t start = get_steady_tm_ms();
+    uint64_t remaining = ms;
+    while (remaining > 0 && atomic_load(&s_running))
+    {
+        const uint64_t slice = remaining > 100 ? 100 : remaining;
+#ifdef _WIN32
+        Sleep((DWORD)slice);
+#else
+        const struct timespec delay = {0, (long)slice * 1000000L};
+        nanosleep(&delay, NULL);
+#endif
+        const uint64_t now = get_steady_tm_ms();
+        if (start != 0 && now >= start)
+        {
+            const uint64_t elapsed = now - start;
+            remaining = elapsed >= ms ? 0 : ms - elapsed;
+        }
+        else remaining -= slice;
+    }
+}
 
 /**
  * @brief 获取当前本地时间的“一周分钟数”(0-10079, 0=周日 00:00)
@@ -278,10 +318,10 @@ static int time_control_app(void* arg)
         return 0;
     }
 
-    while (g_thread_keep_alive && g_need_exit == false)
+    while (atomic_load(&s_running) && g_thread_keep_alive && g_need_exit == false && !stop_requested())
     {
         time_control_sync();
-        sleep_ms(time_control_wait_ms(), true);
+        scheduler_wait(time_control_wait_ms());
     }
 
     LOG_DEBUG("时间控制线程已退出");
@@ -290,13 +330,17 @@ static int time_control_app(void* arg)
 
 bool time_control_init(void)
 {
+    lifecycle_lock();
     if (g_time_control_thread != NULL)
     {
-        return true;
+        const bool running = atomic_load(&s_running);
+        lifecycle_unlock();
+        return running;
     }
 
     if (g_prog_status == NULL || g_prog_cnt <= 0)
     {
+        lifecycle_unlock();
         return true;
     }
 
@@ -313,28 +357,90 @@ bool time_control_init(void)
     // 没有任何账号启用时间控制时不需要创建定时线程
     if (has_time_control == false)
     {
+        lifecycle_unlock();
         return true;
     }
 
+    atomic_store(&s_running, true);
     g_time_control_thread = sim_thread_create_retry(time_control_app, NULL, 5);
-    if (g_time_control_thread == NULL)
-    {
-        LOG_FATAL("时间控制线程创建失败");
-        return false;
-    }
+    const bool started = g_time_control_thread != NULL;
+    if (!started) atomic_store(&s_running, false);
+    lifecycle_unlock();
+    if (!started) LOG_ERROR("时间控制线程创建失败");
+    return started;
+}
 
+static bool stop_worker(void)
+{
+    lifecycle_lock();
+    atomic_store(&s_running, false);
+    if (g_time_control_thread != NULL)
+    {
+        if (sim_thread_join(g_time_control_thread, NULL) != 0)
+        {
+            lifecycle_unlock();
+            return false;
+        }
+        sim_thread_destroy(g_time_control_thread);
+        g_time_control_thread = NULL;
+    }
+    lifecycle_unlock();
     return true;
+}
+
+bool time_control_stop_checked(void)
+{
+    return stop_worker();
 }
 
 void time_control_stop(void)
 {
-    if (g_time_control_thread == NULL)
-    {
-        return;
-    }
+    if (!time_control_stop_checked()) LOG_ERROR("时间控制线程等待失败, 保留线程对象");
+}
 
-    int result_code = 0;
-    sim_thread_join(g_time_control_thread, &result_code);
-    g_time_control_thread = NULL;
-    LOG_DEBUG("时间控制线程退出, 退出码: %d", result_code);
+static int scheduler_test_worker(void* arg)
+{
+    (void)arg;
+    scheduler_wait(MAX_SLEEP_SLICE_MS);
+    return 0;
+}
+
+static int scheduler_test_stop(void* arg)
+{
+    (void)arg;
+    return stop_worker() ? 0 : 1;
+}
+
+/* Standalone offline executable: exercise the real wait and stop helper
+ * without touching account configuration or starting authentication. */
+bool time_control_resource_self_test(void)
+{
+    for (int i = 0; i < 16; ++i)
+    {
+        lifecycle_lock();
+        if (g_time_control_thread != NULL) { lifecycle_unlock(); return false; }
+        atomic_store(&s_running, true);
+        g_time_control_thread = sim_thread_create(scheduler_test_worker, NULL);
+        const bool started = g_time_control_thread != NULL;
+        if (!started) atomic_store(&s_running, false);
+        lifecycle_unlock();
+        if (!started) return false;
+
+        sim_thread_t* one = sim_thread_create(scheduler_test_stop, NULL);
+        sim_thread_t* two = sim_thread_create(scheduler_test_stop, NULL);
+        int rc1 = -1, rc2 = -1;
+        if (one != NULL)
+        {
+            if (sim_thread_join(one, &rc1) != 0) abort();
+            sim_thread_destroy(one);
+        }
+        if (two != NULL)
+        {
+            if (sim_thread_join(two, &rc2) != 0) abort();
+            sim_thread_destroy(two);
+        }
+        if (!stop_worker() || rc1 != 0 || rc2 != 0 || g_time_control_thread != NULL ||
+            atomic_load(&s_running)) return false;
+    }
+    return true;
 }

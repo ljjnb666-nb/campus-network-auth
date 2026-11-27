@@ -9,6 +9,7 @@
 #include <inttypes.h>
 #include <setjmp.h>
 #include <signal.h>
+#include <stdatomic.h>
 
 #define SCHOOL_NETWORK_SYMBOL 8
 
@@ -187,17 +188,27 @@ typedef struct
 
 typedef struct
 {
-    bool is_initialized;
-    bool is_running;
-    bool is_authed;
-    bool is_need_reauth;
-    bool is_time_disabled;
+    atomic_bool is_initialized;
+    atomic_bool is_running;
+    atomic_bool is_authed;
+    atomic_bool is_need_reauth;
+    atomic_bool is_time_disabled;
     uint8_t last_error_kind;
     uint64_t last_error_at;
     char last_error_code[AUTH_ERROR_CODE_LEN];
     char last_sub_error[AUTH_ERROR_CODE_LEN];
     char last_error_msg[AUTH_ERROR_MSG_LEN];
 } runtime_status_t;
+
+/* Only call for fresh, unpublished or fully quiescent account storage. */
+static inline void runtime_status_init(runtime_status_t* status)
+{
+    atomic_init(&status->is_initialized, false);
+    atomic_init(&status->is_running, false);
+    atomic_init(&status->is_authed, false);
+    atomic_init(&status->is_need_reauth, false);
+    atomic_init(&status->is_time_disabled, false);
+}
 
 typedef struct
 {
@@ -224,6 +235,9 @@ extern bool g_ephemeral_probe;
 extern char g_ephemeral_input[4096];
 void clear_ephemeral_secrets(void);
 void clear_all_account_secrets(void);
+
+/* 结构化事件（协议 v1）：与旧 EPHEMERAL_* 令牌并行输出（定义在 DialerAuth.c） */
+void ephemeral_emit_event(const char* event, int code);
 void request_ephemeral_stop(void);
 bool stop_requested(void);
 
@@ -302,13 +316,13 @@ extern bool g_list_only;
 /* 监管进程拉起的子进程数 (子进程表本身在 SupervisorState.c) */
 extern int g_child_count;
 
-extern bool g_thread_keep_alive;
+extern atomic_bool g_thread_keep_alive;
 
-extern bool g_need_exit;
+extern atomic_bool g_need_exit;
 
 extern bool g_prog_enabled;
 
-extern bool g_need_restart;
+extern atomic_bool g_need_restart;
 
 extern bool g_cfg_loaded;
 

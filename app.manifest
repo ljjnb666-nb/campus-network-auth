@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.2.0.0" name="CheZhiTech.CampusNetworkAuth" type="win32"/>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <!-- Windows 10 / 11 -->
+    <application>
+      <!-- Windows 10 and 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <!-- PerMonitorV2：随显示器 DPI 缩放（配合 app.config 的 WinForms DPI 配置）。
+           运行时若 .NET Framework < 4.7 自动回退为系统级 DPI 感知。 -->
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>

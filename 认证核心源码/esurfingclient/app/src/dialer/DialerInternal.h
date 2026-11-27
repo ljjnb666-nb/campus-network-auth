@@ -94,6 +94,7 @@ void reset(void);
 
 bool supervisor_gone(void);
 
+#define DIALER_EXIT_NETWORK_EXHAUSTED 2
 /* DialerClient.c */
 int dialer_app(void* arg);
 

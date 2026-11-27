@@ -40,88 +40,133 @@ typedef struct
     char name[NAME_LENGTH];
 } adapter_t;
 
-static adapter_t* s_adaptor = NULL;
-static uint8_t s_adaptor_count = 0;
+/* UI enumeration owns its list per call. Keep a bounded collection;
+ * failure never publishes the previous call's rows or a partial document. */
+#define ADAPTER_LIST_MAX 255u
+#define ADAPTER_INFO_MAX_BYTES (4u * 1024u * 1024u)
+typedef struct
+{
+    adapter_t* rows;
+    size_t count;
+    size_t capacity;
+} adapter_list_t;
 
-static void get_adapters(void)
+static void adapter_list_clear(adapter_list_t* list)
+{
+    free(list->rows);
+    *list = (adapter_list_t){0};
+}
+
+static bool adapter_list_append(adapter_list_t* list, const char* name, const char* ip)
+{
+    if (!name || !ip || list->count >= ADAPTER_LIST_MAX) return false;
+    if (list->count == list->capacity)
+    {
+        size_t capacity = list->capacity ? list->capacity * 2u : 8u;
+        if (capacity > ADAPTER_LIST_MAX) capacity = ADAPTER_LIST_MAX;
+        adapter_t* rows = realloc(list->rows, capacity * sizeof(*rows));
+        if (!rows) return false;
+        list->rows = rows;
+        list->capacity = capacity;
+    }
+    adapter_t* row = &list->rows[list->count++];
+    snprintf(row->name, sizeof(row->name), "%s", name);
+    snprintf(row->ip, sizeof(row->ip), "%s", ip);
+    return true;
+}
+
+static bool get_adapters(adapter_list_t* list)
 {
 #ifdef _WIN32
-    PIP_ADAPTER_INFO p_adapter_info = NULL;
-    ULONG ul_out_buf_len = 0;
-    if (GetAdaptersInfo(p_adapter_info, &ul_out_buf_len) == ERROR_BUFFER_OVERFLOW)
+    ULONG size = 0;
+    DWORD rc = GetAdaptersInfo(NULL, &size);
+    if (rc == ERROR_NO_DATA) return true;
+    if (rc != ERROR_BUFFER_OVERFLOW) return false;
+    /* Adapter topology can change between size query and enumeration. */
+    for (unsigned attempt = 0; attempt < 3; ++attempt)
     {
-        p_adapter_info = (PIP_ADAPTER_INFO)malloc(ul_out_buf_len);
-        if (p_adapter_info && GetAdaptersInfo(p_adapter_info, &ul_out_buf_len) == NO_ERROR)
+        if (size == 0 || size > ADAPTER_INFO_MAX_BYTES) return false;
+        PIP_ADAPTER_INFO buffer = malloc(size);
+        if (!buffer) return false;
+        rc = GetAdaptersInfo(buffer, &size);
+        if (rc == ERROR_BUFFER_OVERFLOW)
         {
-            PIP_ADAPTER_INFO p_adapter = p_adapter_info;
-            uint8_t cnt = 0;
-            while (p_adapter)
+            free(buffer);
+            continue;
+        }
+        bool ok = rc == NO_ERROR || rc == ERROR_NO_DATA;
+        if (rc == NO_ERROR)
+        {
+            for (PIP_ADAPTER_INFO row = buffer; row; row = row->Next)
             {
-                adapter_t* new_adaptor = realloc(s_adaptor, sizeof(adapter_t) * (cnt + 1));
-                if (!new_adaptor)
+                if (!adapter_list_append(list, row->Description, row->IpAddressList.IpAddress.String))
                 {
-                    LOG_ERROR("分配内存失败");
+                    ok = false;
                     break;
                 }
-                s_adaptor = new_adaptor;
-                snprintf(s_adaptor[cnt].name, NAME_LENGTH, "%s", p_adapter->Description);
-                snprintf(s_adaptor[cnt].ip, IP_LEN, "%s", p_adapter->IpAddressList.IpAddress.String);
-                LOG_TRACE("IP: %s", p_adapter->IpAddressList.IpAddress.String);
-                p_adapter = p_adapter->Next;
-                cnt++;
             }
-            s_adaptor_count = cnt;
         }
+        free(buffer);
+        return ok;
     }
-    if (p_adapter_info) free(p_adapter_info);
+    return false;
 #else
-    struct ifaddrs* ifaddrs_ptr, *ifa;
-    if (getifaddrs(&ifaddrs_ptr) == 0)
+    struct ifaddrs* entries = NULL;
+    if (getifaddrs(&entries) != 0) return false;
+    bool ok = true;
+    for (struct ifaddrs* ifa = entries; ifa; ifa = ifa->ifa_next)
     {
-        uint8_t cnt = 0;
-        for (ifa = ifaddrs_ptr; ifa; ifa = ifa->ifa_next)
+        if (!ifa->ifa_name || !ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+        if (strcmp(ifa->ifa_name, "lo") == 0) continue;
+        char ip[INET_ADDRSTRLEN];
+        const struct sockaddr_in* addr = (const struct sockaddr_in*)ifa->ifa_addr;
+        if (!inet_ntop(AF_INET, &addr->sin_addr, ip, sizeof(ip))) continue;
+        if (!adapter_list_append(list, ifa->ifa_name, ip))
         {
-            if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
-            if (strcmp(ifa->ifa_name, "lo") == 0) continue;
-            char ip[INET_ADDRSTRLEN];
-            struct sockaddr_in *addr = (struct sockaddr_in*)ifa->ifa_addr;
-            if (inet_ntop(AF_INET, &addr->sin_addr, ip, sizeof(ip)))
-            {
-                adapter_t* new_adaptor = realloc(s_adaptor, sizeof(adapter_t) * (cnt + 1));
-                if (!new_adaptor)
-                {
-                    LOG_ERROR("分配内存失败");
-                    break;
-                }
-                s_adaptor = new_adaptor;
-                snprintf(s_adaptor[cnt].name, NAME_LENGTH, "%s", ifa->ifa_name);
-                snprintf(s_adaptor[cnt].ip, IP_LEN, "%s", ip);
-                cnt++;
-            }
+            ok = false;
+            break;
         }
-        s_adaptor_count = cnt;
-        freeifaddrs(ifaddrs_ptr);
     }
+    freeifaddrs(entries);
+    return ok;
 #endif
+}
+
+static char* render_adapter_list(const adapter_list_t* list, const char* symbol)
+{
+    cJSON* root = NULL;
+    cJSON* adapters = NULL;
+    cJSON* item = NULL;
+    char* json = NULL;
+    if (!list || !symbol || list->count > ADAPTER_LIST_MAX ||
+        list->count > list->capacity || (list->count && !list->rows)) return NULL;
+    if (!(root = cJSON_CreateObject()) || !(adapters = cJSON_CreateArray())) goto cleanup;
+    for (size_t i = 0; i < list->count; ++i)
+    {
+        if (!list->rows[i].name[0]) break; /* preserve existing display semantics */
+        if (!(item = cJSON_CreateObject()) ||
+            !cJSON_AddStringToObject(item, "name", list->rows[i].name) ||
+            !cJSON_AddStringToObject(item, "ip", list->rows[i].ip) ||
+            !cJSON_AddItemToArray(adapters, item)) goto cleanup;
+        item = NULL;
+    }
+    if (!cJSON_AddItemToObject(root, "adapters", adapters)) goto cleanup;
+    adapters = NULL;
+    if (!cJSON_AddStringToObject(root, "school_network_symbol", symbol)) goto cleanup;
+    json = cJSON_Print(root);
+cleanup:
+    cJSON_Delete(item);
+    cJSON_Delete(adapters);
+    cJSON_Delete(root);
+    return json;
 }
 
 char* get_adapters_json(void)
 {
-    get_adapters();
-    cJSON* root = cJSON_CreateObject();
-    cJSON* adapters = cJSON_CreateArray();
-    for (uint8_t i = 0; i < s_adaptor_count; i++)
-    {
-        if (strlen(s_adaptor[i].name) == 0) break;
-        cJSON* adapter = cJSON_CreateObject();
-        cJSON_AddStringToObject(adapter, "name", s_adaptor[i].name);
-        cJSON_AddStringToObject(adapter, "ip", s_adaptor[i].ip);
-        cJSON_AddItemToArray(adapters, adapter);
-    }
-    cJSON_AddItemToObject(root, "adapters", adapters);
-    cJSON_AddStringToObject(root, "school_network_symbol", g_school_network_symbol);
-    char* json = cJSON_Print(root);
-    cJSON_Delete(root);
+    adapter_list_t list = {0};
+    char* json = NULL;
+    if (get_adapters(&list)) json = render_adapter_list(&list, g_school_network_symbol);
+    adapter_list_clear(&list);
     return json;
 }
 
@@ -161,27 +206,29 @@ static void adapter_wide_to_utf8(const wchar_t* wide, char* out, const size_t ou
 
 uint8_t get_adapters_stats(adapter_stats_t* out, const uint8_t max, char* default_id, const size_t default_id_len)
 {
-    if (out == NULL || max == 0) return 0;
     if (default_id != NULL && default_id_len > 0) default_id[0] = '\0';
+    if (out == NULL || max == 0) return 0;
 
     ULONG size = 16 * 1024;
-    PIP_ADAPTER_ADDRESSES addrs = malloc(size);
-    if (addrs == NULL) return 0;
-
-    // INCLUDE_GATEWAYS: 靠"有没有网关"把 VMware/Hyper-V 这类虚拟网卡挡掉
+    PIP_ADAPTER_ADDRESSES addrs = NULL;
     const ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER |
                         GAA_FLAG_INCLUDE_GATEWAYS;
-    ULONG rc = GetAdaptersAddresses(AF_UNSPEC, flags, NULL, addrs, &size);
-    if (rc == ERROR_BUFFER_OVERFLOW)
+    ULONG rc = ERROR_BUFFER_OVERFLOW;
+    /* Local traffic sampling only. Bound both allocation and topology-change retries. */
+    for (unsigned attempt = 0; attempt < 3 && rc == ERROR_BUFFER_OVERFLOW; ++attempt)
     {
-        free(addrs);
+        if (size == 0 || size > ADAPTER_INFO_MAX_BYTES) return 0;
         addrs = malloc(size);
         if (addrs == NULL) return 0;
         rc = GetAdaptersAddresses(AF_UNSPEC, flags, NULL, addrs, &size);
+        if (rc != NO_ERROR)
+        {
+            free(addrs);
+            addrs = NULL;
+        }
     }
     if (rc != NO_ERROR)
     {
-        free(addrs);
         LOG_WARN("枚举网卡失败 (错误码 %lu)", (unsigned long)rc);
         return 0;
     }
@@ -351,7 +398,7 @@ uint8_t get_adapters_stats(adapter_stats_t* out, const uint8_t max, char* defaul
     uint8_t count = 0;
     for (struct ifaddrs* ifa = list; ifa != NULL && count < max; ifa = ifa->ifa_next)
     {
-        if (ifa->ifa_addr == NULL) continue;
+        if (ifa->ifa_name == NULL || ifa->ifa_addr == NULL) continue;
         if (ifa->ifa_addr->sa_family != AF_INET && ifa->ifa_addr->sa_family != AF_INET6) continue;
         if (adapter_is_loopback(ifa->ifa_name)) continue;
 
@@ -416,39 +463,63 @@ static void adapter_default_route(char* out, const size_t out_len)
 
     int mib[6] = {CTL_NET, PF_ROUTE, 0, 0, NET_RT_DUMP, 0};
     size_t needed = 0;
-    if (sysctl(mib, 6, NULL, &needed, NULL, 0) != 0 || needed == 0) return;
+    if (sysctl(mib, 6, NULL, &needed, NULL, 0) != 0 ||
+        needed == 0 || needed > ADAPTER_INFO_MAX_BYTES) return;
 
-    char* buffer = malloc(needed);
+    const size_t capacity = needed;
+    char* buffer = malloc(capacity);
     if (buffer == NULL) return;
-    if (sysctl(mib, 6, buffer, &needed, NULL, 0) != 0)
+    if (sysctl(mib, 6, buffer, &needed, NULL, 0) != 0 || needed > capacity)
     {
         free(buffer);
         return;
     }
 
-    for (char* cursor = buffer; cursor < buffer + needed;)
+    /* This is a local UI sampling buffer. Do not dereference a partial
+     * kernel record or an unaligned sockaddr in the variable-length dump. */
+    for (size_t offset = 0; offset < needed;)
     {
-        const struct rt_msghdr* route = (const struct rt_msghdr*)cursor;
-        if (route->rtm_msglen <= 0) break;
-        // 默认路由 = 目标地址是全零的那条 (macOS 的 rt_msghdr 没有"前缀长度"字段,
-        // 前缀长度藏在 RTA_DST 那个 sockaddr 里; 默认路由的地址本身就是 0)
-        if ((route->rtm_flags & RTF_UP) != 0 && route->rtm_index != 0 && (route->rtm_addrs & RTA_DST) != 0)
+        const size_t remaining = needed - offset;
+        if (remaining < sizeof(struct rt_msghdr)) break;
+        struct rt_msghdr route;
+        memcpy(&route, buffer + offset, sizeof(route));
+        const size_t length = route.rtm_msglen;
+        if (length < sizeof(route) || length > remaining) break;
+        const size_t payload = length - sizeof(route);
+        const char* dst = buffer + offset + sizeof(route);
+        if (route.rtm_version == RTM_VERSION && (route.rtm_flags & RTF_UP) != 0 &&
+            route.rtm_index != 0 && (route.rtm_addrs & RTA_DST) != 0 &&
+            payload >= offsetof(struct sockaddr, sa_data))
         {
-            const struct sockaddr* dst = (const struct sockaddr*)(route + 1);
-            const bool is_default =
-                (dst->sa_family == AF_INET && ((const struct sockaddr_in*)dst)->sin_addr.s_addr == 0) ||
-                (dst->sa_family == AF_INET6 && IN6_IS_ADDR_UNSPECIFIED(&((const struct sockaddr_in6*)dst)->sin6_addr));
+            struct sockaddr head = {0};
+            memcpy(&head, dst, offsetof(struct sockaddr, sa_data));
+            bool is_default = false;
+            if (head.sa_len <= payload)
+            {
+                if (head.sa_family == AF_INET && head.sa_len >= sizeof(struct sockaddr_in))
+                {
+                    struct sockaddr_in addr;
+                    memcpy(&addr, dst, sizeof(addr));
+                    is_default = addr.sin_addr.s_addr == 0;
+                }
+                else if (head.sa_family == AF_INET6 && head.sa_len >= sizeof(struct sockaddr_in6))
+                {
+                    struct sockaddr_in6 addr;
+                    memcpy(&addr, dst, sizeof(addr));
+                    is_default = IN6_IS_ADDR_UNSPECIFIED(&addr.sin6_addr);
+                }
+            }
             if (is_default)
             {
                 char name[IFNAMSIZ] = {0};
-                if (if_indextoname(route->rtm_index, name) != NULL)
+                if (if_indextoname(route.rtm_index, name) != NULL)
                 {
                     snprintf(out, out_len, "%s", name);
                     break;
                 }
             }
         }
-        cursor += route->rtm_msglen;
+        offset += length;
     }
     free(buffer);
 }
@@ -470,7 +541,7 @@ uint8_t get_adapters_stats(adapter_stats_t* out, const uint8_t max, char* defaul
     uint8_t count = 0;
     for (struct ifaddrs* ifa = list; ifa != NULL && count < max; ifa = ifa->ifa_next)
     {
-        if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_LINK) continue;
+        if (ifa->ifa_name == NULL || ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_LINK) continue;
         if ((ifa->ifa_flags & IFF_LOOPBACK) != 0) continue;
         if ((ifa->ifa_flags & IFF_UP) == 0) continue;
         if (adapter_is_virtual_name(ifa->ifa_name)) continue;

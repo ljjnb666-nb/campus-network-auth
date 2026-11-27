@@ -1,0 +1,969 @@
+# 澈知科技校园网连接 — Windows 构建 + 离线自检 + 安全扫描
+# 仅执行离线构建与自检：CI 环境不配置真实校园网账号，不执行真实认证，
+# 核心侧 --ephemeral-check / --ephemeral-probe 均为官方离线测试钩子（见
+# 认证核心源码/docs/EphemeralExperimental.md 与 DialerAuth.c 的 probe 分支）。
+name: build
+
+on:
+  push:
+    branches: [main, 'fix/**']
+  pull_request:
+  workflow_dispatch:
+
+# Build/test jobs do not need repository write permissions.
+permissions:
+  contents: read
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Cache curl source package
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: third-party
+          key: curl-8.23.0-E3DE77CFA6367083C776A26647FC9F633B538C06C3BAA73D931A252AC8F72B49
+
+      - name: Fetch and verify dependencies
+        shell: pwsh
+        run: ./scripts/Fetch-Curl.ps1
+
+      - name: Set up MinGW-w64 (UCRT64)
+        id: msys2
+        uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c # v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Resolve MSYS2 toolchain root
+        # setup-msys2 的安装位置随 runner 环境变化（实测 hostedtoolcache 提取后不在
+        # C:\msys64）：优先 action 输出，其次探测常见候选，找不到即失败。
+        shell: pwsh
+        run: |
+          $candidates = @(
+            '${{ steps.msys2.outputs.msys2-location }}',
+            'C:\msys64',
+            "$env:RUNNER_TEMP\msys64",
+            'D:\a\_msys64'
+          ) | Where-Object { $_ -and (Test-Path (Join-Path $_ 'ucrt64\bin\gcc.exe')) }
+          if (-not $candidates) {
+            $found = Get-ChildItem -Path C:\,D:\ -Filter gcc.exe -Recurse -Depth 5 -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match 'ucrt64\\bin\\gcc\.exe$' } | Select-Object -First 1
+            if ($found) { $candidates = @((Split-Path (Split-Path (Split-Path $found.FullName)))) }
+          }
+          if (-not $candidates) { throw '未找到 ucrt64 GCC（MSYS2 安装位置解析失败）' }
+          Write-Host "MSYS2 root: $($candidates[0])"
+          "MSYS2_ROOT=$($candidates[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Toolchain versions
+        shell: pwsh
+        run: |
+          cmake --version | Select-Object -First 1
+          & "$env:MSYS2_ROOT\ucrt64\bin\gcc.exe" --version | Select-Object -First 1
+          Test-Path "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+
+      - name: Verify reviewed build dependencies
+        shell: pwsh
+        run: ./scripts/Test-BuildDependencies.ps1 -MsysRoot $env:MSYS2_ROOT
+
+      - name: Offline Windows local adapter resource failure audit
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $temp = Join-Path $env:RUNNER_TEMP ('adapter-audit-' + [Guid]::NewGuid().ToString('N'))
+          [void](New-Item -ItemType Directory -Path $temp)
+          try {
+            $root = '认证核心源码/esurfingclient/app'
+            Copy-Item -LiteralPath (Join-Path $root 'include') -Destination $temp -Recurse
+            Copy-Item -LiteralPath (Join-Path $root 'third_party/cJSON') -Destination $temp -Recurse
+            Copy-Item -LiteralPath (Join-Path $root 'src/utils/platform/NetAdapters.c') -Destination $temp
+            Copy-Item -LiteralPath (Join-Path $root 'src/utils/platform/PlatformInternal.h') -Destination $temp
+            Copy-Item -LiteralPath 'scripts/tests/adapter_windows_audit.c' -Destination $temp
+            Push-Location -LiteralPath $temp
+            try {
+              $bin = Join-Path $env:MSYS2_ROOT 'ucrt64/bin'
+              $env:PATH = "$bin;$env:PATH"
+              $gcc = Join-Path $bin 'gcc.exe'
+              $PSNativeCommandUseErrorActionPreference = $false
+              $output = @(& $gcc -v -std=gnu11 -O1 -Iinclude -I. adapter_windows_audit.c cJSON/cJSON.c -o adapter_audit.exe -liphlpapi -lws2_32 2>&1)
+              $code = $LASTEXITCODE
+              $output | ForEach-Object { Write-Host "$_" }
+              if ($code -ne 0 -or -not (Test-Path -LiteralPath 'adapter_audit.exe' -PathType Leaf)) { throw "Windows adapter audit compile failed: exit=$code" }
+              $result = @(& ./adapter_audit.exe 2>&1)
+              $code = $LASTEXITCODE
+              $result | ForEach-Object { Write-Host "$_" }
+              if ($code -ne 0 -or -not ($result -ceq 'WINDOWS_LOCAL_ADAPTER_RESOURCE_PASS cases=22')) { throw "Windows adapter resource audit failed: exit=$code" }
+            } finally { Pop-Location }
+          } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
+
+      - name: Offline Windows local log archive regression
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $temp = Join-Path $env:RUNNER_TEMP ('log-archive-audit-' + [Guid]::NewGuid().ToString('N'))
+          [void](New-Item -ItemType Directory -Path $temp)
+          try {
+            $root = '认证核心源码/esurfingclient/app/src/utils/log'
+            Copy-Item -LiteralPath (Join-Path $root 'LogArchiveFile.h') -Destination $temp
+            Copy-Item -LiteralPath (Join-Path $root 'LogPrivateFile.h') -Destination $temp
+            Copy-Item -LiteralPath 'scripts/tests/log_archive_audit.c' -Destination $temp
+            Push-Location -LiteralPath $temp
+            try {
+              $bin = Join-Path $env:MSYS2_ROOT 'ucrt64/bin'
+              $env:PATH = "$bin;$env:PATH"
+              $gcc = Join-Path $bin 'gcc.exe'
+              $PSNativeCommandUseErrorActionPreference = $false
+              $output = @(& $gcc -std=gnu11 -Wall -Wextra -Werror -O1 -I. log_archive_audit.c -o archive_audit.exe 2>&1)
+              $code = $LASTEXITCODE
+              $output | ForEach-Object { Write-Host "$_" }
+              if ($code -ne 0 -or -not (Test-Path -LiteralPath 'archive_audit.exe' -PathType Leaf)) { throw "Windows archive audit compile failed: exit=$code" }
+              $result = @(& ./archive_audit.exe $temp 2>&1)
+              $code = $LASTEXITCODE
+              $result | ForEach-Object { Write-Host "$_" }
+              if ($code -ne 0 -or -not ($result -ccontains 'LOCAL_LOG_ARCHIVE_NO_REPLACE_PASS cases=4') -or -not ($result -ccontains 'LOCAL_LOG_IDENTITY_AND_APPEND_PASS')) { throw "Windows archive audit failed: exit=$code" }
+              $fixture = Join-Path $temp 'junction-test'
+              $target = Join-Path $fixture 'plain'
+              $junction = Join-Path $fixture 'mapped'
+              [void](New-Item -ItemType Directory -Path $target)
+              [void](New-Item -ItemType Junction -Path $junction -Target $target)
+              try {
+                $result = @(& ./archive_audit.exe $fixture check-junction 2>&1)
+                $code = $LASTEXITCODE
+                $result | ForEach-Object { Write-Host "$_" }
+                if ($code -ne 0 -or -not ($result -ccontains 'LOCAL_LOG_ANCESTOR_JUNCTION_REJECTED_PASS')) { throw "Windows log path audit failed: exit=$code" }
+              } finally { [IO.Directory]::Delete($junction) }
+            } finally { Pop-Location }
+          } finally { Remove-Item -LiteralPath $temp -Recurse -Force }
+
+      - name: Build core and GUI from source
+        shell: pwsh
+        run: |
+          ./Build-Core.ps1 `
+            -CMake (Get-Command cmake.exe).Source `
+            -Ninja (Join-Path $env:MSYS2_ROOT 'ucrt64\bin\ninja.exe') `
+            -Gcc (Join-Path $env:MSYS2_ROOT 'ucrt64\bin\gcc.exe') `
+            -Gxx (Join-Path $env:MSYS2_ROOT 'ucrt64\bin\g++.exe')
+      # 说明：Build-Core.ps1 同时产出认证核心与桌面 EXE（核心哈希已写入其生成源码），
+      # 二者自洽。不再在 CI 上运行 Build.ps1 —— 仓库提交的 CoreHash 与 CI 现编核心
+      # 的哈希逐字节一致在本工具链下不可保证（实测同机重编哈希即变）。
+
+      - name: Offline self-tests
+        shell: pwsh
+        run: |
+          $exe = 'build-core\澈知科技-源码重建.exe'
+          # 注意：pwsh 的 & 不等待 GUI 子系统进程（$LASTEXITCODE 不设置），
+          # 必须用 Start-Process -Wait 显式等待并取真实退出码
+          function Invoke-SelfTest([string]$testArgs) {
+            $p = Start-Process -FilePath $exe -ArgumentList $testArgs -Wait -PassThru -NoNewWindow
+            if ($p.ExitCode -ne 0) { Write-Host "##[error]自测失败: $testArgs (exit $($p.ExitCode))"; exit 1 }
+          }
+          Invoke-SelfTest '--self-test-logic'
+          Invoke-SelfTest '--self-test-credentials'
+          Invoke-SelfTest '--self-test-core'
+          Invoke-SelfTest '--self-test-native-input'
+          Invoke-SelfTest '--self-test-native-net'
+          Invoke-SelfTest '--self-test-stop'   # 离线 probe 钩子：仅验证 STOP 通道与结构化事件，不触碰真实认证
+          Invoke-SelfTest '--self-test-resources' # 30 offline core cycles, mandatory exit and pipe drain
+
+      - name: Offline UI self-test
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath 'build-core\澈知科技-源码重建.exe' -ArgumentList '--self-test-ui' -Wait -PassThru -NoNewWindow
+          Write-Host "UI test exit: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "UI self-test failed: $($p.ExitCode)" }
+
+      - name: Offline application lifecycle (100 cycles, real message loop)
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath 'build-core\澈知科技-源码重建.exe' -ArgumentList '--self-test-app-lifecycle' -Wait -PassThru -NoNewWindow
+          Write-Host "Application lifecycle test exit: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "Application lifecycle self-test failed: $($p.ExitCode)" }
+
+      - name: Offline UI scroll and resource stress (100 measured cycles)
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath 'build-core\澈知科技-源码重建.exe' -ArgumentList '--self-test-ui-stress' -Wait -PassThru -NoNewWindow
+          Write-Host "UI stress test exit: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "UI stress self-test failed: $($p.ExitCode)" }
+
+      - name: Authenticode regression (signed and tampered fixture)
+        shell: pwsh
+        run: |
+          $candidates = @(
+            (Get-Command pwsh.exe).Source,
+            "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe",
+            "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          )
+          $fixture = $candidates | Where-Object {
+            if ($_ -and (Test-Path -LiteralPath $_)) {
+              $sig = Get-AuthenticodeSignature -LiteralPath $_
+              $sig.Status -eq 'Valid' -and $sig.SignatureType -eq 'Authenticode'
+            }
+          } | Select-Object -First 1
+          if (-not $fixture) { throw 'No trusted embedded-signature fixture found' }
+          $args = '--self-test-signature "' + $fixture + '"'
+          $p = Start-Process -FilePath 'build-core\澈知科技-源码重建.exe' -ArgumentList $args -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { throw "Signature regression failed: $($p.ExitCode)" }
+
+      - name: Offline secret scanner regression
+        shell: pwsh
+        run: ./scripts/scan-secrets.ps1 -SelfTest
+
+      - name: Secret scan
+        shell: pwsh
+        run: ./scripts/scan-secrets.ps1
+
+      - name: Offline curl advisory range regression
+        shell: pwsh
+        run: ./scripts/Test-CurlVulns.ps1 -SelfTest
+
+      - name: Dependency vulnerability check (curl; findings require release review)
+        shell: pwsh
+        run: ./scripts/Test-CurlVulns.ps1
+
+      - name: Verify artifact manifest against checkout and files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = 'build-core'
+          $m = Get-Content -LiteralPath (Join-Path $dir 'build-manifest.json') -Raw | ConvertFrom-Json
+          $head = @(git rev-parse --verify HEAD)
+          if ($LASTEXITCODE -ne 0 -or $head.Count -ne 1 -or $m.schemaVersion -ne 2 -or $m.gitCommit -cne $head[0]) { throw 'Manifest checkout mismatch' }
+          $checkout = $m.checkoutEvidence
+          if ($checkout.status -cne 'clean-observed' -or
+              $checkout.before.state -cne 'clean' -or $checkout.after.state -cne 'clean' -or
+              $checkout.before.commit -cne $head[0] -or $checkout.after.commit -cne $head[0]) { throw 'Manifest checkout provenance unverified' }
+          Write-Host 'BUILD_CHECKOUT_EVIDENCE_PASS'
+          if ($m.dependencies.curl.sha256 -cne 'E3DE77CFA6367083C776A26647FC9F633B538C06C3BAA73D931A252AC8F72B49') { throw 'Manifest dependency lock mismatch' }
+          $expected = @('认证核心-源码重建.exe','澈知科技-源码重建.exe','澈知科技-源码重建.exe.config')
+          if (@($m.outputs).Count -ne $expected.Count) { throw 'Manifest output count mismatch' }
+          foreach ($name in $expected) {
+            $entry = @($m.outputs | Where-Object { $_.file -ceq $name })
+            if ($entry.Count -ne 1) { throw "Missing or duplicate artifact: $name" }
+            $file = Join-Path $dir $name
+            if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -cne $entry[0].sha256 -or
+                (Get-Item -LiteralPath $file).Length -ne $entry[0].bytes) { throw "Artifact mismatch: $name" }
+          }
+          $root = '认证核心源码/esurfingclient/app/third_party/cJSON'
+          if ($m.dependencies.cJSON.version -cne '1.7.19' -or @($m.dependencies.cJSON.files).Count -ne 2) { throw 'cJSON manifest mismatch' }
+          foreach ($name in @('cJSON.c','cJSON.h')) {
+            $entry = @($m.dependencies.cJSON.files | Where-Object { $_.file -ceq $name })
+            if ($entry.Count -ne 1 -or (Get-FileHash -LiteralPath (Join-Path $root $name) -Algorithm SHA256).Hash -cne $entry[0].sha256) { throw "Vendored source mismatch: $name" }
+          }
+          Write-Host 'BUILD_MANIFEST_VERIFY_PASS'
+
+      - name: Inspect Windows PE architecture and import tables
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $objdump = Join-Path $env:MSYS2_ROOT 'ucrt64/bin/objdump.exe'
+          $dir = 'build-core'
+          # MinGW objdump on this runner cannot open non-ASCII filenames.
+          # Inspect a private ASCII-named copy of the exact verified bytes.
+          $temp = Join-Path $env:RUNNER_TEMP ('pe-audit-' + [Guid]::NewGuid().ToString('N'))
+          if ($temp -match '[^\x20-\x7e]') { throw 'PE audit needs an ASCII temporary path' }
+          [void](New-Item -ItemType Directory -Path $temp)
+          $report = [ordered]@{ schemaVersion = 1; scope = 'direct PE imports only; not transitive or dynamic loads'; files = @() }
+          $lock = Get-Content -LiteralPath 'scripts/build-dependencies.lock.json' -Raw | ConvertFrom-Json
+          try {
+            foreach ($name in @('认证核心-源码重建.exe','澈知科技-源码重建.exe')) {
+              $file = Join-Path $dir $name
+              $isCore = $name -ceq '认证核心-源码重建.exe'
+              $copy = Join-Path $temp $(if ($isCore) { 'core.exe' } else { 'gui.exe' })
+              $digest = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+              [IO.File]::Copy((Resolve-Path -LiteralPath $file).Path, $copy, $false)
+              if ((Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash -cne $digest) { throw "PE audit copy mismatch: $name" }
+              $header = @(& $objdump -f $copy)
+              if ($LASTEXITCODE -ne 0) { throw "PE header inspection failed: $name" }
+              $imports = @(& $objdump -p $copy)
+              if ($LASTEXITCODE -ne 0) { throw "PE import inspection failed: $name" }
+              $format = @($header | Select-String 'file format ' | ForEach-Object { ($_.Line -split 'file format ')[-1].Trim() })
+              if ($format.Count -ne 1) { throw "Unexpected PE format: $name" }
+              if ($isCore -and $format[0] -cne 'pei-x86-64') { throw 'Native core is not x86-64' }
+              $dlls = @($imports | ForEach-Object { if ($_ -match 'DLL Name:\s*(\S+)') { $Matches[1].ToLowerInvariant() } } | Sort-Object -Unique)
+              if ($dlls.Count -eq 0) { throw "No direct imports found: $name" }
+              $expected = @(if ($isCore) { $lock.peDirectImports.core } else { $lock.peDirectImports.gui })
+              if ($expected.Count -eq 0 -or ($expected | Sort-Object -Unique).Count -ne $expected.Count) { throw "Invalid reviewed PE baseline: $name" }
+              $diff = @(Compare-Object -ReferenceObject $expected -DifferenceObject $dlls -CaseSensitive)
+              if ($diff.Count -ne 0) {
+                $diff | Format-Table -AutoSize | Out-String | Write-Host
+                throw "PE direct import baseline drift: $name"
+              }
+              if (@($dlls | Where-Object { $_ -match '^(libcurl|libgcc|libstdc\+\+|libwinpthread|cjson|libcjson).*\.dll$' }).Count -gt 0) {
+                throw "Unexpected shared dependency: $name"
+              }
+              if ((Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash -cne $digest -or
+                  (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -cne $digest) { throw "PE audit bytes changed: $name" }
+              $report.files += [ordered]@{file=$name;sha256=$digest;format=$format[0];imports=$dlls}
+              Write-Host "$name : $($dlls -join ', ')"
+            }
+          } finally {
+            Remove-Item -LiteralPath $temp -Recurse -Force
+          }
+          $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $dir 'pe-imports.json') -Encoding utf8
+          Write-Host 'PE_DIRECT_IMPORT_AUDIT_PASS'
+
+      - name: Generate source-level CycloneDX SBOM
+        shell: pwsh
+        run: ./scripts/New-SourceSbom.ps1
+
+      - name: Diagnose existing CSharp compiler deterministic capability
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+          if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'Missing existing CSharp compiler' }
+          $temp = Join-Path $env:RUNNER_TEMP ('csc-probe-' + [Guid]::NewGuid().ToString('N'))
+          [void](New-Item -ItemType Directory -Path $temp)
+          try {
+            $source = Join-Path $temp 'Probe.cs'
+            [IO.File]::WriteAllText($source, 'public static class Probe { public static int Value() { return 42; } }')
+            $digests = @()
+            $exits = @()
+            $unsupported = 0
+            foreach ($dir in @('one','two')) {
+              $dest = Join-Path $temp $dir
+              [void](New-Item -ItemType Directory -Path $dest)
+              $dll = Join-Path $dest 'Probe.dll'
+              $output = @(& $compiler '/nologo' '/target:library' '/optimize+' '/deterministic+' "/out:$dll" $source 2>&1)
+              $code = $LASTEXITCODE
+              $exits += $code
+              $output | ForEach-Object { Write-Host "$_" }
+              if ($code -eq 0) {
+                if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) { throw 'Compiler success without output' }
+                $digests += (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash
+              } elseif ($code -eq 1 -and (($output -join "`n") -match 'CS2007: Unrecognized option: ''/deterministic\+''')) {
+                $unsupported++
+              } else { throw "Unexpected synthetic compiler failure: exit=$code" }
+            }
+            $identical = $digests.Count -eq 2 -and $digests[0] -ceq $digests[1]
+            Write-Host "CSC_DETERMINISM_PROBE exits=$($exits -join ',') outputs=$($digests.Count) byteIdentical=$identical"
+            if ($unsupported -eq 2) {
+              Write-Host '::warning::Existing CSharp compiler does not support deterministic compilation; GUI reproducibility remains blocked'
+            } elseif ($unsupported -ne 0) { throw 'Inconsistent compiler capability result' }
+            # Only the explicitly recognized unsupported-option outcome is diagnostic.
+            # Synthetic success does not establish GUI reproducibility.
+          } finally {
+            Remove-Item -LiteralPath $temp -Recurse -Force
+          }
+          exit 0
+
+      - name: Measure same-runner rebuild repeatability
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $baseline = 'build-core'
+          $repeat = Join-Path $env:RUNNER_TEMP ('rebuild-' + [Guid]::NewGuid().ToString('N'))
+          $argsMap = @{
+            OutputDirectory = $repeat
+            CMake = (Get-Command cmake.exe).Source
+            Ninja = (Join-Path $env:MSYS2_ROOT 'ucrt64/bin/ninja.exe')
+            Gcc = (Join-Path $env:MSYS2_ROOT 'ucrt64/bin/gcc.exe')
+            Gxx = (Join-Path $env:MSYS2_ROOT 'ucrt64/bin/g++.exe')
+          }
+          try {
+            ./Build-Core.ps1 @argsMap
+            $first = Get-Content -LiteralPath (Join-Path $baseline 'build-manifest.json') -Raw | ConvertFrom-Json
+            $second = Get-Content -LiteralPath (Join-Path $repeat 'build-manifest.json') -Raw | ConvertFrom-Json
+            if ($first.gitCommit -cne $second.gitCommit -or $first.gitCommit -cne (git rev-parse HEAD).Trim()) { throw 'Rebuild checkout mismatch' }
+            $results = @()
+            foreach ($name in @('认证核心-源码重建.exe','澈知科技-源码重建.exe','澈知科技-源码重建.exe.config')) {
+              $a = (Get-FileHash -LiteralPath (Join-Path $baseline $name) -Algorithm SHA256).Hash
+              $b = (Get-FileHash -LiteralPath (Join-Path $repeat $name) -Algorithm SHA256).Hash
+              $am = @($first.outputs | Where-Object { $_.file -ceq $name })
+              $bm = @($second.outputs | Where-Object { $_.file -ceq $name })
+              if ($am.Count -ne 1 -or $bm.Count -ne 1 -or $a -cne $am[0].sha256 -or $b -cne $bm[0].sha256) { throw "Rebuild manifest mismatch: $name" }
+              $entry = [ordered]@{file=$name;firstSha256=$a;secondSha256=$b;byteIdentical=($a -ceq $b)}
+              if ($name.EndsWith('.exe',[StringComparison]::OrdinalIgnoreCase)) {
+                $pe = ./scripts/Compare-PeBuild.ps1 -First (Join-Path $baseline $name) -Second (Join-Path $repeat $name)
+                $entry['peComparison'] = $pe
+                $changed = @($pe.changedSections | ForEach-Object { if ($_.first) { $_.first.name } else { $_.second.name } })
+                Write-Host "REBUILD_PE $name timestamps=$($pe.firstCoffTimestamp),$($pe.secondCoffTimestamp) changedSections=$($changed -join ',')"
+              }
+              $results += $entry
+              Write-Host "REBUILD_FILE $name first=$a second=$b identical=$($a -ceq $b)"
+            }
+            $identical = @($results | Where-Object { -not $_.byteIdentical }).Count -eq 0
+            [ordered]@{schemaVersion=1;scope='two builds on one runner, distinct temporary directories; not independent reproducibility';gitCommit=$first.gitCommit;allByteIdentical=$identical;outputs=$results} |
+              ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $baseline 'repeatability.json') -Encoding utf8
+            if ($identical) { Write-Host 'SAME_RUNNER_REBUILD_BYTE_IDENTICAL' }
+            else { Write-Host '::warning::Same-runner rebuild differs; release reproducibility remains blocked' }
+            Write-Host 'REBUILD_MEASUREMENT_COMPLETE'
+          } finally {
+            if (Test-Path -LiteralPath $repeat -PathType Container) { Remove-Item -LiteralPath $repeat -Recurse -Force }
+          }
+
+      - name: Observe isolated Roslyn compiler and complete existing offline candidate suite
+        shell: pwsh
+        timeout-minutes: 12
+        run: ./scripts/Test-GuiCompilerCandidate.ps1
+
+      - name: Stage reviewed RC documentation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = 'build-core'
+          foreach ($name in @('Licenses.txt','THIRD_PARTY_NOTICES.md','RC_PACKAGE.md','RELEASE_CHECKLIST.md')) {
+            $src = Join-Path $PWD $name
+            $dest = Join-Path $dir $name
+            if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { throw "Missing RC document: $name" }
+            $item = Get-Item -LiteralPath $src
+            if ($item.Length -le 0 -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Invalid RC document: $name" }
+            if (Test-Path -LiteralPath $dest) { throw "Unexpected existing RC document: $name" }
+            Copy-Item -LiteralPath $src -Destination $dest
+            if ((Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash) { throw "RC document digest mismatch: $name" }
+          }
+          Write-Host 'RC_DOCUMENTATION_STAGE_PASS files=4'
+
+      - name: Bind unsigned build evidence to artifact digests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = 'build-core'
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'build-toolchain-evidence.json') -Destination (Join-Path $dir 'build-toolchain-evidence.json')
+          $files = @('认证核心-源码重建.exe','澈知科技-源码重建.exe','澈知科技-源码重建.exe.config','build-manifest.json','sbom.cdx.json','pe-imports.json','repeatability.json','build-toolchain-evidence.json','Licenses.txt','THIRD_PARTY_NOTICES.md','RC_PACKAGE.md','RELEASE_CHECKLIST.md','gui-compiler-candidate.json')
+          $entries = @(foreach ($name in $files) {
+            $file = Join-Path $dir $name
+            [ordered]@{file=$name;sha256=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash;bytes=(Get-Item -LiteralPath $file).Length}
+          })
+          [ordered]@{schemaVersion=1;scope='unsigned CI build evidence, not a cryptographic attestation';repository=$env:GITHUB_REPOSITORY;runId=$env:GITHUB_RUN_ID;runAttempt=$env:GITHUB_RUN_ATTEMPT;checkout=(git rev-parse HEAD).Trim();files=$entries} |
+            ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $dir 'build-evidence.json') -Encoding utf8
+          Write-Host 'BUILD_EVIDENCE_INDEX_PASS'
+
+      - name: Validate source SBOM against pinned CycloneDX schema
+        shell: pwsh
+        run: ./scripts/Test-SourceSbomSchema.ps1
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chezhi-windows-build
+          path: |
+            build-core/澈知科技-源码重建.exe
+            build-core/认证核心-源码重建.exe
+            build-core/build-manifest.json
+            build-core/sbom.cdx.json
+            build-core/pe-imports.json
+            build-core/repeatability.json
+            build-core/build-toolchain-evidence.json
+            build-core/build-evidence.json
+            build-core/澈知科技-源码重建.exe.config
+            build-core/Licenses.txt
+            build-core/THIRD_PARTY_NOTICES.md
+            build-core/RC_PACKAGE.md
+            build-core/RELEASE_CHECKLIST.md
+            build-core/gui-compiler-candidate.json
+          if-no-files-found: error
+
+      - name: Preserve non-executable audit evidence when a gate fails
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chezhi-failed-build-audit-only
+          path: |
+            build-core/build-manifest.json
+            build-core/sbom.cdx.json
+            build-core/pe-imports.json
+            build-core/repeatability.json
+            build-core/build-evidence.json
+            build-core/build-toolchain-evidence.json
+          if-no-files-found: ignore
+
+  sbom-synthetic-audit:
+    # Independent generator/schema regression only; no build artifact,
+    # credentials, release, or change to the mandatory Windows scan.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Checkout provenance observation regression
+        shell: pwsh
+        run: ./scripts/Test-CheckoutEvidence.ps1
+      - name: Read-only PE evidence regression
+        shell: pwsh
+        run: ./scripts/Test-PeEvidence.ps1
+      - name: Validate synthetic source inventory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tmp = Join-Path $env:RUNNER_TEMP ('sbom-fixture-' + [Guid]::NewGuid().ToString('N'))
+          [void](New-Item -ItemType Directory -Path $tmp)
+          try {
+            $fixture = [ordered]@{
+              schemaVersion = 2
+              gitCommit = ('0' * 40)
+              builtAtUtc = '2000-01-01T00:00:00Z'
+              appVersion = '0.0.0-fixture'
+              toolchain = @{ fixture = 'synthetic-only' }
+              dependencies = @{
+                curl = @{ version = '0.0.0'; sha256 = ('1' * 64); source = 'https://example.invalid/source-fixture.tar.gz' }
+                cJSON = @{ version = '0.0.0'; files = @(
+                  @{ file = 'cJSON.c'; sha256 = ('2' * 64) }
+                  @{ file = 'cJSON.h'; sha256 = ('3' * 64) }
+                ) }
+              }
+            }
+            $fixture | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $tmp 'build-manifest.json') -Encoding utf8
+            Write-Host 'SYNTHETIC_SBOM_ONLY: no production build evidence'
+            ./scripts/New-SourceSbom.ps1 -BuildDir $tmp
+            ./scripts/Test-SourceSbomSchema.ps1 -SbomPath (Join-Path $tmp 'sbom.cdx.json')
+            Write-Host 'SYNTHETIC_SBOM_REGRESSION_PASS'
+          } finally {
+            Remove-Item -LiteralPath $tmp -Recurse -Force
+          }
+
+  macos-local-resource-audit:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Private local log file regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -I'认证核心源码/esurfingclient/app/src/utils/log' scripts/tests/private_log_stream_audit.c -o "$tmp/log_audit"
+          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 "$tmp/log_audit" "$tmp"
+          clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -I'认证核心源码/esurfingclient/app/src/utils/log' scripts/tests/log_archive_audit.c -o "$tmp/archive_audit"
+          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 "$tmp/archive_audit" "$tmp"
+      - name: Offline local sampling buffer regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          root='认证核心源码/esurfingclient/app'
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          clang -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -I"$root/include" -I"$root/src/utils/platform" -I"$root/third_party" \
+            scripts/tests/adapter_macos_audit.c "$root/third_party/cJSON/cJSON.c" \
+            -o "$tmp/adapter_audit"
+          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 "$tmp/adapter_audit" | tee "$tmp/result"
+          grep -Fx 'MACOS_LOCAL_ADAPTER_RESOURCE_PASS cases=12' "$tmp/result"
+
+  linux-crypto-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Private local log file regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          gcc -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -I'认证核心源码/esurfingclient/app/src/utils/log' scripts/tests/private_log_stream_audit.c -o "$tmp/log_audit"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/log_audit" "$tmp"
+          gcc -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -I'认证核心源码/esurfingclient/app/src/utils/log' scripts/tests/log_archive_audit.c -o "$tmp/archive_audit"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/archive_audit" "$tmp"
+      - name: cJSON source usage and arithmetic regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd '认证核心源码/esurfingclient/app'
+          # Search identifiers, including indirect references. Distinguish
+          # no matches from a failed search; do not silently pass errors.
+          # cJSON_Compare belongs to the main library; JSON Patch and
+          # other utility functions use the cJSONUtils_ namespace.
+          pattern='(cJSON_Compare|cJSONUtils_[[:alnum:]_]+)'
+          printf '%s\n' cJSON_Compare cJSONUtils_ApplyPatches cJSONUtils_ApplyPatchesCaseSensitive cJSONUtils_GeneratePatches | grep -wE "$pattern" > "$RUNNER_TEMP/cjson-guard-positive.txt"
+          test "$(wc -l < "$RUNNER_TEMP/cjson-guard-positive.txt")" -eq 4
+          if printf '%s\n' cJSON_Parse cJSON_Delete cJSON_CompareExtra | grep -qwE "$pattern"; then
+            echo 'cJSON guard false positive'; exit 1
+          else
+            status=$?
+            test "$status" -eq 1
+          fi
+          if git grep -n -w -E "$pattern" -- src include; then
+            echo 'Previously unreferenced cJSON comparison/patch API is now in use; review required'
+            exit 1
+          else
+            status=$?
+            test "$status" -eq 1
+          fi
+          if grep -q 'cJSON_Utils' CMakeLists.txt; then
+            echo 'cJSON utilities build selection requires review'
+            exit 1
+          else
+            status=$?
+            test "$status" -eq 1
+          fi
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          cat > "$tmp/json_audit.c" <<'EOF'
+          #include "cJSON.c"
+          #include <assert.h>
+          int main(void)
+          {
+              unsigned char bytes[32] = {0};
+              printbuffer p = {0};
+              p.buffer = bytes;
+              p.length = sizeof(bytes);
+              p.noalloc = true;
+              p.offset = 1;
+              assert(ensure(&p, (size_t)INT_MAX) == NULL);
+              assert(ensure(&p, (size_t)-1) == NULL);
+              assert(ensure(&p, 1) == bytes + 1);
+              p.offset = 0;
+              assert(print_string_ptr((const unsigned char*)"a\n\t\\\"b", &p));
+              assert(strcmp((const char*)bytes, "\"a\\n\\t\\\\\\\"b\"") == 0);
+              cJSON *obj = cJSON_Parse("{\"name\":\"synthetic\",\"items\":[1,2,3]}");
+              assert(obj != NULL);
+              char *render = cJSON_PrintUnformatted(obj);
+              assert(render != NULL);
+              cJSON *parsed = cJSON_Parse(render);
+              assert(parsed != NULL);
+              cJSON_Delete(parsed);
+              cJSON_free(render);
+              cJSON_Delete(obj);
+              puts("CJSON_BOUNDS_REGRESSION_PASS");
+              return 0;
+          }
+          EOF
+          gcc -std=c11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -Ithird_party/cJSON "$tmp/json_audit.c" -lm -o "$tmp/json_audit"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/json_audit"
+          gcc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -DCJSON_BYTE_LIMIT=384 -DCJSON_NODE_LIMIT=16 -DCJSON_NESTING_LIMIT=8 \
+            -Ithird_party/cJSON "$GITHUB_WORKSPACE/scripts/tests/cjson_resource_limits_audit.c" \
+            third_party/cJSON/cJSON.c -lm -o "$tmp/json_limits_audit"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/json_limits_audit"
+          echo CJSON_UNUSED_API_SOURCE_GATE_PASS
+
+      - name: Sanitized local adapter list ownership and allocation failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd '认证核心源码/esurfingclient/app'
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          cat > "$tmp/adapter_audit.c" <<'EOF'
+          #include "utils/platform/NetAdapters.c"
+          #include <assert.h>
+          char g_school_network_symbol[SCHOOL_NETWORK_SYMBOL] = "test";
+          static struct ifaddrs entries[ADAPTER_LIST_MAX + 1];
+          static struct sockaddr_in address;
+          static size_t fake_count, acquisitions, releases;
+          static bool fail_enumeration;
+          int __wrap_getifaddrs(struct ifaddrs** out)
+          {
+              *out = NULL;
+              if (fail_enumeration) return -1;
+              assert(fake_count <= ADAPTER_LIST_MAX + 1);
+              memset(entries, 0, sizeof(entries));
+              address.sin_family = AF_INET;
+              address.sin_addr.s_addr = htonl(0xc0000201u);
+              for (size_t i = 0; i < fake_count; ++i) {
+                  entries[i].ifa_name = (char*)"synthetic";
+                  entries[i].ifa_addr = (struct sockaddr*)&address;
+                  entries[i].ifa_next = i + 1 < fake_count ? &entries[i+1] : NULL;
+              }
+              if (fake_count) *out = entries;
+              ++acquisitions;
+              return 0;
+          }
+          void __wrap_freeifaddrs(struct ifaddrs* ptr)
+          {
+              assert(ptr == NULL || ptr == entries);
+              ++releases;
+          }
+          static size_t realloc_calls, fail_realloc;
+          void* __real_realloc(void*, size_t);
+          void* __wrap_realloc(void* ptr, size_t size)
+          {
+              if (++realloc_calls == fail_realloc) return NULL;
+              return __real_realloc(ptr, size);
+          }
+          static size_t calls, fail_at, live;
+          static void* test_allocate(size_t size)
+          {
+              if (++calls == fail_at) return NULL;
+              void* p = malloc(size);
+              if (p) ++live;
+              return p;
+          }
+          static void test_release(void* p)
+          {
+              if (p) { assert(live > 0); --live; free(p); }
+          }
+          static void check_json(size_t count)
+          {
+              char* json = get_adapters_json();
+              assert(json);
+              cJSON* root = cJSON_Parse(json);
+              cJSON_free(json);
+              assert(root);
+              const cJSON* rows = cJSON_GetObjectItemCaseSensitive(root, "adapters");
+              assert(cJSON_IsArray(rows));
+              assert(cJSON_GetArraySize(rows) == (int)count);
+              cJSON_Delete(root);
+              assert(acquisitions == releases);
+          }
+          int main(void)
+          {
+              fake_count = 2;
+              check_json(2);
+              fail_enumeration = true;
+              assert(get_adapters_json() == NULL);
+              fail_enumeration = false;
+              fake_count = 0;
+              check_json(0);
+              fake_count = ADAPTER_LIST_MAX;
+              realloc_calls = 0;
+              check_json(ADAPTER_LIST_MAX);
+              const size_t growth = realloc_calls;
+              /* Count only collection growth; JSON uses custom hooks below. */
+              adapter_list_t list = {0};
+              realloc_calls = 0;
+              assert(get_adapters(&list));
+              const size_t growth_only = realloc_calls;
+              assert(growth_only > 0 && growth_only <= growth);
+              adapter_list_clear(&list);
+              for (size_t i = 1; i <= growth_only; ++i) {
+                  realloc_calls = 0;
+                  fail_realloc = i;
+                  assert(get_adapters_json() == NULL);
+                  assert(acquisitions == releases);
+              }
+              fail_realloc = 0;
+              fake_count = ADAPTER_LIST_MAX + 1;
+              assert(get_adapters_json() == NULL);
+              assert(acquisitions == releases);
+              fake_count = 2;
+              cJSON_Hooks hooks = {test_allocate, test_release};
+              cJSON_InitHooks(&hooks);
+              char* json = get_adapters_json();
+              assert(json);
+              cJSON_free(json);
+              assert(live == 0);
+              const size_t total = calls;
+              assert(total > 0 && total < 1000);
+              for (size_t i = 1; i <= total; ++i) {
+                  calls = 0;
+                  fail_at = i;
+                  json = get_adapters_json();
+                  assert(json == NULL);
+                  assert(live == 0 && acquisitions == releases);
+              }
+              fail_at = 0;
+              check_json(2);
+              assert(live == 0);
+              cJSON_InitHooks(NULL);
+              printf("ADAPTER_RESOURCE_AUDIT_PASS growthFailures=%zu jsonFailures=%zu maxRows=%u\n", growth_only, total, ADAPTER_LIST_MAX);
+              return 0;
+          }
+          EOF
+          gcc -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -Iinclude -Isrc -Ithird_party "$tmp/adapter_audit.c" third_party/cJSON/cJSON.c \
+            -Wl,--wrap=getifaddrs,--wrap=freeifaddrs,--wrap=realloc -lm -o "$tmp/adapter_audit"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/adapter_audit"
+
+      - name: Sanitized traffic snapshot lifecycle and allocator failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd '认证核心源码/esurfingclient/app'
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          cat > "$tmp/traffic_audit.c" <<'EOF'
+          #include "net/NetTraffic.c"
+          #include <assert.h>
+          /* No actual adapter queries or production logger in this harness. */
+          uint8_t get_adapters_stats(adapter_stats_t* out, uint8_t max, char* id, size_t len)
+          {
+              (void)out; (void)max; (void)id; (void)len;
+              abort();
+          }
+          uint64_t get_steady_tm_ms(void) { abort(); }
+          void log_out(log_level_t level, const char* file, uint32_t line, const char* fmt, ...)
+          {
+              (void)level; (void)file; (void)line; (void)fmt;
+          }
+          static size_t calls, fail_at, live;
+          static void* test_allocate(size_t size)
+          {
+              if (++calls == fail_at) return NULL;
+              void* p = malloc(size);
+              if (p) ++live;
+              return p;
+          }
+          static void test_release(void* p)
+          {
+              if (p) {
+                  assert(live > 0);
+                  --live;
+                  free(p);
+              }
+          }
+          int main(void)
+          {
+              assert(traffic_resource_self_test());
+              /* The isolated self-test workers have been joined. Only
+               * this test process changes cJSON's process-global hooks. */
+              traffic_snapshot_t sample = {0};
+              sample.count = 2;
+              sample.timestamp = 1234;
+              strcpy(sample.rows[0].id, "test0");
+              sample.rows[0].has_rate = true;
+              sample.rows[0].down = 12;
+              sample.rows[0].up = 34;
+              strcpy(sample.rows[1].id, "test1");
+              cJSON_Hooks hooks = {test_allocate, test_release};
+              cJSON_InitHooks(&hooks);
+              char* json = render_snapshot(&sample, 0);
+              assert(json != NULL);
+              cJSON_free(json);
+              assert(live == 0);
+              const size_t total = calls;
+              assert(total > 0 && total < 1000);
+              for (size_t i = 1; i <= total; ++i) {
+                  calls = 0;
+                  fail_at = i;
+                  json = render_snapshot(&sample, 0);
+                  assert(json == NULL);
+                  assert(live == 0);
+                  assert(calls >= i);
+              }
+              calls = 0;
+              fail_at = 0;
+              json = render_snapshot(&sample, 0);
+              assert(json != NULL);
+              cJSON_free(json);
+              assert(live == 0);
+              cJSON_InitHooks(NULL);
+              printf("TRAFFIC_ALLOCATOR_FAILURE_PASS cases=%zu\n", total);
+              puts("TRAFFIC_SNAPSHOT_LIFECYCLE_PASS");
+              return 0;
+          }
+          EOF
+          gcc -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all \
+            -Iinclude -Isrc -Ithird_party "$tmp/traffic_audit.c" \
+            src/utils/sim/SimThread.c third_party/cJSON/cJSON.c -pthread -lm -o "$tmp/traffic_audit"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/traffic_audit"
+
+      - name: Optimized and sanitized offline cipher regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd '认证核心源码/esurfingclient/app'
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          cat > "$tmp/audit.c" <<'EOF'
+          #include "cipher/CipherUtils.h"
+          #include "SimEvpInternal.h"
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          extern bool aes_common_known_answer_self_test(void);
+          extern bool des_known_answer_self_test(void);
+          extern bool sm4_known_answer_self_test(void);
+          extern bool des_buffer_lifecycle_self_test(void);
+          extern bool remaining_cipher_lifecycle_self_test(void);
+          extern bool simssl_cipher_cleanup_self_test(void);
+          #ifdef CHECK_FREE
+          static void *expected_pointer;
+          static size_t expected_length;
+          static bool saw_release;
+          extern void __real_free(void*);
+          void __wrap_free(void *p)
+          {
+              if (p && p == expected_pointer)
+              {
+                  const unsigned char *bytes = p;
+                  for (size_t i = 0; i < expected_length; ++i)
+                      if (bytes[i] != 0) abort();
+                  saw_release = true;
+                  expected_pointer = NULL;
+              }
+              __real_free(p);
+          }
+          #endif
+          int main(void)
+          {
+              const unsigned char md5_expected[16] = {0x90,0x01,0x50,0x98,0x3c,0xd2,0x4f,0xb0,0xd6,0x96,0x3f,0x7d,0x28,0xe1,0x7f,0x72};
+              unsigned char digest[16] = {0};
+              simssl_md5((const unsigned char*)"abc", 3, digest);
+              if (memcmp(digest, md5_expected, sizeof(digest))) return 1;
+              simssl_secure_zero(digest, sizeof(digest));
+              size_t n = 99;
+              unsigned char padded[16];
+              memset(padded, 16, sizeof(padded));
+              unsigned char *empty = rm_pkcs7_padding(padded, sizeof(padded), &n);
+              if (!empty || n != 0) return 2;
+              s_secure_free(empty, 1);
+              unsigned char *secret = malloc(64);
+              if (!secret) return 3;
+              memset(secret, 0xa5, 64);
+          #ifdef CHECK_FREE
+              expected_pointer = secret;
+              expected_length = 64;
+          #endif
+              s_secure_free(secret, 64);
+          #ifdef CHECK_FREE
+              if (!saw_release) return 4;
+          #endif
+              if (!aes_common_known_answer_self_test() ||
+                  !des_known_answer_self_test() ||
+                  !sm4_known_answer_self_test() ||
+                  !simssl_cipher_cleanup_self_test() ||
+                  !des_buffer_lifecycle_self_test() ||
+                  !remaining_cipher_lifecycle_self_test()) return 5;
+              puts("CRYPTO_OFFLINE_AUDIT_PASS");
+              return 0;
+          }
+          EOF
+          sources=(src/cipher/CipherUtils.c src/cipher/algo/*.c src/utils/sim/SimEvp{Aes,Cipher,Des3,Md5}.c)
+          includes=(-Iinclude -Isrc/utils/sim)
+          gcc -std=c11 -O2 -DCHECK_FREE "${includes[@]}" "$tmp/audit.c" "${sources[@]}" -Wl,--wrap=free -o "$tmp/optimized"
+          "$tmp/optimized"
+          gcc -std=c11 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all "${includes[@]}" "$tmp/audit.c" "${sources[@]}" -o "$tmp/sanitized"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 "$tmp/sanitized"
+          # Observe dead-stack-buffer wiping in optimized compiler output.
+          # This is a narrow x86-64 GCC codegen gate, not an audit of every call site.
+          cat > "$tmp/wipe.c" <<'EOF'
+          #include "cipher/CipherUtils.h"
+          #include "SimEvpInternal.h"
+          __attribute__((noinline,used)) void cipher_wipe_probe(void)
+          {
+              unsigned char dead[32];
+              cipher_secure_zero(dead, sizeof(dead));
+          }
+          __attribute__((noinline,used)) void evp_wipe_probe(void)
+          {
+              unsigned char dead[32];
+              simssl_secure_zero(dead, sizeof(dead));
+          }
+          EOF
+          gcc -std=c11 -O2 "${includes[@]}" -S "$tmp/wipe.c" -o "$tmp/wipe.s"
+          for name in cipher_wipe_probe evp_wipe_probe; do
+            awk -v name="$name" '$0 == name ":" {show=1} show {print} show && /[.]size/ {exit}' "$tmp/wipe.s" > "$tmp/$name.s"
+            cat "$tmp/$name.s"
+            grep -Eq 'movb[[:space:]]+\$0,' "$tmp/$name.s"
+          done
+          echo CRYPTO_OPTIMIZED_WIPE_CODEGEN_PASS

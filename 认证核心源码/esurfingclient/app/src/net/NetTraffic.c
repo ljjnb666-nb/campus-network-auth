@@ -3,10 +3,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #include "utils/log/Logger.h"
 #include "utils/platform/PlatformUtils.h"
 #include "utils/sim/SimThread.h"
+#include "utils/time/TimeUtils.h"
 
 #include <cJSON/cJSON.h>
 
@@ -14,11 +16,13 @@
 #include <windows.h>
 /** 1601-01-01 到 1970-01-01 的 100 纳秒数 (FILETIME 转 Unix 时间用) */
 #define NET_TRAFFIC_EPOCH_DIFF 116444736000000000ULL
-typedef CRITICAL_SECTION traffic_lock_t;
+typedef SRWLOCK traffic_lock_t;
+#define TRAFFIC_LOCK_INIT SRWLOCK_INIT
 #else
 #include <pthread.h>
 #include <time.h>
 typedef pthread_mutex_t traffic_lock_t;
+#define TRAFFIC_LOCK_INIT PTHREAD_MUTEX_INITIALIZER
 #endif
 
 /** 最多同时跟踪多少块网卡 (家用/办公/路由都远到不了这个数) */
@@ -47,15 +51,17 @@ typedef struct
     double up;
 } traffic_row_t;
 
-static traffic_lock_t s_lock;
-static bool s_lock_ready;
-static volatile bool s_running;
+static traffic_lock_t s_lock = TRAFFIC_LOCK_INIT;
+static traffic_lock_t s_lifecycle = TRAFFIC_LOCK_INIT;
+static atomic_bool s_running = false;
 static sim_thread_t* s_thread;
 
 static traffic_row_t s_rows[NET_TRAFFIC_MAX];
 static uint8_t s_row_count;
 static char s_default_id[ADAPTER_ID_LEN];
 static uint64_t s_timestamp_ms;
+/* Accessed only under s_lock; changes whenever samples are invalidated. */
+static uint64_t s_generation;
 
 static traffic_prev_t s_prev[NET_TRAFFIC_MAX];
 static uint8_t s_prev_count;
@@ -64,32 +70,50 @@ static uint64_t s_prev_at_ms;
 /**
  * 平台相关的锁 / 时钟 / 睡眠收在这几个小函数里, 上面的采样逻辑就与平台无关
  */
-static void traffic_lock_init(void)
+static void acquire(traffic_lock_t* lock)
 {
 #ifdef _WIN32
-    InitializeCriticalSection(&s_lock);
+    AcquireSRWLockExclusive(lock);
 #else
-    pthread_mutex_init(&s_lock, NULL);
-#endif
-    s_lock_ready = true;
-}
-
-static void traffic_lock(void)
-{
-#ifdef _WIN32
-    EnterCriticalSection(&s_lock);
-#else
-    pthread_mutex_lock(&s_lock);
+    pthread_mutex_lock(lock);
 #endif
 }
 
-static void traffic_unlock(void)
+static void release(traffic_lock_t* lock)
 {
 #ifdef _WIN32
-    LeaveCriticalSection(&s_lock);
+    ReleaseSRWLockExclusive(lock);
 #else
-    pthread_mutex_unlock(&s_lock);
+    pthread_mutex_unlock(lock);
 #endif
+}
+
+static void traffic_lock(void) { acquire(&s_lock); }
+static void traffic_unlock(void) { release(&s_lock); }
+
+/* Called only by the lifecycle owner, with no active sampling worker. */
+static void clear_samples(void)
+{
+    traffic_lock();
+    ++s_generation;
+    s_row_count = 0;
+    s_prev_count = 0;
+    s_prev_at_ms = 0;
+    s_timestamp_ms = 0;
+    s_default_id[0] = '\0';
+    traffic_unlock();
+}
+
+static bool calculate_rate(uint64_t previous_at, uint64_t now,
+    uint64_t previous_rx, uint64_t previous_tx, uint64_t rx, uint64_t tx,
+    double* down, double* up)
+{
+    if (previous_at == 0 || now <= previous_at || rx < previous_rx || tx < previous_tx)
+        return false;
+    const uint64_t elapsed = now - previous_at;
+    *down = (double)(rx - previous_rx) * 1000.0 / (double)elapsed;
+    *up = (double)(tx - previous_tx) * 1000.0 / (double)elapsed;
+    return true;
 }
 
 /**
@@ -105,10 +129,11 @@ static uint64_t traffic_now_ms(void)
     ULARGE_INTEGER value;
     value.LowPart = file_time.dwLowDateTime;
     value.HighPart = file_time.dwHighDateTime;
+    if (value.QuadPart < NET_TRAFFIC_EPOCH_DIFF) return 0;
     return (uint64_t)((value.QuadPart - NET_TRAFFIC_EPOCH_DIFF) / 10000ULL);
 #else
     struct timespec now;
-    if (clock_gettime(CLOCK_REALTIME, &now) != 0) return 0;
+    if (clock_gettime(CLOCK_REALTIME, &now) != 0 || now.tv_sec < 0) return 0;
     return (uint64_t)now.tv_sec * 1000ULL + (uint64_t)now.tv_nsec / 1000000ULL;
 #endif
 }
@@ -135,8 +160,10 @@ static void traffic_sample(void)
 {
     adapter_stats_t frames[NET_TRAFFIC_MAX];
     char default_id[ADAPTER_ID_LEN] = {0};
-    const uint8_t count = get_adapters_stats(frames, NET_TRAFFIC_MAX, default_id, sizeof(default_id));
-    const uint64_t now = traffic_now_ms();
+    const uint8_t reported = get_adapters_stats(frames, NET_TRAFFIC_MAX, default_id, sizeof(default_id));
+    const uint8_t count = reported > NET_TRAFFIC_MAX ? NET_TRAFFIC_MAX : reported;
+    const uint64_t now = get_steady_tm_ms();
+    const uint64_t wall_now = traffic_now_ms();
 
     traffic_row_t rows[NET_TRAFFIC_MAX];
     traffic_prev_t prev[NET_TRAFFIC_MAX];
@@ -156,14 +183,10 @@ static void traffic_sample(void)
 
         for (uint8_t j = 0; j < s_prev_count; j++)
         {
-            if (strcmp(s_prev[j].id, frames[i].id) != 0) continue;
-            const uint64_t elapsed = (s_prev_at_ms != 0 && now > s_prev_at_ms) ? (now - s_prev_at_ms) : 0;
-            if (elapsed > 0 && frames[i].rx_bytes >= s_prev[j].rx_bytes && frames[i].tx_bytes >= s_prev[j].tx_bytes)
-            {
-                rows[i].has_rate = true;
-                rows[i].down = (double)(frames[i].rx_bytes - s_prev[j].rx_bytes) * 1000.0 / (double)elapsed;
-                rows[i].up = (double)(frames[i].tx_bytes - s_prev[j].tx_bytes) * 1000.0 / (double)elapsed;
-            }
+            if (strcmp(s_prev[j].id, rows[i].id) != 0) continue;
+            rows[i].has_rate = calculate_rate(s_prev_at_ms, now,
+                s_prev[j].rx_bytes, s_prev[j].tx_bytes, frames[i].rx_bytes,
+                frames[i].tx_bytes, &rows[i].down, &rows[i].up);
             break;
         }
     }
@@ -172,7 +195,7 @@ static void traffic_sample(void)
     memcpy(s_rows, rows, sizeof(traffic_row_t) * count);
     s_row_count = count;
     snprintf(s_default_id, sizeof(s_default_id), "%s", default_id);
-    s_timestamp_ms = now;
+    s_timestamp_ms = wall_now;
     memcpy(s_prev, prev, sizeof(traffic_prev_t) * count);
     s_prev_count = count;
     s_prev_at_ms = now;
@@ -182,92 +205,323 @@ static void traffic_sample(void)
 static int traffic_thread(void* arg)
 {
     (void)arg;
-    while (s_running)
+    while (atomic_load(&s_running))
     {
         traffic_sample();
         for (int i = 0; i < NET_TRAFFIC_INTERVAL_MS / NET_TRAFFIC_SLICE_MS; i++)
         {
-            if (s_running == false) return 0;
+            if (!atomic_load(&s_running)) return 0;
             traffic_sleep_ms(NET_TRAFFIC_SLICE_MS);
         }
     }
     return 0;
 }
 
+static bool start_worker(sim_thread_func worker)
+{
+    acquire(&s_lifecycle);
+    if (s_thread != NULL)
+    {
+        const bool running = atomic_load(&s_running);
+        release(&s_lifecycle);
+        return running;
+    }
+    clear_samples();
+    atomic_store(&s_running, true);
+    s_thread = sim_thread_create(worker, NULL);
+    const bool started = s_thread != NULL;
+    if (!started) atomic_store(&s_running, false);
+    release(&s_lifecycle);
+    return started;
+}
+
 bool net_traffic_start(void)
 {
-    if (s_thread != NULL) return true;
-    if (s_lock_ready == false) traffic_lock_init();
-
-    traffic_sample(); // 先采一帧: 只建立基线, 还没有速率
-    s_running = true;
-    s_thread = sim_thread_create(traffic_thread, NULL);
-    if (s_thread == NULL)
+    if (!start_worker(traffic_thread))
     {
-        s_running = false;
-        LOG_WARN("网速采样线程创建失败");
+        LOG_WARN("网速采样线程创建失败或旧线程尚未回收");
         return false;
     }
-    LOG_DEBUG("网速采样已启动 (每秒一帧)");
     return true;
+}
+
+static bool stop_worker(void)
+{
+    acquire(&s_lifecycle);
+    atomic_store(&s_running, false);
+    if (s_thread != NULL)
+    {
+        if (sim_thread_join(s_thread, NULL) != 0)
+        {
+            release(&s_lifecycle);
+            return false;
+        }
+        sim_thread_destroy(s_thread);
+        s_thread = NULL;
+    }
+    clear_samples();
+    release(&s_lifecycle);
+    return true;
+}
+
+bool net_traffic_stop_checked(void)
+{
+    return stop_worker();
 }
 
 void net_traffic_stop(void)
 {
-    if (s_thread == NULL) return;
-    s_running = false;
-    int code = 0;
-    sim_thread_join(s_thread, &code);
-    s_thread = NULL;
-    LOG_DEBUG("网速采样已停止");
+    if (!net_traffic_stop_checked()) LOG_ERROR("网速采样线程等待失败, 保留线程对象");
+}
+
+static int test_worker(void* arg)
+{
+    (void)arg;
+    while (atomic_load(&s_running)) traffic_sleep_ms(1);
+    return 0;
+}
+
+static int test_stop(void* arg)
+{
+    (void)arg;
+    return stop_worker() ? 0 : 1;
+}
+
+static bool traffic_json_self_test(void);
+static bool traffic_snapshot_lifecycle_self_test(void);
+
+bool traffic_resource_self_test(void)
+{
+    if (!traffic_json_self_test() || !traffic_snapshot_lifecycle_self_test()) return false;
+    double down = 0, up = 0;
+    if (!calculate_rate(1000, 2000, 10, 20, 1010, 2020, &down, &up) ||
+        down != 1000 || up != 2000 ||
+        calculate_rate(0, 1000, 0, 0, 10, 10, &down, &up) ||
+        calculate_rate(1000, 1000, 0, 0, 10, 10, &down, &up) ||
+        calculate_rate(2000, 1000, 0, 0, 10, 10, &down, &up) ||
+        calculate_rate(1000, 2000, 10, 10, 9, 20, &down, &up) ||
+        calculate_rate(1000, 2000, 10, 10, 20, 9, &down, &up))
+        return false;
+
+    for (int i = 0; i < 16; ++i)
+    {
+        if (!start_worker(test_worker) || !start_worker(test_worker))
+        {
+            stop_worker();
+            return false;
+        }
+        traffic_lock();
+        s_row_count = 1;
+        s_prev_count = 1;
+        s_prev_at_ms = 1000;
+        traffic_unlock();
+        sim_thread_t* one = sim_thread_create(test_stop, NULL);
+        sim_thread_t* two = sim_thread_create(test_stop, NULL);
+        int rc1 = -1, rc2 = -1;
+        if (one != NULL)
+        {
+            if (sim_thread_join(one, &rc1) != 0) abort();
+            sim_thread_destroy(one);
+        }
+        if (two != NULL)
+        {
+            if (sim_thread_join(two, &rc2) != 0) abort();
+            sim_thread_destroy(two);
+        }
+        if (!stop_worker() || rc1 != 0 || rc2 != 0 || s_thread != NULL ||
+            atomic_load(&s_running) || s_row_count != 0 || s_prev_count != 0 ||
+            s_prev_at_ms != 0) return false;
+    }
+    return true;
+}
+
+/* Snapshot ownership is independent of the sampling lock. JSON allocation
+ * and rendering must not stall the producer or return a partial document.
+ * fail_at is a per-call synthetic failure gate, never a global allocator hook. */
+typedef struct
+{
+    traffic_row_t rows[NET_TRAFFIC_MAX];
+    uint8_t count;
+    char default_id[ADAPTER_ID_LEN];
+    uint64_t timestamp;
+    uint64_t generation;
+} traffic_snapshot_t;
+
+static bool json_step(unsigned* step, unsigned fail_at)
+{
+    return ++(*step) != fail_at;
+}
+
+static char* render_snapshot(const traffic_snapshot_t* snapshot, unsigned fail_at)
+{
+    if (snapshot == NULL || snapshot->count == 0 || snapshot->count > NET_TRAFFIC_MAX) return NULL;
+    unsigned step = 0;
+    cJSON* root = NULL;
+    cJSON* adapters = NULL;
+    cJSON* item = NULL;
+    char* json = NULL;
+
+    if (!json_step(&step, fail_at) || !(root = cJSON_CreateObject())) goto cleanup;
+    if (!json_step(&step, fail_at) || !cJSON_AddNumberToObject(root, "timestamp", (double)snapshot->timestamp)) goto cleanup;
+    if (!json_step(&step, fail_at) || !cJSON_AddStringToObject(root, "defaultId", snapshot->default_id)) goto cleanup;
+    if (!json_step(&step, fail_at) || !(adapters = cJSON_CreateArray())) goto cleanup;
+    for (uint8_t i = 0; i < snapshot->count; i++)
+    {
+        const traffic_row_t* row = &snapshot->rows[i];
+        if (!json_step(&step, fail_at) || !(item = cJSON_CreateObject())) goto cleanup;
+        if (!json_step(&step, fail_at) || !cJSON_AddStringToObject(item, "id", row->id)) goto cleanup;
+        if (!json_step(&step, fail_at) || !cJSON_AddStringToObject(item, "name", row->name)) goto cleanup;
+        if (!json_step(&step, fail_at) || !cJSON_AddBoolToObject(item, "connected", row->connected)) goto cleanup;
+        if (row->has_rate)
+        {
+            if (!json_step(&step, fail_at) || !cJSON_AddNumberToObject(item, "down", row->down)) goto cleanup;
+            if (!json_step(&step, fail_at) || !cJSON_AddNumberToObject(item, "up", row->up)) goto cleanup;
+        }
+        else
+        {
+            if (!json_step(&step, fail_at) || !cJSON_AddNullToObject(item, "down")) goto cleanup;
+            if (!json_step(&step, fail_at) || !cJSON_AddNullToObject(item, "up")) goto cleanup;
+        }
+        if (!json_step(&step, fail_at) || !cJSON_AddItemToArray(adapters, item)) goto cleanup;
+        item = NULL; /* ownership transferred */
+    }
+    if (!json_step(&step, fail_at) || !cJSON_AddItemToObject(root, "adapters", adapters)) goto cleanup;
+    adapters = NULL; /* ownership transferred */
+#ifdef __APPLE__
+    if (!json_step(&step, fail_at) || !cJSON_AddBoolToObject(root, "experimental", true)) goto cleanup;
+#endif
+    if (json_step(&step, fail_at)) json = cJSON_PrintUnformatted(root);
+
+cleanup:
+    cJSON_Delete(item);
+    cJSON_Delete(adapters);
+    cJSON_Delete(root);
+    return json;
+}
+
+static bool traffic_json_self_test(void)
+{
+    traffic_snapshot_t sample = {0};
+    sample.count = 2;
+    sample.timestamp = 1234;
+    snprintf(sample.default_id, sizeof(sample.default_id), "test0");
+    snprintf(sample.rows[0].id, sizeof(sample.rows[0].id), "test0");
+    snprintf(sample.rows[0].name, sizeof(sample.rows[0].name), "synthetic");
+    sample.rows[0].connected = true;
+    sample.rows[0].has_rate = true;
+    sample.rows[0].down = 12;
+    sample.rows[0].up = 34;
+    snprintf(sample.rows[1].id, sizeof(sample.rows[1].id), "test1");
+
+    char* json = render_snapshot(&sample, 0);
+    if (json == NULL) return false;
+    cJSON* root = cJSON_Parse(json);
+    cJSON_free(json);
+    const cJSON* rows = cJSON_GetObjectItemCaseSensitive(root, "adapters");
+    const cJSON* first = cJSON_GetArrayItem(rows, 0);
+    const cJSON* second = cJSON_GetArrayItem(rows, 1);
+    const cJSON* down = cJSON_GetObjectItemCaseSensitive(first, "down");
+    const bool ok = cJSON_IsArray(rows) && cJSON_GetArraySize(rows) == 2 &&
+        cJSON_IsNumber(down) && down->valuedouble == 12 &&
+        cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(second, "down")) &&
+        cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(second, "up"));
+    cJSON_Delete(root);
+    if (!ok) return false;
+
+    /* Every construction/attachment/render gate must fail without
+     * returning partial JSON, including both row variants. */
+#ifdef __APPLE__
+    const unsigned last_step = 21;
+#else
+    const unsigned last_step = 20;
+#endif
+    for (unsigned step = 1; step <= last_step; ++step)
+    {
+        json = render_snapshot(&sample, step);
+        if (json != NULL) { cJSON_free(json); return false; }
+    }
+    sample.count = 0;
+    json = render_snapshot(&sample, 0);
+    if (json != NULL) { cJSON_free(json); return false; }
+    return true;
+}
+
+static bool capture_snapshot(traffic_snapshot_t* snapshot)
+{
+    traffic_lock();
+    if (!atomic_load(&s_running) || s_row_count == 0 || s_row_count > NET_TRAFFIC_MAX)
+    {
+        traffic_unlock();
+        return false;
+    }
+    snapshot->count = s_row_count;
+    snapshot->timestamp = s_timestamp_ms;
+    snapshot->generation = s_generation;
+    memcpy(snapshot->default_id, s_default_id, sizeof(snapshot->default_id));
+    memcpy(snapshot->rows, s_rows, sizeof(traffic_row_t) * snapshot->count);
+    traffic_unlock();
+    return true;
+}
+
+/* Revalidate after rendering. A result is current at this check, not
+ * guaranteed to remain current after the caller receives it. */
+static char* finish_snapshot(const traffic_snapshot_t* snapshot, char* json)
+{
+    if (json == NULL) return NULL;
+    traffic_lock();
+    const bool current = atomic_load(&s_running) && s_generation == snapshot->generation;
+    traffic_unlock();
+    if (!current)
+    {
+        cJSON_free(json);
+        return NULL;
+    }
+    return json;
+}
+
+static void seed_test_snapshot(void)
+{
+    traffic_lock();
+    memset(&s_rows[0], 0, sizeof(s_rows[0]));
+    snprintf(s_rows[0].id, sizeof(s_rows[0].id), "test0");
+    s_row_count = 1;
+    s_timestamp_ms = 1234;
+    traffic_unlock();
+}
+
+static bool traffic_snapshot_lifecycle_self_test(void)
+{
+    traffic_snapshot_t old;
+    traffic_snapshot_t current;
+    char* json = NULL;
+    bool ok = false;
+    if (!start_worker(test_worker)) goto cleanup;
+    if (capture_snapshot(&old)) goto cleanup; /* first sample pending */
+    seed_test_snapshot();
+    if (!capture_snapshot(&old)) goto cleanup;
+    json = render_snapshot(&old, 0);
+    if (json == NULL) goto cleanup;
+    if (!stop_worker()) goto cleanup;
+    json = finish_snapshot(&old, json);
+    if (json != NULL || capture_snapshot(&current)) goto cleanup;
+    if (!start_worker(test_worker)) goto cleanup;
+    seed_test_snapshot();
+    if (!capture_snapshot(&current)) goto cleanup;
+    json = render_snapshot(&old, 0);
+    if (json == NULL) goto cleanup;
+    json = finish_snapshot(&old, json);
+    if (json != NULL) goto cleanup;
+    json = finish_snapshot(&current, render_snapshot(&current, 0));
+    ok = json != NULL;
+cleanup:
+    cJSON_free(json);
+    if (!stop_worker()) return false;
+    return ok;
 }
 
 char* net_traffic_json(void)
 {
-    // s_row_count 的读取也放进锁内, 与采样线程的写保持一致
-    if (s_lock_ready == false) return NULL;
-
-    cJSON* root = cJSON_CreateObject();
-    if (root == NULL) return NULL;
-
-    traffic_lock();
-    if (s_row_count == 0)
-    {
-        traffic_unlock();
-        cJSON_Delete(root);
-        return NULL;
-    }
-    cJSON_AddNumberToObject(root, "timestamp", (double)s_timestamp_ms);
-    cJSON_AddStringToObject(root, "defaultId", s_default_id);
-    cJSON* adapters = cJSON_CreateArray();
-    for (uint8_t i = 0; i < s_row_count; i++)
-    {
-        cJSON* item = cJSON_CreateObject();
-        cJSON_AddStringToObject(item, "id", s_rows[i].id);
-        cJSON_AddStringToObject(item, "name", s_rows[i].name);
-        cJSON_AddBoolToObject(item, "connected", s_rows[i].connected);
-        if (s_rows[i].has_rate)
-        {
-            cJSON_AddNumberToObject(item, "down", s_rows[i].down);
-            cJSON_AddNumberToObject(item, "up", s_rows[i].up);
-        }
-        else
-        {
-            // 首帧没有速率: 给 null, 界面显示"正在采样"
-            cJSON_AddNullToObject(item, "down");
-            cJSON_AddNullToObject(item, "up");
-        }
-        cJSON_AddItemToArray(adapters, item);
-    }
-    traffic_unlock();
-
-    cJSON_AddItemToObject(root, "adapters", adapters);
-#ifdef __APPLE__
-    // macOS 的采样没有真机验证过, 页面上打个"实验性"标记
-    cJSON_AddBoolToObject(root, "experimental", true);
-#endif
-
-    char* json = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    return json;
+    traffic_snapshot_t snapshot;
+    if (!capture_snapshot(&snapshot)) return NULL;
+    return finish_snapshot(&snapshot, render_snapshot(&snapshot, 0));
 }

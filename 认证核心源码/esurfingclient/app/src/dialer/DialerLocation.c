@@ -1,3 +1,4 @@
+#include "cipher/CipherUtils.h"
 #include "DialerInternal.h"
 
 #include "net/NetClient.h"
@@ -158,7 +159,7 @@ bool get_last_location(void)
     }
 
     g_prog_status[tl_thread_idx].last_location_lock = true;
-    LOG_DEBUG("配置 %" PRIu8 " 获取认证配置 URL: %s", g_prog_status[tl_thread_idx].cfg.idx, g_prog_status[tl_thread_idx].last_location);
+    LOG_DEBUG("配置 %" PRIu8 " 已获取认证配置 URL (内容不记录)", g_prog_status[tl_thread_idx].cfg.idx);
 
     get_school_ip_symbol(); // 获取校园网特征
     return true;

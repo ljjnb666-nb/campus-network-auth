@@ -224,9 +224,10 @@ static char* zuc_encrypt(cipher_interface_t* self, const char* text)
     uint8_t* out = s_malloc(padded_len);
     zuc_state_t st; zuc_init(&st, d->key, d->iv);
     zuc_process_bytes(&st, padded, padded_len, out);
-    s_free(padded);
+    cipher_secure_zero(&st, sizeof(st));
+    s_secure_free(padded, padded_len);
     char* hex = bytes_2_hex(out, padded_len);
-    s_free(out);
+    s_secure_free(out, padded_len);
     return hex;
 }
 
@@ -240,12 +241,13 @@ static char* zuc_decrypt(cipher_interface_t* self, const char* hex)
     uint8_t* out = s_malloc(bytes_len);
     zuc_state_t st; zuc_init(&st, d->key, d->iv);
     zuc_process_bytes(&st, bytes, bytes_len, out);
-    s_free(bytes);
+    cipher_secure_zero(&st, sizeof(st));
+    s_secure_free(bytes, bytes_len);
     const size_t trimmed = trim_trailing_zeros_len(out, bytes_len);
     char* result = s_malloc(trimmed + 1);
     memcpy(result, out, trimmed);
     result[trimmed] = '\0';
-    s_free(out);
+    s_secure_free(out, bytes_len);
     return result;
 }
 
@@ -253,7 +255,7 @@ static void zuc_destroy(cipher_interface_t* self)
 {
     if(self)
     {
-        s_free(self->private_data); s_free(self);
+        s_secure_free(self->private_data, sizeof(zuc_data_t)); s_free(self);
     }
 }
 

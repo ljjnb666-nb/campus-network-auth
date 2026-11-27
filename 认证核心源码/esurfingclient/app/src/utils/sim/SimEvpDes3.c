@@ -222,6 +222,11 @@ void simssl_des3_encrypt_block(const unsigned char key[24], const unsigned char 
     des_crypt_block(k1, in, t1, 0);     /* E_K1 */
     des_crypt_block(k2, t1, t2, 1);     /* D_K2 */
     des_crypt_block(k3, t2, out, 0);    /* E_K3 */
+    simssl_secure_zero(t1, sizeof(t1));
+    simssl_secure_zero(t2, sizeof(t2));
+    simssl_secure_zero(k1, sizeof(k1));
+    simssl_secure_zero(k2, sizeof(k2));
+    simssl_secure_zero(k3, sizeof(k3));
 }
 
 void simssl_des3_decrypt_block(const unsigned char key[24], const unsigned char in[8],
@@ -237,6 +242,11 @@ void simssl_des3_decrypt_block(const unsigned char key[24], const unsigned char 
     des_crypt_block(k3, in, t1, 1);     /* D_K3 */
     des_crypt_block(k2, t1, t2, 0);     /* E_K2 */
     des_crypt_block(k1, t2, out, 1);    /* D_K1 */
+    simssl_secure_zero(t1, sizeof(t1));
+    simssl_secure_zero(t2, sizeof(t2));
+    simssl_secure_zero(k1, sizeof(k1));
+    simssl_secure_zero(k2, sizeof(k2));
+    simssl_secure_zero(k3, sizeof(k3));
 }
 
 static const EVP_CIPHER g_des_ede3_ecb = {.alg = MYSSL_ALG_DES_EDE3_ECB, .block_size = 8, .key_len = 24, .iv_len = 0, .name = "DES-EDE3-ECB"};

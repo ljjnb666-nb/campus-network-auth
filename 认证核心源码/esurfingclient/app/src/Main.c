@@ -21,6 +21,7 @@
 #endif
 
 extern void work(void);
+extern bool net_resource_self_test(void);
 
 #define ARG_CONTINUE (-1)
 
@@ -381,6 +382,26 @@ static void load_control_token_env(void)
     snprintf(g_control_token, sizeof(g_control_token), "%s", env_token);
 }
 
+/* Read exactly one bounded frame. Unlike fgets/strlen, raw NUL cannot
+ * hide a suffix or make a partial credential appear valid. Do not consume
+ * bytes after the newline: they belong to the STOP reader. */
+static bool read_ephemeral_frame(void)
+{
+    size_t length = 0;
+    int ch;
+    while ((ch = fgetc(stdin)) != EOF)
+    {
+        if (ch == 0 || length >= sizeof(g_ephemeral_input) - 1) return false;
+        g_ephemeral_input[length++] = (char)ch;
+        if (ch == '\n')
+        {
+            g_ephemeral_input[length] = '\0';
+            return true;
+        }
+    }
+    return false;
+}
+
 int main(const int argc, char *argv[])
 {
 #ifdef _WIN32
@@ -404,13 +425,23 @@ int main(const int argc, char *argv[])
     g_main_argc = argc;
     g_main_argv = argv;
 
+    // Standalone offline native regression: never reaches authentication.
+    if (argc == 2 && strcmp(argv[1], "--self-test-net-resources") == 0)
+    {
+        const bool ok = net_resource_self_test();
+        curl_global_cleanup();
+        fprintf(stderr, "%s\n", ok ? "NATIVE_NET_RESOURCE_PASS" : "NATIVE_NET_RESOURCE_FAIL");
+        return ok ? 0 : 1;
+    }
+
     // 记下启动时的父进程号: 被监管的子进程靠它判断监管者是否还活着
     record_parent_pid();
 
     /* One JSON line through a pipe, never through argv or a visible console. */
     const bool ephemeral_check = argc == 2 && strcmp(argv[1], "--ephemeral-check") == 0;
     const bool ephemeral_probe = argc == 2 && strcmp(argv[1], "--ephemeral-probe") == 0;
-    if (argc == 2 && (ephemeral_check || ephemeral_probe || strcmp(argv[1], "--ephemeral-auth") == 0))
+    const bool ephemeral_crash = argc == 2 && strcmp(argv[1], "--ephemeral-crash") == 0;
+    if (argc == 2 && (ephemeral_check || ephemeral_probe || ephemeral_crash || strcmp(argv[1], "--ephemeral-auth") == 0))
     {
 #ifdef _WIN32
         if (GetFileType(GetStdHandle(STD_INPUT_HANDLE)) != FILE_TYPE_PIPE)
@@ -422,8 +453,7 @@ int main(const int argc, char *argv[])
             fprintf(stderr, "Ephemeral mode requires JSON on a private pipe.\n");
             return 1;
         }
-        if (fgets(g_ephemeral_input, sizeof(g_ephemeral_input), stdin) == NULL ||
-            strchr(g_ephemeral_input, '\n') == NULL)
+        if (!read_ephemeral_frame())
         {
             fprintf(stderr, "Missing or oversized ephemeral input.\n");
             clear_ephemeral_secrets();
@@ -441,6 +471,19 @@ int main(const int argc, char *argv[])
             clear_ephemeral_secrets();
             fprintf(stderr, "%s\n", ok ? "EPHEMERAL_CONFIG_OK" : "EPHEMERAL_CONFIG_INVALID");
             return ok ? 0 : 1;
+        }
+        /* 离线测试钩子: 模拟"到达等待网络后核心崩溃退出"——先发 WAIT_NETWORK
+         * 让启动器记录本轮已见网络, 再以非零退出码结束, 用于桌面端验证有界
+         * 自动恢复的调度逻辑。不执行任何网络探测与真实认证。 */
+        if (ephemeral_crash)
+        {
+            fputs("EPHEMERAL_WAIT_NETWORK\n", stderr);
+            ephemeral_emit_event("wait_network", 0);
+            ephemeral_emit_event("test_crash", 3);
+            fflush(stderr);
+            sleep_ms(300, true);
+            clear_ephemeral_secrets();
+            return 3;
         }
         work();
         return 0;

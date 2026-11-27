@@ -258,7 +258,15 @@ CJSON_PUBLIC(void) cJSON_Delete(cJSON *item)
         next = item->next;
         if (!(item->type & cJSON_IsReference) && (item->child != NULL))
         {
-            cJSON_Delete(item->child);
+            /* Link the pending siblings after the owned children. Each
+             * child list is scanned once, including partially built lists. */
+            cJSON *tail = item->child;
+            while (tail->next != NULL)
+            {
+                tail = tail->next;
+            }
+            tail->next = next;
+            next = item->child;
         }
         if (!(item->type & cJSON_IsReference) && (item->valuestring != NULL))
         {
@@ -292,6 +300,7 @@ typedef struct
     size_t length;
     size_t offset;
     size_t depth; /* How deeply nested (in arrays/objects) is the input at the current offset. */
+    size_t nodes;
     internal_hooks hooks;
 } parse_buffer;
 
@@ -484,7 +493,24 @@ typedef struct
     cJSON_bool noalloc;
     cJSON_bool format; /* is this print a formatted print */
     internal_hooks hooks;
+    size_t nodes;
 } printbuffer;
+
+#define cjson_min(a, b) (((a) < (b)) ? (a) : (b))
+
+/* Read no more than the remaining budget, even for APIs given a C string. */
+static size_t bounded_string_bytes(const unsigned char *value, size_t maximum)
+{
+    size_t n;
+    for (n = 0; n < maximum; n++)
+    {
+        if (value[n] == '\0')
+        {
+            return n + 1;
+        }
+    }
+    return 0;
+}
 
 /* realloc printbuffer if necessary to have at least "needed" bytes more */
 static unsigned char* ensure(printbuffer * const p, size_t needed)
@@ -503,9 +529,10 @@ static unsigned char* ensure(printbuffer * const p, size_t needed)
         return NULL;
     }
 
-    if (needed > INT_MAX)
+    const size_t limit = cjson_min((size_t)CJSON_BYTE_LIMIT, (size_t)INT_MAX);
+    /* Bound the sum before adding, including the terminating byte. */
+    if (p->offset >= limit || needed > limit - p->offset - 1)
     {
-        /* sizes bigger than INT_MAX are currently not supported */
         return NULL;
     }
 
@@ -519,23 +546,7 @@ static unsigned char* ensure(printbuffer * const p, size_t needed)
         return NULL;
     }
 
-    /* calculate new buffer size */
-    if (needed > (INT_MAX / 2))
-    {
-        /* overflow of int, use INT_MAX if possible */
-        if (needed <= INT_MAX)
-        {
-            newsize = INT_MAX;
-        }
-        else
-        {
-            return NULL;
-        }
-    }
-    else
-    {
-        newsize = needed * 2;
-    }
+    newsize = needed > limit / 2 ? limit : needed * 2;
 
     if (p->hooks.reallocate != NULL)
     {
@@ -978,6 +989,8 @@ static cJSON_bool print_string_ptr(const unsigned char * const input, printbuffe
         return true;
     }
 
+    const size_t input_bytes = bounded_string_bytes(input, CJSON_BYTE_LIMIT);
+    if (input_bytes == 0) return false;
     /* set "flag" to 1 if something needs to be escaped */
     for (input_pointer = input; *input_pointer; input_pointer++)
     {
@@ -991,18 +1004,24 @@ static cJSON_bool print_string_ptr(const unsigned char * const input, printbuffe
             case '\r':
             case '\t':
                 /* one character escape sequence */
+                if (escape_characters >= (size_t)INT_MAX) return false;
                 escape_characters++;
                 break;
             default:
                 if (*input_pointer < 32)
                 {
                     /* UTF-16 escape sequence uXXXX */
+                    if (escape_characters > (size_t)INT_MAX - 5) return false;
                     escape_characters += 5;
                 }
                 break;
         }
     }
-    output_length = (size_t)(input_pointer - input) + escape_characters;
+    /* Keep every intermediate within the print API's supported range. */
+    const size_t input_length = input_bytes - 1;
+    const size_t limit = (size_t)INT_MAX - sizeof("\"\"");
+    if (input_length > limit || escape_characters > limit - input_length) return false;
+    output_length = input_length + escape_characters;
 
     output = ensure(output_buffer, output_length + sizeof("\"\""));
     if (output == NULL)
@@ -1137,8 +1156,7 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithOpts(const char *value, const char **return
         return NULL;
     }
 
-    /* Adding null character size due to require_null_terminated. */
-    buffer_length = strlen(value) + sizeof("");
+    buffer_length = bounded_string_bytes((const unsigned char*)value, CJSON_BYTE_LIMIT);
 
     return cJSON_ParseWithLengthOpts(value, buffer_length, return_parse_end, require_null_terminated);
 }
@@ -1146,14 +1164,14 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithOpts(const char *value, const char **return
 /* Parse an object - create a new root, and populate. */
 CJSON_PUBLIC(cJSON *) cJSON_ParseWithLengthOpts(const char *value, size_t buffer_length, const char **return_parse_end, cJSON_bool require_null_terminated)
 {
-    parse_buffer buffer = { 0, 0, 0, 0, { 0, 0, 0 } };
+    parse_buffer buffer = { 0 };
     cJSON *item = NULL;
 
     /* reset error position */
     global_error.json = NULL;
     global_error.position = 0;
 
-    if (value == NULL || 0 == buffer_length)
+    if (value == NULL || buffer_length == 0 || buffer_length > CJSON_BYTE_LIMIT)
     {
         goto fail;
     }
@@ -1234,11 +1252,9 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithLength(const char *value, size_t buffer_len
     return cJSON_ParseWithLengthOpts(value, buffer_length, 0, 0);
 }
 
-#define cjson_min(a, b) (((a) < (b)) ? (a) : (b))
-
 static unsigned char *print(const cJSON * const item, cJSON_bool format, const internal_hooks * const hooks)
 {
-    static const size_t default_buffer_size = 256;
+    const size_t default_buffer_size = cjson_min(256, CJSON_BYTE_LIMIT);
     printbuffer buffer[1];
     unsigned char *printed = NULL;
 
@@ -1316,9 +1332,9 @@ CJSON_PUBLIC(char *) cJSON_PrintUnformatted(const cJSON *item)
 
 CJSON_PUBLIC(char *) cJSON_PrintBuffered(const cJSON *item, int prebuffer, cJSON_bool fmt)
 {
-    printbuffer p = { 0, 0, 0, 0, 0, 0, { 0, 0, 0 } };
+    printbuffer p = { 0 };
 
-    if (prebuffer < 0)
+    if (prebuffer < 0 || (size_t)prebuffer > CJSON_BYTE_LIMIT)
     {
         return NULL;
     }
@@ -1347,7 +1363,7 @@ CJSON_PUBLIC(char *) cJSON_PrintBuffered(const cJSON *item, int prebuffer, cJSON
 
 CJSON_PUBLIC(cJSON_bool) cJSON_PrintPreallocated(cJSON *item, char *buffer, const int length, const cJSON_bool format)
 {
-    printbuffer p = { 0, 0, 0, 0, 0, 0, { 0, 0, 0 } };
+    printbuffer p = { 0 };
 
     if ((length < 0) || (buffer == NULL))
     {
@@ -1367,11 +1383,13 @@ CJSON_PUBLIC(cJSON_bool) cJSON_PrintPreallocated(cJSON *item, char *buffer, cons
 /* Parser core - when encountering text, process appropriately. */
 static cJSON_bool parse_value(cJSON * const item, parse_buffer * const input_buffer)
 {
-    if ((input_buffer == NULL) || (input_buffer->content == NULL))
+    if ((input_buffer == NULL) || (input_buffer->content == NULL) ||
+        (input_buffer->nodes >= CJSON_NODE_LIMIT))
     {
         return false; /* no input */
     }
 
+    input_buffer->nodes++;
     /* parse the different types of values */
     /* null */
     if (can_read(input_buffer, 4) && (strncmp((const char*)buffer_at_offset(input_buffer), "null", 4) == 0))
@@ -1424,11 +1442,12 @@ static cJSON_bool print_value(const cJSON * const item, printbuffer * const outp
 {
     unsigned char *output = NULL;
 
-    if ((item == NULL) || (output_buffer == NULL))
+    if ((item == NULL) || (output_buffer == NULL) || (output_buffer->nodes >= CJSON_NODE_LIMIT))
     {
         return false;
     }
 
+    output_buffer->nodes++;
     switch ((item->type) & 0xFF)
     {
         case cJSON_NULL:
@@ -1469,7 +1488,8 @@ static cJSON_bool print_value(const cJSON * const item, printbuffer * const outp
                 return false;
             }
 
-            raw_length = strlen(item->valuestring) + sizeof("");
+            raw_length = bounded_string_bytes((const unsigned char*)item->valuestring, CJSON_BYTE_LIMIT);
+            if (raw_length == 0) return false;
             output = ensure(output_buffer, raw_length);
             if (output == NULL)
             {
@@ -2781,6 +2801,25 @@ CJSON_PUBLIC(cJSON *) cJSON_CreateStringArray(const char *const *strings, int co
 /* Duplication */
 cJSON * cJSON_Duplicate_rec(const cJSON *item, size_t depth, cJSON_bool recurse);
 
+typedef struct
+{
+    size_t nodes;
+    size_t string_bytes;
+} duplicate_budget;
+
+static char *duplicate_owned_string(const char *source, duplicate_budget *budget)
+{
+    const size_t size = bounded_string_bytes((const unsigned char*)source, budget->string_bytes);
+    if (size == 0) return NULL;
+    char *copy = (char*)global_hooks.allocate(size);
+    if (copy == NULL) return NULL;
+    memcpy(copy, source, size);
+    budget->string_bytes -= size;
+    return copy;
+}
+
+static cJSON *duplicate_with_budget(const cJSON *item, size_t depth, cJSON_bool recurse, duplicate_budget *budget);
+
 CJSON_PUBLIC(cJSON *) cJSON_Duplicate(const cJSON *item, cJSON_bool recurse)
 {
     return cJSON_Duplicate_rec(item, 0, recurse );
@@ -2788,16 +2827,23 @@ CJSON_PUBLIC(cJSON *) cJSON_Duplicate(const cJSON *item, cJSON_bool recurse)
 
 cJSON * cJSON_Duplicate_rec(const cJSON *item, size_t depth, cJSON_bool recurse)
 {
+    duplicate_budget budget = { CJSON_NODE_LIMIT, CJSON_BYTE_LIMIT };
+    return duplicate_with_budget(item, depth, recurse, &budget);
+}
+
+static cJSON *duplicate_with_budget(const cJSON *item, size_t depth, cJSON_bool recurse, duplicate_budget *budget)
+{
     cJSON *newitem = NULL;
     cJSON *child = NULL;
     cJSON *next = NULL;
     cJSON *newchild = NULL;
 
     /* Bail on bad ptr */
-    if (!item)
+    if (!item || budget->nodes == 0)
     {
         goto fail;
     }
+    budget->nodes--;
     /* Create new item */
     newitem = cJSON_New_Item(&global_hooks);
     if (!newitem)
@@ -2810,7 +2856,7 @@ cJSON * cJSON_Duplicate_rec(const cJSON *item, size_t depth, cJSON_bool recurse)
     newitem->valuedouble = item->valuedouble;
     if (item->valuestring)
     {
-        newitem->valuestring = (char*)cJSON_strdup((unsigned char*)item->valuestring, &global_hooks);
+        newitem->valuestring = duplicate_owned_string(item->valuestring, budget);
         if (!newitem->valuestring)
         {
             goto fail;
@@ -2818,7 +2864,7 @@ cJSON * cJSON_Duplicate_rec(const cJSON *item, size_t depth, cJSON_bool recurse)
     }
     if (item->string)
     {
-        newitem->string = (item->type&cJSON_StringIsConst) ? item->string : (char*)cJSON_strdup((unsigned char*)item->string, &global_hooks);
+        newitem->string = (item->type&cJSON_StringIsConst) ? item->string : duplicate_owned_string(item->string, budget);
         if (!newitem->string)
         {
             goto fail;
@@ -2833,10 +2879,10 @@ cJSON * cJSON_Duplicate_rec(const cJSON *item, size_t depth, cJSON_bool recurse)
     child = item->child;
     while (child != NULL)
     {
-        if(depth >= CJSON_CIRCULAR_LIMIT) {
+        if (depth >= cjson_min(CJSON_CIRCULAR_LIMIT, CJSON_NESTING_LIMIT)) {
             goto fail;
         }
-        newchild = cJSON_Duplicate_rec(child, depth + 1, true); /* Duplicate (with recurse) each item in the ->next chain */
+        newchild = duplicate_with_budget(child, depth + 1, true, budget);
         if (!newchild)
         {
             goto fail;

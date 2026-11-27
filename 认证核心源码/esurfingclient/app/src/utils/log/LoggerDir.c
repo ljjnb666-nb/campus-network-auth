@@ -1,4 +1,5 @@
 #include "LoggerInternal.h"
+#include "LogArchiveFile.h"
 
 #include "utils/platform/PlatformUtils.h"
 #include "utils/text/TextUtils.h"
@@ -14,32 +15,13 @@ static const char s_default_base[] = "/var/log/esurfing";
  * @param path 路径
  * @return 是否是目录
  */
+#ifndef _WIN32
 static bool is_dir(const char* path)
 {
-#ifdef _WIN32
-    const DWORD attr = GetFileAttributesA(path);
-    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
-#else
     struct stat st;
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode) != 0;
+}
 #endif
-}
-
-#ifdef _WIN32
-
-/**
- * @brief 跳过一个路径组件 (跳到它后面的分隔符之后)
- * @param p 当前位置
- * @return 下一个组件的位置 (已经到结尾时返回指向结尾的指针)
- */
-static char* skip_component(char* p)
-{
-    while (*p != '\0' && *p != SEP) p++;
-    if (*p == SEP) p++;
-    return p;
-}
-
-#endif // _WIN32
 
 /**
  * @brief 逐级创建目录 (Posix 的 mkdir -p / Windows 的逐级 CreateDirectory)
@@ -51,63 +33,16 @@ static char* skip_component(char* p)
  */
 static bool make_dirs(const char* path)
 {
+#ifdef _WIN32
+    log_pinned_path checked = {0};
+    bool ok = log_pin_directories(path, &checked, true);
+    log_release_path(&checked);
+    return ok;
+#else
     char buf[LOG_PATH_MAX];
     const int len = snprintf(buf, sizeof(buf), "%s", path);
     if (len <= 0 || (size_t)len >= sizeof(buf)) return false;
 
-#ifdef _WIN32
-    // 配置里可能写成 D:/esurfing/logs 这种混合分隔符, 先统一成 Windows 形式
-    for (char* p = buf; *p != '\0'; p++)
-    {
-        if (*p == '/') *p = SEP;
-    }
-
-    /**
-     * 先把"不能拿去建目录"的前缀跳过, 只把后面的部分逐级建出来
-     *
-     * 前缀有三种形状:
-     *   D:\...                盘符
-     *   \\服务器\共享名\...   UNC (\\ 与 \\服务器 这两段都不能单独建)
-     *   \\?\D:\... \\?\UNC\…  扩展长度前缀 (路径超过 260 字符要用它, 这里同样支持)
-     */
-    char* p = buf;
-    if (p[0] == SEP && p[1] == SEP)
-    {
-        p += 2;
-        if (p[0] == '?' && p[1] == SEP)
-        {
-            p += 2;
-            // \\?\UNC\服务器\共享名\... : UNC 那一段也不能单独建
-            if (str_iprefix(p, "UNC") && p[3] == SEP)
-            {
-                p = skip_component(skip_component(p + 4));
-            }
-            // \\?\D:\... : 剩下的就是普通盘符路径
-            if (isalpha((unsigned char)p[0]) != 0 && p[1] == ':') p += 2;
-        }
-        else
-        {
-            // \\服务器\共享名\... : 这两段由系统管着, 建不得
-            p = skip_component(skip_component(p));
-        }
-    }
-    else if (isalpha((unsigned char)p[0]) != 0 && p[1] == ':')
-    {
-        p += 2;
-    }
-
-    // 前缀后面紧跟的那个分隔符属于前缀, 从它【之后】的组件开始逐级建
-    if (*p == SEP) p++;
-
-    for (; *p != '\0'; p++)
-    {
-        if (*p != SEP) continue;
-        *p = '\0';
-        if (!CreateDirectoryA(buf, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return false;
-        *p = SEP;
-    }
-    if (!CreateDirectoryA(buf, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) return false;
-#else
     for (char* p = buf + 1; *p != '\0'; p++)
     {
         if (*p != SEP) continue;
@@ -117,13 +52,13 @@ static bool make_dirs(const char* path)
     }
     // 日志目录本身收紧为仅属主可用 (中间层目录可能被共享, 维持 0755)
     if (mkdir(buf, 0700) != 0 && errno != EEXIST) return false;
-#endif
 
     /**
      * 上面每一级都是"存在就跳过" (EEXIST / ERROR_ALREADY_EXISTS),
      * 而路径上摆着一个同名【文件】时同样会走到这里, 所以最后再确认一次是不是目录
      */
     return is_dir(buf);
+#endif
 }
 
 /**
@@ -337,9 +272,11 @@ bool set_logger_dir(const char* dir)
      * 日志系统还没起来 (init_logger 之前调用): 记下目录就够了, init 的时候自然会用上。
      * 不特判的话这里会先把日志文件打开, init_logger 再打开一次 —— 白漏一个句柄
      */
+    logger_lock();
     if (g_logger_inited == false)
     {
         snprintf(g_cfg_log_dir, sizeof(g_cfg_log_dir), "%s", dir);
+        logger_unlock();
         return true;
     }
 
@@ -351,6 +288,7 @@ bool set_logger_dir(const char* dir)
     if (strcmp(new_dir, g_logger_cfg.log_dir) == 0)
     {
         snprintf(g_cfg_log_dir, sizeof(g_cfg_log_dir), "%s", dir);
+        logger_unlock();
         return true;
     }
 
@@ -362,20 +300,17 @@ bool set_logger_dir(const char* dir)
      * 就会拿到"日志系统未打开"并丢掉那一行。持锁之后那些写日志的线程只是等
      * 一小会儿, 醒来看到的已经是新目录的句柄了
      *
-     * ⚠️ 唯一绕开这把锁的是 log_raw_line() (看门狗卡死时用的), 它在换目录的这一
-     *    瞬间可能读到已经被关掉的旧句柄 —— 与 rotate() 里那个窗口是同一类问题,
-     *    那边同样是明知故犯 (见文件开头关于互斥的说明)
+     * 看门狗 log_raw_line() 仅尝试获取同一把锁，忙时省略本次文件诊断。
      */
-    logger_lock();
-
     char old_dir[LOG_PATH_MAX];
     char old_file[LOG_PATH_MAX];
     snprintf(old_dir, sizeof(old_dir), "%s", g_logger_cfg.log_dir);
     snprintf(old_file, sizeof(old_file), "%s", g_logger_cfg.log_file);
 
+    bool close_ok = false;
     if (g_logger_cfg.file_handle != NULL)
     {
-        fclose(g_logger_cfg.file_handle);
+        close_ok = fclose(g_logger_cfg.file_handle) == 0;
         g_logger_cfg.file_handle = NULL;
     }
 
@@ -390,10 +325,12 @@ bool set_logger_dir(const char* dir)
      * 共写同一份 run.log, 覆盖就等于把别的进程的日志丢掉。
      * 搬不动也无所谓 (跨文件系统时 rename 会失败), 顶多启动那几行留在原地
      */
-    const bool old_file_exists = (strlen(g_logger_cfg.log_file) > 0) && path_exists(g_logger_cfg.log_file);
-    if (old_file_exists && path_exists(new_file) == false && strcmp(g_logger_cfg.log_file, new_file) != 0)
+    if (close_ok && path_exists(new_file) == false && strcmp(old_file, new_file) != 0)
     {
-        rename(g_logger_cfg.log_file, new_file);
+        /* The earlier existence check is only advisory: another process
+         * may create the destination before this call. Never replace it. */
+        (void)archive_log_without_replace(old_file, new_file,
+            g_logger_cfg.file_dev, g_logger_cfg.file_ino);
     }
 
     snprintf(g_logger_cfg.log_dir, sizeof(g_logger_cfg.log_dir), "%s", new_dir);
@@ -408,16 +345,18 @@ bool set_logger_dir(const char* dir)
          */
         snprintf(g_logger_cfg.log_dir, sizeof(g_logger_cfg.log_dir), "%s", old_dir);
         snprintf(g_logger_cfg.log_file, sizeof(g_logger_cfg.log_file), "%s", old_file);
-        open_log_file();
+        const bool restored = open_log_file();
 
         logger_unlock();
-        LOG_WARN("无法打开日志文件 %s, 继续使用 %s", new_file, old_dir);
+        if (restored)
+            LOG_WARN("无法打开日志文件 %s, 继续使用 %s", new_file, old_dir);
+        else
+            fprintf(stderr, "[ERROR] 无法打开新旧日志文件，日志文件输出不可用\n");
         return false;
     }
 
-    logger_unlock();
-
     snprintf(g_cfg_log_dir, sizeof(g_cfg_log_dir), "%s", dir);
+    logger_unlock();
 
     LOG_INFO("日志目录已改为 %s", new_dir);
     return true;

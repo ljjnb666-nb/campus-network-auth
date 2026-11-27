@@ -23,7 +23,7 @@ static char* mod_xtea_encrypt(cipher_interface_t* self, const char* text)
     if (!padded) return NULL;
     uint8_t* output = s_malloc(padded_len);
     memcpy(output, padded, padded_len);
-    s_free(padded);
+    s_secure_free(padded, padded_len);
     for (size_t i = 0; i < padded_len; i += 8)
     {
         uint32_t v0 = bytes_2_uint32_be(output + i);
@@ -35,7 +35,7 @@ static char* mod_xtea_encrypt(cipher_interface_t* self, const char* text)
         uint32_2_bytes_be(v1, output + i + 4);
     }
     char* hex = bytes_2_hex(output, padded_len);
-    s_free(output);
+    s_secure_free(output, padded_len);
     return hex;
 }
 
@@ -44,16 +44,16 @@ static char* mod_xtea_decrypt(cipher_interface_t* self, const char* hex)
     if (!self || !hex) return NULL;
     mod_xtea_data_t* data = self->private_data;
     if (!data) return NULL;
-    size_t bytes_len;
+    size_t bytes_len = 0;
     uint8_t* bytes = hex_2_bytes(hex, &bytes_len);
     if (!bytes || (bytes_len % 8) != 0)
     {
-        s_free(bytes);
+        s_secure_free(bytes, bytes_len);
         return NULL;
     }
     uint8_t* output = s_malloc(bytes_len);
     memcpy(output, bytes, bytes_len);
-    s_free(bytes);
+    s_secure_free(bytes, bytes_len);
     for (size_t i = 0; i < bytes_len; i += 8)
     {
         uint32_t v0 = bytes_2_uint32_be(output + i);
@@ -64,11 +64,12 @@ static char* mod_xtea_decrypt(cipher_interface_t* self, const char* hex)
         uint32_2_bytes_be(v0, output + i);
         uint32_2_bytes_be(v1, output + i + 4);
     }
+    const size_t allocation_len = bytes_len;
     while (bytes_len > 0 && output[bytes_len - 1] == 0) bytes_len--;
     char* result = s_malloc(bytes_len + 1);
     memcpy(result, output, bytes_len);
     result[bytes_len] = '\0';
-    s_free(output);
+    s_secure_free(output, allocation_len);
     return result;
 }
 
@@ -76,7 +77,7 @@ static void mod_xtea_destroy(cipher_interface_t* self)
 {
     if (self)
     {
-        s_free(self->private_data);
+        s_secure_free(self->private_data, sizeof(mod_xtea_data_t));
         s_free(self);
     }
 }

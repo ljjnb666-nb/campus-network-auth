@@ -179,12 +179,19 @@ target_compile_options(ESurfingClient PRIVATE -Os)
 
 target_compile_options(ESurfingClient PRIVATE -Wall -Wextra -Wno-unused-parameter)
 
-if (__OPENWRT__)
+if (WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    # Keep absolute checkout paths out of __FILE__ and the compiled core.
+    # The logger still receives the same basename for each source file.
+    target_compile_options(ESurfingClient PRIVATE "-fmacro-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=.")
+    # Strip at link time. A separate PE strip pass can rewrite the COFF
+    # timestamp after ld has suppressed it. Keep the final file unmodified.
+    target_link_options(ESurfingClient PRIVATE -Wl,--strip-all -Wl,--no-insert-timestamp)
+elseif (__OPENWRT__)
     set_target_properties(ESurfingClient PROPERTIES LINK_FLAGS "-Wl,--strip-all")
 else ()
     add_custom_command(TARGET ESurfingClient POST_BUILD
         COMMAND ${CMAKE_STRIP} "$<TARGET_FILE:ESurfingClient>"
-)
+    )
 endif ()
 
 install(TARGETS ESurfingClient RUNTIME DESTINATION bin)

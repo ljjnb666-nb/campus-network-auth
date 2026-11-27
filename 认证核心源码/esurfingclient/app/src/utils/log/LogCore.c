@@ -49,6 +49,13 @@ void logger_unlock(void)
 {
     LeaveCriticalSection(&s_log_lock);
 }
+
+static bool logger_try_lock(void)
+{
+    if (!InitOnceExecuteOnce(&s_log_lock_once, log_lock_init, NULL, NULL))
+        return false;
+    return TryEnterCriticalSection(&s_log_lock) != 0;
+}
 #else
 static pthread_mutex_t s_log_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -60,6 +67,11 @@ void logger_lock(void)
 void logger_unlock(void)
 {
     pthread_mutex_unlock(&s_log_lock);
+}
+
+static bool logger_try_lock(void)
+{
+    return pthread_mutex_trylock(&s_log_lock) == 0;
 }
 #endif
 
@@ -152,7 +164,8 @@ static void write_2_file(const char* msg, const size_t len)
  * @brief 不走常规日志流程, 直接往日志文件写一行
  *
  * 给看门狗用: 判定卡死时主线程可能正卡在某个调用里, 而常规的 log_out 会去
- * 判断轮转、可能还要建目录之类, 不该在那种状态下做。这里只做一次 write, 失败也不管。
+ * 判断轮转、可能还要建目录之类, 不该在那种状态下做。仅尝试获取日志锁，不等待；
+ * 不能获取时省略本次文件诊断，避免访问已释放句柄。
  *
  * 格式与常规日志保持一致 (时间戳 / 进程标识 / 线程 / 级别 / 文件:行), 这样
  * 解析日志的工具不用为它开特例。
@@ -160,8 +173,6 @@ static void write_2_file(const char* msg, const size_t len)
  */
 void log_raw_line(const char* text)
 {
-    if (g_query_mode || !g_logger_cfg.file_handle) return;
-
     char ts[32];
     char proc_str[64];
     char line_buf[LOG_LINE_MAX];
@@ -175,7 +186,13 @@ void log_raw_line(const char* text)
     if (len <= 0) return;
 
     const size_t size = ((size_t)len < sizeof(line_buf)) ? (size_t)len : sizeof(line_buf) - 1;
-    write_2_file(line_buf, size);
+    /* Never wait for a potentially stuck logger owner or use a stream
+     * concurrently closed by rotation, cleanup or directory changes.
+     * This best-effort diagnostic is omitted if the lock is busy. */
+    if (!logger_try_lock()) return;
+    if (!g_query_mode && g_logger_cfg.file_handle)
+        write_2_file(line_buf, size);
+    logger_unlock();
 }
 
 void log_out(const log_level_t level, const char* file, const uint32_t line, const char* fmt, ...)

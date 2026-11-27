@@ -1,4 +1,5 @@
 #include "LoggerInternal.h"
+#include "LogArchiveFile.h"
 
 #include "core/States.h"
 
@@ -33,15 +34,15 @@ bool init_logger(void)
         fprintf(stderr, "[ERROR] 无法准备日志目录\n");
         return false;
     }
-    const uint16_t len = snprintf(g_logger_cfg.log_file, sizeof(g_logger_cfg.log_file), "%s%c%s", safe_str(g_logger_cfg.log_dir), SEP, g_log_file_name);
-    if ((size_t)len >= sizeof(g_logger_cfg.log_file))
+    const int len = snprintf(g_logger_cfg.log_file, sizeof(g_logger_cfg.log_file), "%s%c%s", safe_str(g_logger_cfg.log_dir), SEP, g_log_file_name);
+    if (len < 0 || (size_t)len >= sizeof(g_logger_cfg.log_file))
     {
         fprintf(stderr, "[ERROR] 日志文件路径太长 (最大 %zu)\n", sizeof(g_logger_cfg.log_file));
         return false;
     }
     if (open_log_file() == false)
     {
-        fprintf(stderr, "[ERROR] 无法打开日志文件 %s, 如果是 Linux 系统请使用 sudo 运行程序\n", g_logger_cfg.log_file);
+        fprintf(stderr, "[ERROR] 无法打开日志文件 %s, 请检查日志目录和访问权限\n", g_logger_cfg.log_file);
         return false;
     }
     LOG_DEBUG("日志系统初始化完成");
@@ -80,7 +81,7 @@ void clean_logger(void)
         fprintf(stderr, "[ERROR] 日志系统未启动\n");
         return;
     }
-    fclose(g_logger_cfg.file_handle);
+    const bool close_ok = fclose(g_logger_cfg.file_handle) == 0;
     g_logger_cfg.file_handle = NULL;
 
     // 收尾之后句柄已经没了, 再 set_logger_dir 只该记下目录, 不该去搬文件
@@ -101,8 +102,22 @@ void clean_logger(void)
     char cur_tm[32];
     get_fmt_time(cur_tm, FILE_FORMAT);
     char new_file_name[LOG_PATH_MAX];
-    snprintf(new_file_name, sizeof(new_file_name), "%s%c%s.log", safe_str(g_logger_cfg.log_dir), SEP, safe_str(cur_tm));
-    rename(g_logger_cfg.log_file, new_file_name);
+    const int archive_len = snprintf(new_file_name, sizeof(new_file_name), "%s%c%s.log", safe_str(g_logger_cfg.log_dir), SEP, safe_str(cur_tm));
+    if (archive_len < 0 || (size_t)archive_len >= sizeof(new_file_name))
+    {
+        logger_unlock();
+        fprintf(stderr, "[ERROR] 日志归档路径无效，保留原文件\n");
+        return;
+    }
+    if (!close_ok)
+    {
+        logger_unlock();
+        fprintf(stderr, "[ERROR] 日志关闭结果未确认，跳过退出归档\n");
+        return;
+    }
+    if (!archive_log_without_replace(g_logger_cfg.log_file, new_file_name,
+        g_logger_cfg.file_dev, g_logger_cfg.file_ino))
+        fprintf(stderr, "[ERROR] 日志归档失败，未确认归档成功\n");
 
     logger_unlock();
 }

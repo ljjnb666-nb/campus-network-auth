@@ -1,3 +1,4 @@
+#include "cipher/CipherUtils.h"
 #include "DialerInternal.h"
 
 #include "net/NetClient.h"
@@ -86,14 +87,49 @@ bool init_session(void)
     }
 }
 
+/* Session-owned state only. Never load and restore external request flags:
+ * a scheduler request arriving during logout must survive cleanup. */
+static void clear_session_status(runtime_status_t* status)
+{
+    atomic_store(&status->is_initialized, false);
+    atomic_store(&status->is_authed, false);
+    status->last_error_kind = 0;
+    status->last_error_at = 0;
+    memset(status->last_error_code, 0, sizeof(status->last_error_code));
+    memset(status->last_sub_error, 0, sizeof(status->last_sub_error));
+    memset(status->last_error_msg, 0, sizeof(status->last_error_msg));
+    atomic_store(&status->is_running, false);
+}
+
+bool session_status_self_test(void)
+{
+    runtime_status_t status = {0};
+    runtime_status_init(&status);
+    for (unsigned int flags = 0; flags < 4; ++flags)
+    {
+        atomic_store(&status.is_initialized, true);
+        atomic_store(&status.is_running, true);
+        atomic_store(&status.is_authed, true);
+        atomic_store(&status.is_need_reauth, (flags & 1) != 0);
+        atomic_store(&status.is_time_disabled, (flags & 2) != 0);
+        status.last_error_kind = 1;
+        status.last_error_at = 123;
+        memset(status.last_error_msg, 'x', sizeof(status.last_error_msg));
+        memset(status.last_error_code, 'x', sizeof(status.last_error_code));
+        memset(status.last_sub_error, 'x', sizeof(status.last_sub_error));
+        clear_session_status(&status);
+        if (status.is_initialized || status.is_running || status.is_authed ||
+            status.is_need_reauth != ((flags & 1) != 0) ||
+            status.is_time_disabled != ((flags & 2) != 0) ||
+            status.last_error_kind != 0 || status.last_error_at != 0 ||
+            status.last_error_msg[0] || status.last_error_code[0] ||
+            status.last_sub_error[0]) return false;
+    }
+    return true;
+}
+
 void clean(void)
 {
-    // 时间控制禁用状态是跨线程的“外部闸门”，线程退出清理时不能把它清掉，
-    // 否则线程守护会立刻把刚下线的账号重新拉起来。
-    const bool time_disabled = g_prog_status[tl_thread_idx].runtime_status.is_time_disabled;
-    // 同理: 控制通道/时间控制线程随时可能置“需要重认证”, 清理期间到达的请求不能被吞掉
-    const bool need_reauth = g_prog_status[tl_thread_idx].runtime_status.is_need_reauth;
-
     if (g_prog_status[tl_thread_idx].runtime_status.is_initialized == true) // 如果已经初始化会话, 则进入
     {
         if (g_prog_status[tl_thread_idx].runtime_status.is_authed == true) // 如果已经认证, 则进入
@@ -105,10 +141,10 @@ void clean(void)
         }
         clean_session(); // 清理会话
     }
-    memset(&g_prog_status[tl_thread_idx].auth_cfg, 0, sizeof(auth_cfg_t)); // 清除 auth_cfg 的内容, 并置零
-    memset(&g_prog_status[tl_thread_idx].runtime_status, 0, sizeof(runtime_status_t)); // 清除 runtime_status 的内容, 并置零
-    g_prog_status[tl_thread_idx].runtime_status.is_time_disabled = time_disabled; // 恢复时间控制禁用状态
-    g_prog_status[tl_thread_idx].runtime_status.is_need_reauth = need_reauth; // 恢复清理期间收到的重认证请求
+    /* A partially initialized session may also own a cipher. */
+    if (g_prog_status[tl_thread_idx].auth_cfg.cipher) destroy_cipher_factory();
+    cipher_secure_zero(&g_prog_status[tl_thread_idx].auth_cfg, sizeof(auth_cfg_t));
+    clear_session_status(&g_prog_status[tl_thread_idx].runtime_status);
 }
 
 void reset(void)

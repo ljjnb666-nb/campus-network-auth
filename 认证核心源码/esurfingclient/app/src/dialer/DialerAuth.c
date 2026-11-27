@@ -1,3 +1,4 @@
+#include "cipher/CipherUtils.h"
 #include "DialerInternal.h"
 
 #include "dialer/DialerClient.h"
@@ -23,10 +24,27 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #ifndef __OPENWRT__
 #include "control/Control.h"
 #endif
+
+/**
+ * 结构化事件（协议 v1）：与旧 EPHEMERAL_* 令牌并行输出到 stderr，供桌面端
+ * 解析、诊断归档与前向兼容。字段：v=协议版本, pid=进程标识, event=事件类型,
+ * code=相关退出码/错误码（失败时为 dialer_app 返回值）, error=错误分类。
+ *
+ * 上游认证协议无法可靠区分失败原因（凭据错误/账号限制/服务器异常/超时），
+ * 按审计规则 error 一律如实填 "unknown"，不编造分类。
+ */
+void ephemeral_emit_event(const char* event, const int code)
+{
+    if (!g_ephemeral_auth) return;
+    fprintf(stderr, "EPHEMERAL_EVENT {\"v\":1,\"pid\":%ld,\"event\":\"%s\",\"code\":%d,\"error\":\"unknown\"}\n",
+            (long)getpid(), event, code);
+    fflush(stderr);
+}
 
 /* A caller-owned anonymous stdin pipe is also the sole stop channel. */
 static int ephemeral_stop_reader(void* unused)
@@ -38,9 +56,12 @@ static int ephemeral_stop_reader(void* unused)
     {
         if (!discard && (strcmp(command, "STOP\n") == 0 || strcmp(command, "STOP\r\n") == 0))
         {
-            request_ephemeral_stop();
+            // Publish acceptance before releasing the stop condition; otherwise the
+            // probe can exit between setting the flag and flushing its ACK.
             fputs("EPHEMERAL_STOP_ACCEPTED\n", stderr);
             fflush(stderr);
+            ephemeral_emit_event("stop_accepted", 0);
+            request_ephemeral_stop();
             return 0;
         }
         discard = strchr(command, '\n') == NULL;
@@ -101,9 +122,9 @@ AuthStatus auth(void)
             if (raw_ticket_url != NULL)
             {
                 portal_ticket_url = clean_cdata(raw_ticket_url);
-                free(raw_ticket_url);
+                s_secure_free_string(raw_ticket_url);
             }
-            free(portal_config);
+            s_secure_free_string(portal_config);
         }
     }
     else
@@ -126,11 +147,11 @@ AuthStatus auth(void)
     if (client_ip == NULL)
     {
         LOG_ERROR("提取 Client IP 失败");
-        free(portal_ticket_url);
+        s_secure_free_string(portal_ticket_url);
         return AUTH_FAILED;
     }
     snprintf(cfg->client_ip, IP_LEN, "%s", safe_str(client_ip));
-    free(client_ip);
+    s_secure_free_string(client_ip);
     LOG_DEBUG("Client IP: %s", cfg->client_ip);
 
     char* ac_ip = extract_url_param(g_prog_status[tl_thread_idx].last_location, "wlanacip");
@@ -141,21 +162,21 @@ AuthStatus auth(void)
     if (ac_ip == NULL)
     {
         LOG_ERROR("提取 AC IP 失败");
-        free(portal_ticket_url);
+        s_secure_free_string(portal_ticket_url);
         return AUTH_FAILED;
     }
     snprintf(cfg->ac_ip, IP_LEN, "%s", safe_str(ac_ip));
-    free(ac_ip);
+    s_secure_free_string(ac_ip);
     LOG_DEBUG("AC IP: %s", cfg->ac_ip);
 
-    free(portal_ticket_url);
+    s_secure_free_string(portal_ticket_url);
 
     /**
      * 4. ticket_url: 带 wlanuserip / wlanacip, 不带 portal_node
      */
     snprintf(cfg->ticket_url, TICKET_URL_LEN, "%s/ticket.cgi?wlanuserip=%s&wlanacip=%s",
              server, cfg->client_ip, cfg->ac_ip);
-    LOG_DEBUG("Ticket URL: %s", cfg->ticket_url);
+    LOG_DEBUG("Ticket URL 已构造 (查询参数不记录)");
 
     /**
      * 5. gwip: 报文里要填默认网关地址 (不是 AC 地址), 取不到就留空
@@ -214,7 +235,7 @@ AuthStatus auth(void)
 
     g_prog_status[tl_thread_idx].runtime_status.is_authed = true;
     LOG_INFO("已认证登录");
-    if (g_ephemeral_auth) { fputs("EPHEMERAL_AUTH_OK\n", stderr); fflush(stderr); }
+    if (g_ephemeral_auth) { fputs("EPHEMERAL_AUTH_OK\n", stderr); fflush(stderr); ephemeral_emit_event("auth_ok", 0); }
 
     /**
      * 把"以后要登出所需要的现场"存下来。
@@ -294,6 +315,7 @@ int work_auth(void)
         {
             fputs("EPHEMERAL_STOP_CHANNEL_FAILED\n", stderr);
             fflush(stderr);
+            ephemeral_emit_event("stop_channel_failed", 0);
             shut(1);
         }
         sim_thread_destroy(reader);
@@ -303,8 +325,12 @@ int work_auth(void)
     if (g_ephemeral_probe)
     {
         g_prog_status[0].runtime_status.is_running = true;
-        sleep_ms(8000, true);
-        shut(0);
+        // The offline probe is independent of production reauth/keep-alive flags.
+        // Explicit readiness and a bounded STOP/EOF wait, never network activity.
+        ephemeral_emit_event("probe_ready", 0);
+        for (unsigned int i = 0; i < 300 && !stop_requested(); ++i)
+            sleep_ms(100, false);
+        shut(stop_requested() ? 0 : 4);
     }
 
     /**
@@ -389,23 +415,20 @@ int work_auth(void)
          */
         if (network_ready == false)
         {
-            if (g_ephemeral_auth) { fputs("EPHEMERAL_WAIT_NETWORK\n", stderr); fflush(stderr); }
+            if (g_ephemeral_auth) { fputs("EPHEMERAL_WAIT_NETWORK\n", stderr); fflush(stderr); ephemeral_emit_event("wait_network", 0); }
             const WaitResult wait_result = wait_need_auth();
 
-            if (wait_result == WAIT_RETRY_EXHAUSTED) shut(1);
+            if (wait_result == WAIT_RETRY_EXHAUSTED) { ephemeral_emit_event("network_retry_exhausted", 1); shut(1); }
             if (wait_result == WAIT_EXIT) break;
             if (wait_result == WAIT_TIME_CLOSED) continue;
 
-            /**
-             * Web 端请求"应用新配置": 还会在等网络的时候把配置重新读一遍 ——
-             * 配置里若已经没有本实例负责的账号, load_cfg 会失败, 进程退出交给
-             * 外部监管者 (与下面认证线程跑完那一轮的处置一致)
-             */
+            /* Never replace account storage while scheduler/control readers
+             * may still hold references. Managed auth processes restart. */
             if (wait_result == WAIT_CFG_CHANGED)
             {
-                LOG_INFO("配置已变更, 重新加载");
-                if (load_cfg() == false) shut(1);
-                continue;
+                LOG_INFO("配置已变更, 结束本实例并由监管者重新加载");
+                shut(0);
+                return 0;
             }
 
             network_ready = true;
@@ -419,25 +442,25 @@ int work_auth(void)
          */
         if (g_need_exit || stop_requested()) break;
 
+        if (auth_code == DIALER_EXIT_NETWORK_EXHAUSTED && g_ephemeral_auth)
+        {
+            ephemeral_emit_event("network_retry_exhausted", DIALER_EXIT_NETWORK_EXHAUSTED);
+            return auth_code;
+        }
         if (auth_code != 0)
         {
-            if (g_ephemeral_auth) { fputs("EPHEMERAL_AUTH_FAILED\n", stderr); fflush(stderr); }
+            // A generic runtime failure does not prove credential rejection.
+            if (g_ephemeral_auth) ephemeral_emit_event("core_failed", auth_code);
             LOG_ERROR("配置 %" PRIu8 " 认证失败, 进程退出, 由外部监管者重新拉起", g_prog_status[0].cfg.idx);
             return auth_code;
         }
 
-        /**
-         * 兜底: 配置只在启动时读取 (网页上的"保存并应用"已改为重启进程),
-         * 所以这里正常情况下不会命中; 若将来有别的路径把 g_cfg_loaded 置假,
-         * 重新加载失败就退出, 由监管者按 respawn 策略处理
-         */
-        if (g_cfg_loaded == false)
+        /* Same lifetime rule for the fallback configuration-invalid path. */
+        if (!g_cfg_loaded)
         {
-            LOG_INFO("配置已变更, 重新加载");
-            if (load_cfg() == false) shut(1);
-
-            network_ready = false; // 换过配置后重新做网络检测
-            continue;
+            LOG_INFO("配置已变更, 结束本实例并由监管者重新加载");
+            shut(0);
+            return 0;
         }
 
         LOG_DEBUG("配置 %" PRIu8 " 需要重新认证, 重新开始认证流程", g_prog_status[0].cfg.idx);
