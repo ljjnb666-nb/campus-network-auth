@@ -289,6 +289,7 @@ static RunStatus run(void)
 
                 s_login_ms[0] = 0;
                 s_login_ms[1] = 0;
+                ephemeral_emit_event("auth_retry_wait", 35);
                 (void)wait_auth_retry(35); // 服务端锁定 30 分钟, 多等 5 分钟避开卡点
                 return RUN_SUCCESS;
             }
@@ -345,6 +346,7 @@ static RunStatus run(void)
                 LOG_WARN("配置 %" PRIu8 " 将在 %" PRIu64 " 分钟后重试 (第 %" PRIu8 " 次失败, 不设上限, 重启或退出可立即打断)",
                     g_prog_status[tl_thread_idx].cfg.idx, wait_minutes, retry_auth);
                 if (retry_auth < UINT8_MAX) retry_auth++;
+                ephemeral_emit_event("auth_retry_wait", (int)wait_minutes);
             }
 
             if (wait_auth_retry(wait_minutes) == false)

@@ -700,6 +700,7 @@ internal static class Program
                 case "network_online": case "network_required": case "network_unknown": case "auth_start": case "probe_ready":
                     return code == 0 ? ev : null;
                 case "auth_failed": case "core_failed": return code != 0 ? ev : null;
+                case "auth_retry_wait": return code > 0 && code <= 35 ? ev + ":" + code.ToString(System.Globalization.CultureInfo.InvariantCulture) : null;
                 case "network_retry_exhausted": return code == 1 || code == 2 ? ev : null;
                 case "test_crash": return code == 3 ? ev : null;
                 case "exit": return ev;
@@ -1075,6 +1076,9 @@ internal static class Program
             && ParseCoreEvent(valid.Replace("\"v\":1", "\"v\":2"), 42) == null
             && ParseCoreEvent(valid.Replace("unknown", "secret"), 42) == null
             && ParseCoreEvent(valid.Replace("auth_ok", "secret"), 42) == null
+            && ParseCoreEvent(valid.Replace("auth_ok", "auth_retry_wait"), 42) == null
+            && ParseCoreEvent(valid.Replace("auth_ok", "auth_retry_wait").Replace("\"code\":0", "\"code\":3"), 42) == "auth_retry_wait:3"
+            && ParseCoreEvent(valid.Replace("auth_ok", "auth_retry_wait").Replace("\"code\":0", "\"code\":36"), 42) == null
             && ParseCoreEvent(valid.Replace("\"code\":0", "\"code\":\"0\""), 42) == null
             && ParseCoreEvent(valid + new string('x', 512), 42) == null
             && ParseCoreEvent("EPHEMERAL_AUTH_OK", 42) == null && BoundedReaderInvariants();
@@ -4171,6 +4175,12 @@ internal static class Program
                     var next = state.Auth == ConnectionStates.AuthState.Authenticated || state.Auth == ConnectionStates.AuthState.AuthenticatedBySession
                         ? ConnectionStates.AuthState.Reauthenticating : ConnectionStates.AuthState.Authenticating;
                     SetAuthState(next, "正在认证……", ToneBusy, true);
+                    return;
+                }
+                const string retryWaitPrefix = "auth_retry_wait:";
+                if (token.StartsWith(retryWaitPrefix, StringComparison.Ordinal))
+                {
+                    SetStatus("暂未完成认证，预计 " + token.Substring(retryWaitPrefix.Length) + " 分钟后自动重试。", ToneWarn);
                     return;
                 }
                 if (token == "auth_ok")
